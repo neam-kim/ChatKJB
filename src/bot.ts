@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { Bot, InlineKeyboard } from "grammy";
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
@@ -133,9 +135,88 @@ export function createBot(config: AppConfig, store: StateStore) {
     await next();
   });
 
+  async function downloadFile(fileId: string, filename: string): Promise<string> {
+    const file = await bot.api.getFile(fileId);
+    const filePath = file.file_path;
+    if (!filePath) throw new Error("Telegram이 파일 경로를 제공하지 않습니다 (20MB 초과?).");
+    await mkdir(config.fileInboxDir, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const safe = filename.replace(/[^\w가-힣.-]/g, "_").slice(0, 80);
+    const dest = join(config.fileInboxDir, `${timestamp}_${safe}`);
+    const url = `https://api.telegram.org/file/bot${config.telegramBotToken}/${filePath}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`다운로드 실패: ${response.status}`);
+    await writeFile(dest, Buffer.from(await response.arrayBuffer()));
+    return dest;
+  }
+
+  async function handleFile(
+    ctx: { message?: { message_thread_id?: number; caption?: string }; reply: (text: string) => Promise<unknown> },
+    fileId: string,
+    filename: string,
+    fileType: string,
+    caption: string | undefined
+  ): Promise<void> {
+    const topicId = (ctx.message as { message_thread_id?: number } | undefined)?.message_thread_id;
+    const pendingKey = pendingStartKey(config.allowedUserId, topicId);
+
+    let savedPath: string;
+    try {
+      savedPath = await downloadFile(fileId, filename);
+    } catch (error) {
+      await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`파일 다운로드 실패: ${safeErrorMessage(error)}`);
+      return;
+    }
+
+    const parts = ["[첨부 파일]", `종류: ${fileType}`, `파일명: ${filename}`, `저장 경로: ${savedPath}`];
+    if (caption) parts.push(`캡션: ${caption}`);
+    const fileMessage = parts.join("\n");
+
+    if (pendingProjectPaths.has(pendingKey)) {
+      await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`파일 저장: ${savedPath}\n경로 추가 중에는 텍스트로 절대경로를 입력하세요.`);
+      return;
+    }
+
+    const existing = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (existing && await permissions.handleTextInput(existing.id, fileMessage)) {
+      await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`파일 저장: ${savedPath}\n승인 대기 중인 세션에 전달했습니다.`);
+      return;
+    }
+
+    const pending = pendingStarts.get(pendingKey);
+    if (pending) {
+      pendingStarts.delete(pendingKey);
+      const title = topicTitle(pending.project.name, caption || filename);
+      const newTopicId = await transport.createTopic(config.chatId, title);
+      const session = sessions.createSession(
+        pending.project, config.chatId, newTopicId, title,
+        fileMessage, pending.resumeSessionId, pending.forkSession ?? false
+      );
+      await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
+      return;
+    }
+
+    if (!existing) {
+      await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`파일 저장: ${savedPath}\n/new로 새 세션을 시작하거나 세션 토픽에서 전송하세요.`);
+      return;
+    }
+
+    if (sessions.isActive(existing.id)) {
+      sessions.steer(existing.id, fileMessage);
+      await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`파일 저장: ${savedPath}\n실행 중인 세션에 전달했습니다.`);
+      return;
+    }
+
+    if (!sessions.resume(existing, fileMessage)) {
+      await (ctx as { reply: (text: string) => Promise<unknown> }).reply("이 세션은 이미 실행 중이거나 Claude 세션 ID가 없습니다.");
+      return;
+    }
+    await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`파일 저장: ${savedPath}\n파일 정보로 후속 작업을 시작했습니다.`);
+  }
+
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /diff, /delete 사용"
+      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /diff, /upload, /delete 사용"
     );
   });
 
@@ -503,6 +584,26 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.answerCallbackQuery({ text: answer });
   });
 
+  bot.command("upload", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!topicId || !session) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const inputPath = ctx.match.trim();
+    if (!inputPath) {
+      await ctx.reply("보낼 파일 경로를 입력하세요.\n예: /upload output/result.pdf");
+      return;
+    }
+    const filePath = isAbsolute(inputPath) ? inputPath : join(session.cwd, inputPath);
+    try {
+      await transport.sendFile(config.chatId, topicId, filePath);
+    } catch (error) {
+      await ctx.reply(`파일 전송 실패: ${safeErrorMessage(error)}`);
+    }
+  });
+
   bot.on("message:text", async (ctx) => {
     const topicId = ctx.message.message_thread_id;
     const pendingKey = pendingStartKey(config.allowedUserId, topicId);
@@ -559,6 +660,47 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     await ctx.reply("후속 작업을 시작했습니다.");
+  });
+
+  bot.on("message:photo", async (ctx) => {
+    const photo = ctx.message.photo.at(-1)!;
+    await handleFile(ctx, photo.file_id, `photo_${photo.file_unique_id}.jpg`, "사진", ctx.message.caption);
+  });
+
+  bot.on("message:document", async (ctx) => {
+    const doc = ctx.message.document;
+    await handleFile(ctx, doc.file_id, doc.file_name ?? `document_${doc.file_unique_id}`, "문서", ctx.message.caption);
+  });
+
+  bot.on("message:audio", async (ctx) => {
+    const audio = ctx.message.audio;
+    await handleFile(ctx, audio.file_id, audio.file_name ?? `audio_${audio.file_unique_id}.mp3`, "오디오", ctx.message.caption);
+  });
+
+  bot.on("message:voice", async (ctx) => {
+    const voice = ctx.message.voice;
+    await handleFile(ctx, voice.file_id, `voice_${voice.file_unique_id}.ogg`, "음성 메시지", ctx.message.caption);
+  });
+
+  bot.on("message:video", async (ctx) => {
+    const video = ctx.message.video;
+    await handleFile(ctx, video.file_id, video.file_name ?? `video_${video.file_unique_id}.mp4`, "동영상", ctx.message.caption);
+  });
+
+  bot.on("message:video_note", async (ctx) => {
+    const note = ctx.message.video_note;
+    await handleFile(ctx, note.file_id, `video_note_${note.file_unique_id}.mp4`, "원형 동영상", undefined);
+  });
+
+  bot.on("message:animation", async (ctx) => {
+    const anim = ctx.message.animation;
+    await handleFile(ctx, anim.file_id, anim.file_name ?? `animation_${anim.file_unique_id}.mp4`, "애니메이션/GIF", ctx.message.caption);
+  });
+
+  bot.on("message:sticker", async (ctx) => {
+    const sticker = ctx.message.sticker;
+    const ext = sticker.is_animated ? ".tgs" : sticker.is_video ? ".webm" : ".webp";
+    await handleFile(ctx, sticker.file_id, `sticker_${sticker.file_unique_id}${ext}`, "스티커", undefined);
   });
 
   bot.catch((error) => {

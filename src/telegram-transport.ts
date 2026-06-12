@@ -100,4 +100,20 @@ export class TelegramTransport implements MessageTransport {
       ...(caption ? { caption } : {})
     }));
   }
+
+  async sendChatAction(chatId: number, topicId: number, action: string): Promise<void> {
+    await this.call(() => this.api.sendChatAction(chatId, action as "typing", {
+      message_thread_id: topicId
+    }));
+  }
+
+  async sendFile(chatId: number, topicId: number, filePath: string, caption?: string): Promise<void> {
+    const { createReadStream } = await import("node:fs");
+    const { basename } = await import("node:path");
+    await this.call(() => this.api.sendDocument(
+      chatId,
+      new InputFile(createReadStream(filePath), basename(filePath)),
+      { message_thread_id: topicId, ...(caption ? { caption } : {}) }
+    ));
+  }
 }

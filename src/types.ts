@@ -72,4 +72,6 @@ export interface MessageTransport {
   renameTopic(chatId: number, topicId: number, title: string): Promise<void>;
   deleteTopic(chatId: number, topicId: number): Promise<void>;
   sendDocument(chatId: number, topicId: number, filename: string, content: string, caption?: string): Promise<void>;
+  sendChatAction(chatId: number, topicId: number, action: string): Promise<void>;
+  sendFile(chatId: number, topicId: number, filePath: string, caption?: string): Promise<void>;
 }

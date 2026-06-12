@@ -33,6 +33,7 @@ const environmentSchema = z.object({
   LONG_RUNNING_MCP_SERVERS: z.string().default("codex,obsidian"),
   TURN_IDLE_TIMEOUT_MINUTES: z.coerce.number().int().min(1).default(35),
   CLAUDE_MEMORY_DIR: z.string().default("~/.claude/memory"),
+  FILE_INBOX_DIR: z.string().default("~/.claude/channels/telegram/inbox"),
   CLAUDE_CODE_EXECUTABLE: z.string().optional()
 });
 
@@ -188,6 +189,7 @@ export async function loadConfig() {
     projectsPath,
     projects,
     claudeMemoryDir: absolutePath(env.CLAUDE_MEMORY_DIR),
+    fileInboxDir: absolutePath(env.FILE_INBOX_DIR),
     approvalTimeoutMs: env.APPROVAL_TIMEOUT_MINUTES * 60_000,
     statusDebounceMs: env.STATUS_DEBOUNCE_MS,
     mcpToolTimeoutMs: env.MCP_TOOL_TIMEOUT_SECONDS * 1000,

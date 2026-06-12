@@ -46,6 +46,10 @@ class FakeTransport implements MessageTransport {
   async deleteTopic(): Promise<void> {}
 
   async sendDocument(): Promise<void> {}
+
+  async sendChatAction(): Promise<void> {}
+
+  async sendFile(): Promise<void> {}
 }
 
 const cleanup: Array<{ store: StateStore; directory: string }> = [];

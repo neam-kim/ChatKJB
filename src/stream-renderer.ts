@@ -27,6 +27,7 @@ export class StreamRenderer {
   private statusMessageId: number | null = null;
   private timer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private typingTimer: NodeJS.Timeout | null = null;
   private lastRendered = "";
   private readonly sentTexts = new Set<string>();
   private usageSnapshot: UsageSnapshot | null;
@@ -52,6 +53,10 @@ export class StreamRenderer {
       this.heartbeatTimer = setInterval(() => {
         void this.flush();
       }, StreamRenderer.heartbeatMs);
+      void this.transport.sendChatAction(this.session.chatId, this.session.topicId, "typing").catch(() => undefined);
+      this.typingTimer = setInterval(() => {
+        void this.transport.sendChatAction(this.session.chatId, this.session.topicId, "typing").catch(() => undefined);
+      }, 4000);
     }
   }
 
@@ -86,8 +91,10 @@ export class StreamRenderer {
   dispose(): void {
     if (this.timer) clearTimeout(this.timer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.typingTimer) clearInterval(this.typingTimer);
     this.timer = null;
     this.heartbeatTimer = null;
+    this.typingTimer = null;
   }
 
   async finish(
