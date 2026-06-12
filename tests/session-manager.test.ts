@@ -6,9 +6,11 @@ import { PermissionBroker } from "../src/permission-broker.js";
 import {
   buildClaudeEnvironment,
   buildCompactCommand,
+  buildMemoryPrompt,
   buildUserMessage,
   loadProjectInstructions,
   MessageQueue,
+  resultSummary,
   SessionManager,
   StreamingTextCollector
 } from "../src/session-manager.js";
@@ -116,6 +118,18 @@ describe("streaming output", () => {
       }
     })).toBeNull();
   });
+
+  it("does not resend a successful result after assistant text was delivered", () => {
+    const result = {
+      type: "result",
+      subtype: "success",
+      result: "이미 스트리밍된 최종 답변",
+      session_id: "session"
+    } as Parameters<typeof resultSummary>[0];
+
+    expect(resultSummary(result, true)).toBe("");
+    expect(resultSummary(result, false)).toBe("이미 스트리밍된 최종 답변");
+  });
 });
 
 describe("compact command", () => {
@@ -124,6 +138,17 @@ describe("compact command", () => {
     expect(buildCompactCommand("  인증   변경 사항 중심  ")).toBe(
       "/compact 인증 변경 사항 중심"
     );
+  });
+});
+
+describe("memory command", () => {
+  it("builds a conservative explicit memory update request", () => {
+    expect(buildMemoryPrompt()).toContain("[EXPLICIT_MEMORY_UPDATE]");
+    expect(buildMemoryPrompt()).toContain("현재 세션 전체");
+    expect(buildMemoryPrompt("  사용자   승인 규칙 중심  ")).toContain(
+      "사용자가 지정한 저장 초점: 사용자 승인 규칙 중심"
+    );
+    expect(buildMemoryPrompt("token")).toContain("비밀정보, 자격증명은 저장하지 않는다");
   });
 });
 

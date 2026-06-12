@@ -28,6 +28,7 @@ export class StreamRenderer {
   private timer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private lastRendered = "";
+  private readonly sentTexts = new Set<string>();
   private usageSnapshot: UsageSnapshot | null;
   private finished = false;
 
@@ -68,6 +69,9 @@ export class StreamRenderer {
   async text(text: string): Promise<void> {
     const clean = text.trim();
     if (!clean) return;
+    const key = clean.replace(/\s+/g, " ");
+    if (this.sentTexts.has(key)) return;
+    this.sentTexts.add(key);
     for (const part of chunks(clean)) {
       await this.transport.sendText(this.session.chatId, this.session.topicId, part);
     }

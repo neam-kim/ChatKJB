@@ -6,7 +6,7 @@ Telegram Forum Topic 하나를 Claude Agent SDK 세션 하나에 연결하는 Ma
 
 - `/new` 프로젝트 선택 후 새 토픽과 Claude 세션 생성
 - 토픽의 일반 메시지를 기존 Claude 세션으로 `resume`
-- `/addp`, `/steer`, `/next`, `/fork`, `/stop`, `/compact`, `/mode`, `/status`, `/doctor`, `/plan`, `/sessions`, `/usage`, `/projects`, `/diff`, `/delete`
+- `/addp`, `/steer`, `/next`, `/fork`, `/stop`, `/compact`, `/memory`, `/mode`, `/status`, `/doctor`, `/plan`, `/sessions`, `/usage`, `/projects`, `/diff`, `/delete`
 - 실행 중 메시지 스티어링과 현재 작업 뒤 후속 작업 예약
 - 일반 MCP 60초 타임아웃 및 최대 3회 순차 재시도
 - Codex MCP 30분 타임아웃 및 60초 주기 장기 실행 상태 알림
@@ -123,6 +123,8 @@ Telegram의 `/doctor`는 OAuth 토큰 형식, launchd 등록 상태, MCP 실행 
 Claude가 중요한 단계에서 출력하는 짧은 진행 요약은 텍스트 블록이 완성되는 즉시 개별 Telegram 메시지로 보낸다. 내부 thinking 원문과 토큰 단위 delta는 보내지 않으며, 스트림 뒤에 도착하는 완성 메시지와 동일한 내용은 중복 전송하지 않는다.
 
 Claude Code는 컨텍스트 한도에 가까워지면 자동 압축한다. 토픽의 작업이 끝난 상태에서 `/compact`를 실행하면 즉시 수동 압축하며, `/compact 인증 변경 사항과 남은 테스트 중심`처럼 뒤에 보존 초점을 지정할 수 있다. 실행 중인 작업과 동시에 압축하지 않는다.
+
+토픽의 작업이 끝난 상태에서 `/memory`를 실행하면 해당 Claude 세션에서 장기적으로 유효한 사용자 선호, 결정, 반복 사용 가능한 프로젝트 지식만 선별해 전역 메모리에 기록한다. `/memory 승인 정책과 메모리 규칙 중심`처럼 저장 초점을 지정할 수 있다. 명령 실행 자체를 명시적 저장 승인으로 간주하며, 기존 메모리를 먼저 읽어 중복을 피하고 일시적 상태·추측·비밀정보는 저장하지 않는다. 실행 중인 작업과 동시에 기록하지 않는다.
 
 실행 중 메시지는 명령으로 구분한다.
 

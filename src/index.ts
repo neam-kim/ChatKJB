@@ -24,6 +24,7 @@ async function main(): Promise<void> {
     { command: "stop", description: "현재 토픽 작업 중단" },
     { command: "fork", description: "현재 세션 분기" },
     { command: "compact", description: "현재 세션 컨텍스트 압축" },
+    { command: "memory", description: "현재 세션을 전역 메모리에 기록" },
     { command: "mode", description: "권한 모드 확인 또는 변경" },
     { command: "diff", description: "프로젝트 git diff 요약" },
     { command: "delete", description: "토픽과 로컬 세션 삭제" }

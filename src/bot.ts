@@ -5,7 +5,7 @@ import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { addProject, resolveProject, type AppConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { PermissionBroker } from "./permission-broker.js";
-import { SessionManager } from "./session-manager.js";
+import { buildMemoryPrompt, SessionManager } from "./session-manager.js";
 import { StateStore } from "./store.js";
 import { safeErrorMessage, TelegramTransport } from "./telegram-transport.js";
 import type { ProjectConfig, SessionRecord } from "./types.js";
@@ -135,7 +135,7 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /mode, /diff, /delete 사용"
+      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /diff, /delete 사용"
     );
   });
 
@@ -366,6 +366,28 @@ export function createBot(config: AppConfig, store: StateStore) {
       ctx.match.trim()
         ? `컨텍스트 압축을 시작했습니다.\n보존 초점: ${ctx.match.trim().slice(0, 500)}`
         : "컨텍스트 압축을 시작했습니다."
+    );
+  });
+
+  bot.command("memory", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.reply("기록할 세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    if (!session.sdkSessionId) {
+      await ctx.reply("아직 검토할 Claude 세션 문맥이 없습니다.");
+      return;
+    }
+    if (!sessions.resume(session, buildMemoryPrompt(ctx.match))) {
+      await ctx.reply("현재 작업이 실행 중입니다. 완료하거나 /stop으로 중단한 뒤 메모리를 기록하세요.");
+      return;
+    }
+    await ctx.reply(
+      ctx.match.trim()
+        ? `전역 메모리 업데이트를 시작했습니다.\n저장 초점: ${ctx.match.trim().slice(0, 1000)}`
+        : "현재 세션에서 장기적으로 유효한 내용을 선별해 전역 메모리에 기록합니다."
     );
   });
 

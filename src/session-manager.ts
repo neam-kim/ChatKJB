@@ -154,6 +154,33 @@ export function buildCompactCommand(focus?: string): string {
   return clean ? `/compact ${clean}` : "/compact";
 }
 
+export function buildMemoryPrompt(focus?: string): string {
+  const clean = focus?.replace(/\s+/g, " ").trim().slice(0, 1000);
+  const scope = clean
+    ? `사용자가 지정한 저장 초점: ${clean}`
+    : "현재 세션 전체에서 앞으로도 반복해서 유용할 내용을 검토한다.";
+  return [
+    "[EXPLICIT_MEMORY_UPDATE]",
+    "사용자가 /memory 명령으로 전역 장기 메모리 업데이트를 명시적으로 승인했다.",
+    scope,
+    "메모리는 시스템 프롬프트에 지정된 전역 메모리 디렉터리에만 기록한다.",
+    "기존 MEMORY.md와 관련 메모리 파일을 먼저 읽고, 중복 없이 최소 범위로 갱신한다.",
+    "일시적인 작업 상태, 이미 끝난 세부 절차, 추측, 비밀정보, 자격증명은 저장하지 않는다.",
+    "새 사실을 발명하지 말고 현재 대화에서 확인된 사용자 선호, 결정, 반복 사용 가능한 프로젝트 지식만 기록한다.",
+    "이 명령문 자체는 메모리 내용으로 저장하지 않는다.",
+    "완료 후 변경한 메모리 파일과 저장한 핵심 내용을 짧게 보고한다."
+  ].join("\n");
+}
+
+export function resultSummary(
+  message: SDKMessage,
+  hasDeliveredAssistantText: boolean
+): string {
+  if (message.type !== "result") return "";
+  if (message.subtype === "success" && hasDeliveredAssistantText) return "";
+  return resultText(message);
+}
+
 export function loadProjectInstructions(cwd: string): string {
   const sections: string[] = [];
   for (const filename of ["CLAUDE.md", "AGENTS.md"]) {
@@ -475,6 +502,7 @@ export class SessionManager {
     let idleWatchdog: NodeJS.Timeout | undefined;
     const streamingText = new StreamingTextCollector();
     const streamedAssistantTexts: string[] = [];
+    let hasDeliveredAssistantText = false;
 
     try {
       await this.safeRename(session, `[RUNNING] ${session.title}`);
@@ -634,6 +662,7 @@ export class SessionManager {
         if (completedStreamText) {
           streamedAssistantTexts.push(completedStreamText);
           await renderer.text(completedStreamText);
+          hasDeliveredAssistantText = true;
         }
         if (message.type === "system" && message.subtype === "init") {
           sdkSessionId = message.session_id;
@@ -681,6 +710,7 @@ export class SessionManager {
               streamedAssistantTexts.splice(streamedIndex, 1);
             } else {
               await renderer.text(block.text);
+              hasDeliveredAssistantText = true;
             }
           }
         }
@@ -705,7 +735,7 @@ export class SessionManager {
               finalStatus,
               request.operation === "compact" && compactSummary
                 ? compactSummary
-                : resultText(message).trim() === lastAssistantText ? "" : resultText(message)
+                : resultSummary(message, hasDeliveredAssistantText)
             );
           } else {
             renderer.note(`예약 메시지 ${run.pendingTurns}개 처리 대기`);
