@@ -46,7 +46,7 @@ const projectSchema = z.object({
     "project alias may contain letters, numbers, spaces, periods, underscores, and hyphens"
   )).optional(),
   cwd: z.string().min(1),
-  defaultMode: z.enum(["default", "acceptEdits", "plan", "dontAsk", "auto"]).default("default")
+  defaultMode: z.enum(["default", "acceptEdits", "plan", "dontAsk", "auto"]).default("auto")
 });
 
 function normalizeProject(project: z.infer<typeof projectSchema>): ProjectConfig {
@@ -157,7 +157,7 @@ export async function addProject(
   const project = normalizeProject(projectSchema.parse({
     name: uniqueProjectName(cwd, projects),
     cwd,
-    defaultMode: "default"
+    defaultMode: "auto"
   }));
   const updated = [...projects, project];
   validateUniqueProjects(updated);

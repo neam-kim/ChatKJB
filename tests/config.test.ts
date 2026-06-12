@@ -104,7 +104,7 @@ describe("project configuration", () => {
     expect(project).toEqual({
       name: "Sample Project",
       cwd: realpathSync(added),
-      defaultMode: "default"
+      defaultMode: "auto"
     });
     expect(JSON.parse(readFileSync(projectsPath, "utf8"))).toHaveLength(2);
   });

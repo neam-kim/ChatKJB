@@ -85,7 +85,7 @@ cp projects.example.json projects.json
     "name": "normal-work",
     "aliases": ["normal", "work"],
     "cwd": "/absolute/project/path",
-    "defaultMode": "default"
+    "defaultMode": "auto"
   }
 ]
 ```
@@ -162,12 +162,17 @@ launchctl bootout gui/$(id -u)/com.local.telegram-claude-orchestrator
 
 로그는 `data/stdout.log`와 `data/stderr.log`에 기록된다.
 
+## 권한 정책
+
+- 기본 프로젝트 모드는 `auto`다. Claude의 권한 분류기가 일반적인 파일 편집과 명령 실행을 자동 판단하고, 위험하거나 불확실한 작업만 Telegram 승인을 요청한다.
+- 토픽에서 `/mode default`로 보수적 승인 방식, `/mode acceptEdits`로 파일 편집 자동 허용, `/mode auto`로 자동 판단 방식으로 바꿀 수 있다.
+
 ## 안전 정책
 
 - 읽기 도구 `Read`, `Glob`, `Grep`, `WebSearch`만 기본 자동 허용한다. `WebFetch`는 URL별 승인을 거친다.
 - 사용자·프로젝트·로컬 Claude 설정의 사전 승인 규칙은 로드하지 않는다.
 - 루트 `CLAUDE.md`와 `AGENTS.md`는 지침으로만 읽으며 도구 권한을 부여하지 않는다.
-- 파일 변경과 명령 실행은 Telegram 승인을 거친다.
+- `auto` 모드에서 권한 분류기가 승인하지 않은 파일 변경과 명령 실행은 Telegram 승인을 거친다.
 - `Bash`에는 세션 단위 항상 허용 버튼을 제공하지 않는다. 다른 도구도 SDK가 경로 등 범위를 포함한 규칙을 제안할 때만 해당 범위로 허용한다.
 - `bypassPermissions`는 지원 모드에서 제외했다.
 - 봇 토큰이 담긴 `.env`와 SQLite 데이터는 git에서 제외한다.
