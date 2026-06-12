@@ -326,6 +326,10 @@ npm run auth:setup
 
 토큰을 README, 이슈, 로그 또는 Git 커밋에 넣지 마세요.
 
+### Claude 모델 정책
+
+모든 Claude Agent SDK 호출은 `claude-opus-4-8` 모델과 adaptive thinking을 강제합니다. 일반 대화, 기존 세션 재개, `/compact`, `/memory`, `/plan`의 계획 및 검토 단계에 동일하게 적용됩니다.
+
 ### 4. 환경 변수 설정
 
 `.env`가 없다면 예시 파일을 복사합니다.

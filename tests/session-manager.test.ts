@@ -8,6 +8,8 @@ import {
   buildCompactCommand,
   buildMemoryPrompt,
   buildUserMessage,
+  CLAUDE_MODEL,
+  CLAUDE_THINKING,
   loadProjectInstructions,
   MessageQueue,
   resultSummary,
@@ -43,6 +45,13 @@ describe("Claude child environment", () => {
       ANTHROPIC_API_KEY: undefined,
       ANTHROPIC_AUTH_TOKEN: undefined
     });
+  });
+});
+
+describe("Claude model policy", () => {
+  it("forces Opus 4.8 with adaptive thinking", () => {
+    expect(CLAUDE_MODEL).toBe("claude-opus-4-8");
+    expect(CLAUDE_THINKING).toEqual({ type: "adaptive" });
   });
 });
 

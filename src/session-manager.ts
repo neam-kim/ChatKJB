@@ -33,6 +33,9 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+export const CLAUDE_MODEL = "claude-opus-4-8";
+export const CLAUDE_THINKING = { type: "adaptive" } as const;
+
 interface RunRequest {
   session: SessionRecord;
   prompt: string;
@@ -583,6 +586,8 @@ export class SessionManager {
       const queryOptions: Options = {
         cwd: session.cwd,
         abortController,
+        model: CLAUDE_MODEL,
+        thinking: CLAUDE_THINKING,
         permissionMode: session.permissionMode,
         allowedTools: ["Read", "Glob", "Grep", "WebSearch"],
         settingSources: [],
@@ -942,6 +947,8 @@ export class SessionManager {
       options: {
         cwd: session.cwd,
         abortController: controller,
+        model: CLAUDE_MODEL,
+        thinking: CLAUDE_THINKING,
         // plan 모드는 모델이 도구를 쓰려 하면 turn을 즉시 종료해 AskUserQuestion의 답을
         // 기다리지 못한다. 대화가 필요한 계획 단계에서는 default 모드로 돌려 질문이 실제로
         // 사용자 응답을 기다리게 한다. 편집은 read-only allowedTools로 여전히 차단된다.
