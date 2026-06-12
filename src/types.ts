@@ -12,6 +12,7 @@ export type SessionStatus =
 
 export interface ProjectConfig {
   name: string;
+  aliases?: string[];
   cwd: string;
   defaultMode: PermissionMode;
 }

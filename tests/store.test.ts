@@ -41,6 +41,15 @@ afterEach(() => {
 });
 
 describe("StateStore", () => {
+  it("counts all stored sessions", () => {
+    const store = makeStore();
+    const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));
+    store.createSession(session);
+
+    expect(store.countSessions()).toBe(1);
+    store.close();
+  });
+
   it("persists topic mappings and session policy", () => {
     const store = makeStore();
     const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));

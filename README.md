@@ -6,7 +6,7 @@ Telegram Forum Topic 하나를 Claude Agent SDK 세션 하나에 연결하는 Ma
 
 - `/new` 프로젝트 선택 후 새 토픽과 Claude 세션 생성
 - 토픽의 일반 메시지를 기존 Claude 세션으로 `resume`
-- `/addp`, `/steer`, `/next`, `/fork`, `/stop`, `/compact`, `/mode`, `/status`, `/sessions`, `/usage`, `/projects`, `/diff`, `/delete`
+- `/addp`, `/steer`, `/next`, `/fork`, `/stop`, `/compact`, `/mode`, `/status`, `/doctor`, `/plan`, `/sessions`, `/usage`, `/projects`, `/diff`, `/delete`
 - 실행 중 메시지 스티어링과 현재 작업 뒤 후속 작업 예약
 - 일반 MCP 60초 타임아웃 및 최대 3회 순차 재시도
 - Codex MCP 30분 타임아웃 및 60초 주기 장기 실행 상태 알림
@@ -83,11 +83,14 @@ cp projects.example.json projects.json
 [
   {
     "name": "normal-work",
+    "aliases": ["normal", "work"],
     "cwd": "/absolute/project/path",
     "defaultMode": "default"
   }
 ]
 ```
+
+`aliases`는 선택 사항이며 프로젝트 이름과 동일한 문자 규칙을 사용한다. `/new normal`처럼 이름이나 별칭을 대소문자 구분 없이 직접 지정할 수 있고, 모든 프로젝트의 이름과 별칭은 서로 중복될 수 없다.
 
 Telegram에서 `/addp /절대/프로젝트/경로`를 입력해 재시작 없이 프로젝트를 추가할 수도 있다. `/addp`만 먼저 입력한 뒤 다음 메시지로 경로를 보내는 방식도 지원한다. 실제로 존재하고 읽기·쓰기가 가능한 디렉터리만 등록하며, 폴더명을 프로젝트 이름으로 사용한다. 같은 경로는 중복 등록하지 않는다.
 
@@ -112,6 +115,10 @@ npm run dev
 Telegram의 `/usage`는 가장 최근 SDK 사용량 스냅샷을 표시한다. 실행 중 상태 메시지와 완료 메시지에도 같은 한도 정보가 포함된다. `total_cost_usd`는 실제 구독 차감액이 아닌 클라이언트 추정치이므로 사용자 화면과 SQLite에 비용으로 저장하지 않는다.
 
 Telegram의 `/status`는 명령에 응답하는 것으로 오케스트레이터 프로세스가 살아 있음을 확인하고, 세션 토픽 안에서는 해당 작업이 실제로 현재 프로세스에서 실행 중인지 표시한다. 실행 중 진행 메시지는 새 도구 호출이 없어도 30초마다 경과시간을 갱신한다.
+
+Telegram의 `/doctor`는 OAuth 토큰 형식, launchd 등록 상태, MCP 실행 파일 또는 원격 응답, SQLite 쓰기, 프로젝트 경로, Telegram 연결, 디스크 여유 공간, 최근 stderr 오류를 제한 시간 안에서 점검한다.
+
+완료되었거나 중단된 기존 세션 토픽에서 `/plan 구현할 작업`을 실행하면 Claude가 읽기 전용 계획을 작성하고, Codex SDK가 `workspace-write`와 승인 없는 비대화형 모드로 계획을 실행한 뒤, Claude가 git 변경 사항을 읽기 전용으로 검토한다. 이 파이프라인도 같은 프로젝트의 다른 작업과 직렬화되며 `/stop`으로 중단할 수 있다.
 
 Claude가 중요한 단계에서 출력하는 짧은 진행 요약은 텍스트 블록이 완성되는 즉시 개별 Telegram 메시지로 보낸다. 내부 thinking 원문과 토큰 단위 delta는 보내지 않으며, 스트림 뒤에 도착하는 완성 메시지와 동일한 내용은 중복 전송하지 않는다.
 

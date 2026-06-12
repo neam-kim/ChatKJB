@@ -1,6 +1,7 @@
 [
   {
     "name": "my-project",
+    "aliases": ["my", "work"],
     "cwd": "/absolute/path/to/my-project",
     "defaultMode": "default"
   }

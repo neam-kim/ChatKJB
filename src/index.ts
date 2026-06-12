@@ -13,6 +13,8 @@ async function main(): Promise<void> {
   await bot.api.setMyCommands([
     { command: "new", description: "새 Claude 작업 시작" },
     { command: "status", description: "오케스트레이터와 현재 작업 상태" },
+    { command: "doctor", description: "실행 환경 진단" },
+    { command: "plan", description: "계획·실행·검토 파이프라인" },
     { command: "addp", description: "절대경로 프로젝트 추가" },
     { command: "sessions", description: "최근 세션 목록" },
     { command: "usage", description: "현재 한도 사용량" },

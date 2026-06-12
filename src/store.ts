@@ -162,6 +162,13 @@ export class StateStore {
     return rows.map((row) => this.mapSession(row));
   }
 
+  countSessions(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as {
+      count: number;
+    };
+    return row.count;
+  }
+
   updateSession(
     id: string,
     fields: Partial<Pick<

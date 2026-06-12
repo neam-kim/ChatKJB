@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Bot, InlineKeyboard } from "grammy";
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
-import { addProject, type AppConfig } from "./config.js";
+import { addProject, resolveProject, type AppConfig } from "./config.js";
+import { runDoctor } from "./doctor.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { SessionManager } from "./session-manager.js";
 import { StateStore } from "./store.js";
@@ -40,6 +41,18 @@ function formatTimestamp(timestamp: number): string {
     timeZone: "Asia/Seoul",
     hour12: false
   });
+}
+
+function formatDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return hours > 0
+    ? `${hours}시간 ${minutes}분 ${remainder}초`
+    : minutes > 0
+      ? `${minutes}분 ${remainder}초`
+      : `${remainder}초`;
 }
 
 export function formatSessionStatus(session: SessionRecord, active: boolean): string {
@@ -122,16 +135,34 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /mode, /diff, /delete 사용"
+      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /mode, /diff, /delete 사용"
     );
   });
 
   bot.command("new", async (ctx) => {
+    const identifier = ctx.match.trim();
+    if (identifier) {
+      const project = resolveProject(config.projects, identifier);
+      if (!project) {
+        await ctx.reply("프로젝트 이름 또는 별칭을 찾을 수 없습니다.");
+        return;
+      }
+      pendingStarts.set(
+        pendingStartKey(config.allowedUserId, ctx.message?.message_thread_id),
+        { project }
+      );
+      await ctx.reply(`${project.name} 프로젝트에서 실행할 작업을 입력하세요.`);
+      return;
+    }
     await ctx.reply("프로젝트를 선택하세요.", { reply_markup: projectKeyboard(config.projects) });
   });
 
   bot.command("projects", async (ctx) => {
-    const text = config.projects.map((project) => `${project.name}\n${project.cwd}`).join("\n\n");
+    const text = config.projects.map((project) => [
+      project.name,
+      ...(project.aliases?.length ? [`별칭: ${project.aliases.join(", ")}`] : []),
+      project.cwd
+    ].join("\n")).join("\n\n");
     await ctx.reply(text);
   });
 
@@ -176,20 +207,65 @@ export function createBot(config: AppConfig, store: StateStore) {
         await ctx.reply("오케스트레이터: 정상 응답\n이 토픽에 연결된 세션이 없습니다.");
         return;
       }
-      await ctx.reply(formatSessionStatus(session, sessions.isActive(session.id)));
+      const inspection = sessions.inspect().find((item) => item.sessionId === session.id);
+      const codex = inspection?.codexInFlight && inspection.codexElapsedMs !== null
+        ? `\nCodex: 실행 중 ${formatDuration(inspection.codexElapsedMs)}`
+        : "";
+      await ctx.reply(`${formatSessionStatus(session, sessions.isActive(session.id))}${codex}`);
       return;
     }
 
-    const active = store.listSessions(50).filter((session) => sessions.isActive(session.id));
-    if (active.length === 0) {
-      await ctx.reply("오케스트레이터: 정상 응답\n현재 실행 중인 작업이 없습니다.");
-      return;
-    }
+    const now = Date.now();
+    const active = sessions.inspect();
+    const details = active.flatMap((inspection) => {
+      const session = store.getSession(inspection.sessionId);
+      if (!session) return [];
+      const codex = inspection.codexInFlight && inspection.codexElapsedMs !== null
+        ? `\nCodex 실행 중 ${formatDuration(inspection.codexElapsedMs)}`
+        : "";
+      return [
+        `${session.projectName} | ${inspection.title}\n`
+        + `${inspection.cwd}\n`
+        + `경과 ${formatDuration(now - inspection.startedAt)} · 대기 턴 ${inspection.pendingTurns}${codex}\n`
+        + topicLink(session.chatId, session.topicId)
+      ];
+    });
     await ctx.reply([
       "오케스트레이터: 정상 응답",
-      `현재 실행 중인 작업: ${active.length}개`,
-      ...active.map((session) => `${session.projectName} | ${session.title}\n${topicLink(session.chatId, session.topicId)}`)
+      `프로세스: PID ${process.pid} · 가동 ${formatDuration(process.uptime() * 1000)}`,
+      `저장된 세션: ${store.countSessions()}개`,
+      active.length > 0
+        ? `현재 실행 중인 작업: ${active.length}개`
+        : "현재 실행 중인 작업이 없습니다.",
+      ...details
     ].join("\n\n"));
+  });
+
+  bot.command("doctor", async (ctx) => {
+    const report = await runDoctor({
+      config,
+      store,
+      getTelegramMe: () => bot.api.getMe(),
+      projectDir: process.cwd()
+    });
+    for (let offset = 0; offset < report.length; offset += 3900) {
+      await ctx.reply(report.slice(offset, offset + 3900));
+    }
+  });
+
+  bot.command("plan", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    const instruction = ctx.match.trim();
+    if (!session || !instruction) {
+      await ctx.reply("기존 세션 토픽에서 `/plan 구현할 작업` 형식으로 사용하세요.");
+      return;
+    }
+    if (!sessions.runPlanPipeline(session, instruction)) {
+      await ctx.reply("이 세션에서 이미 실행 중이거나 대기 중인 작업이 있습니다.");
+      return;
+    }
+    await ctx.reply("계획 작성, Codex 실행, Claude 검토 파이프라인을 예약했습니다.");
   });
 
   bot.command("usage", async (ctx) => {

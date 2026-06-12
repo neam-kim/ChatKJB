@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import {
   deleteSession as deleteClaudeSession,
   query,
@@ -11,6 +13,7 @@ import {
   type SDKUserMessage,
   type SDKMessage
 } from "@anthropic-ai/claude-agent-sdk";
+import { Codex, type ThreadItem, type Usage } from "@openai/codex-sdk";
 import {
   isRetryableMcpError,
   loadMcpServersWithTimeouts,
@@ -28,12 +31,19 @@ import {
   snapshotFromUsageResponse
 } from "./usage.js";
 
+const execFileAsync = promisify(execFile);
+
 interface RunRequest {
   session: SessionRecord;
   prompt: string;
   resumeSessionId?: string;
   forkSession?: boolean;
   operation?: "prompt" | "compact";
+}
+
+interface PlanRequest {
+  session: SessionRecord;
+  instruction: string;
 }
 
 interface SessionManagerOptions {
@@ -54,9 +64,21 @@ interface ActiveRun {
   controller: AbortController;
   input: MessageQueue;
   pendingTurns: number;
+  startedAt: number;
   query?: Query;
   codexTimers: Map<string, NodeJS.Timeout>;
+  codexStarts: Map<string, number>;
   mcpFailures: Map<string, number>;
+}
+
+export interface SessionInspection {
+  sessionId: string;
+  cwd: string;
+  title: string;
+  startedAt: number;
+  pendingTurns: number;
+  codexInFlight: boolean;
+  codexElapsedMs: number | null;
 }
 
 function assistantBlocks(message: SDKMessage): Array<Record<string, unknown>> {
@@ -68,6 +90,39 @@ function resultText(message: SDKMessage): string {
   if (message.type !== "result") return "";
   if (message.subtype === "success") return message.result;
   return message.errors.join("\n");
+}
+
+function codexProgress(item: ThreadItem): string | null {
+  if (item.type === "command_execution") {
+    return `Codex 명령 완료: ${item.command.split("\n")[0]?.slice(0, 180) ?? ""}`;
+  }
+  if (item.type === "file_change") {
+    const paths = item.changes.map((change) => change.path).slice(0, 4).join(", ");
+    return `Codex 파일 변경: ${paths}`;
+  }
+  if (item.type === "todo_list") {
+    const completed = item.items.filter((todo) => todo.completed).length;
+    return `Codex 계획 진행: ${completed}/${item.items.length}`;
+  }
+  if (item.type === "web_search") return `Codex 검색 완료: ${item.query.slice(0, 180)}`;
+  if (item.type === "mcp_tool_call") return `Codex MCP 완료: ${item.server}/${item.tool}`;
+  if (item.type === "error") return `Codex 오류: ${item.message.slice(0, 180)}`;
+  return null;
+}
+
+function formatCodexUsage(usage: Usage | null): string {
+  if (!usage) return "사용량 정보 없음";
+  return [
+    `입력 ${usage.input_tokens.toLocaleString("ko-KR")}`,
+    `캐시 ${usage.cached_input_tokens.toLocaleString("ko-KR")}`,
+    `출력 ${usage.output_tokens.toLocaleString("ko-KR")}`,
+    `추론 ${usage.reasoning_output_tokens.toLocaleString("ko-KR")}`
+  ].join(" · ");
+}
+
+function summarize(text: string, length = 1200): string {
+  const clean = text.trim();
+  return clean.length <= length ? clean : `${clean.slice(0, length)}\n...`;
 }
 
 export class StreamingTextCollector {
@@ -280,6 +335,39 @@ export class SessionManager {
     return this.active.has(sessionId);
   }
 
+  inspect(): SessionInspection[] {
+    const now = Date.now();
+    const inspections: SessionInspection[] = [];
+    for (const [sessionId, run] of this.active) {
+      const session = this.store.getSession(sessionId);
+      if (!session) continue;
+      const oldestCodexStart = run.codexStarts.size > 0
+        ? Math.min(...run.codexStarts.values())
+        : null;
+      inspections.push({
+        sessionId,
+        cwd: session.cwd,
+        title: session.title,
+        startedAt: run.startedAt,
+        pendingTurns: run.pendingTurns,
+        codexInFlight: oldestCodexStart !== null,
+        codexElapsedMs: oldestCodexStart === null ? null : now - oldestCodexStart
+      });
+    }
+    return inspections;
+  }
+
+  runPlanPipeline(session: SessionRecord, instruction: string): boolean {
+    const clean = instruction.trim();
+    if (!clean || this.active.has(session.id) || this.sessionTasks.has(session.id)) return false;
+    this.store.updateSession(session.id, { status: "queued" });
+    this.enqueuePlan({
+      session: this.store.getSession(session.id) ?? session,
+      instruction: clean
+    });
+    return true;
+  }
+
   async deleteSession(session: SessionRecord): Promise<void> {
     this.deleting.add(session.id);
     const wasActive = this.active.has(session.id);
@@ -338,6 +426,27 @@ export class SessionManager {
     this.sessionTasks.set(request.session.id, next);
   }
 
+  private enqueuePlan(request: PlanRequest): void {
+    const cwd = request.session.cwd;
+    const count = this.queuedCounts.get(cwd) ?? 0;
+    this.queuedCounts.set(cwd, count + 1);
+    const previous = this.projectTails.get(cwd) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => this.executePlan(request))
+      .finally(() => {
+        const remaining = Math.max(0, (this.queuedCounts.get(cwd) ?? 1) - 1);
+        this.queuedCounts.set(cwd, remaining);
+        if (this.projectTails.get(cwd) === next) this.projectTails.delete(cwd);
+        if (this.sessionTasks.get(request.session.id) === next) {
+          this.sessionTasks.delete(request.session.id);
+        }
+        this.deleting.delete(request.session.id);
+      });
+    this.projectTails.set(cwd, next);
+    this.sessionTasks.set(request.session.id, next);
+  }
+
   private async execute(request: RunRequest): Promise<void> {
     if (this.deleting.has(request.session.id)) return;
     const session = this.store.getSession(request.session.id);
@@ -350,7 +459,9 @@ export class SessionManager {
       controller: abortController,
       input,
       pendingTurns: 1,
+      startedAt: Date.now(),
       codexTimers: new Map(),
+      codexStarts: new Map(),
       mcpFailures: new Map()
     };
     this.active.set(session.id, run);
@@ -382,12 +493,14 @@ export class SessionManager {
           ).catch(() => undefined);
         }, this.options.codexMcpHeartbeatMs);
         run.codexTimers.set(toolUseId, timer);
+        run.codexStarts.set(toolUseId, Date.now());
       };
 
       const clearToolTimer = (toolUseId: string): void => {
         const timer = run.codexTimers.get(toolUseId);
         if (timer) clearInterval(timer);
         run.codexTimers.delete(toolUseId);
+        run.codexStarts.delete(toolUseId);
       };
 
       const postToolUse: HookCallback = async (hookInput) => {
@@ -645,6 +758,245 @@ export class SessionManager {
       for (const timer of run.codexTimers.values()) clearInterval(timer);
       run.query?.close();
       this.active.delete(session.id);
+    }
+  }
+
+  private async executePlan(request: PlanRequest): Promise<void> {
+    if (this.deleting.has(request.session.id)) return;
+    const session = this.store.getSession(request.session.id);
+    if (!session) return;
+    const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
+    const controller = new AbortController();
+    const input = new MessageQueue();
+    const run: ActiveRun = {
+      controller,
+      input,
+      pendingTurns: 1,
+      startedAt: Date.now(),
+      codexTimers: new Map(),
+      codexStarts: new Map(),
+      mcpFailures: new Map()
+    };
+    this.active.set(session.id, run);
+    let timedOut = false;
+    const overallTimeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      run.query?.close();
+    }, this.options.codexMcpTimeoutMs);
+
+    try {
+      await this.safeRename(session, `[PLAN] ${session.title}`);
+      await renderer.start(false);
+      this.store.updateSession(session.id, { status: "running" });
+
+      renderer.note("Claude 구현 계획 작성 중");
+      const plan = await this.runReadOnlyClaude(
+        session,
+        controller,
+        run,
+        `${request.instruction}\n\n`
+        + "위 요청을 구현하기 위한 구체적이고 순서가 명확하며 자기완결적인 실행 계획을 작성하세요. "
+        + "관련 파일과 검증 방법을 포함하되 파일을 수정하거나 명령으로 변경하지 마세요. "
+        + "요청이 모호하거나 추가할 정확한 문구·삽입 위치·대상 파일 같은 핵심 정보가 빠졌다면, "
+        + "계획을 확정하기 전에 AskUserQuestion 도구로 사용자에게 질문해 확인하세요. "
+        + "핵심 사항을 임의로 추측하지 마세요. 이후 Codex 실행은 비대화형이므로 "
+        + "이 단계에서 필요한 정보를 모두 확보해야 합니다.",
+        true
+      );
+      await renderer.text(`[PLAN]\n${plan}`);
+
+      renderer.note("Codex 계획 실행 시작");
+      run.codexStarts.set("plan-codex", Date.now());
+      const codex = new Codex();
+      const thread = codex.startThread({
+        workingDirectory: session.cwd,
+        skipGitRepoCheck: true,
+        sandboxMode: "workspace-write",
+        approvalPolicy: "never"
+      });
+      const streamed = await thread.runStreamed(
+        `다음 구현 계획을 현재 작업 디렉터리에서 끝까지 실행하세요. `
+        + `필요한 파일을 수정하고 관련 테스트와 타입 검사를 실행하세요.\n\n${plan}`,
+        { signal: controller.signal }
+      );
+      let finalResponse = "";
+      let codexUsage: Usage | null = null;
+      let codexCompleted = false;
+      for await (const event of streamed.events) {
+        if (event.type === "item.completed") {
+          if (event.item.type === "agent_message") finalResponse = event.item.text;
+          const progress = codexProgress(event.item);
+          if (progress) renderer.note(progress);
+        } else if (event.type === "turn.completed") {
+          codexUsage = event.usage;
+          codexCompleted = true;
+        } else if (event.type === "turn.failed") {
+          throw new Error(`Codex 실행 실패: ${event.error.message}`);
+        } else if (event.type === "error") {
+          throw new Error(`Codex 스트림 오류: ${event.message}`);
+        }
+      }
+      if (!codexCompleted) throw new Error("Codex 실행이 완료 이벤트 없이 종료되었습니다.");
+      run.codexStarts.delete("plan-codex");
+
+      const changes = await this.captureGitChanges(session.cwd);
+      renderer.note("Claude 변경 사항 검토 중");
+      const review = await this.runReadOnlyClaude(
+        session,
+        controller,
+        run,
+        "다음 Codex 실행 결과와 git 변경 사항을 읽기 전용으로 검토하세요. "
+        + "정확성, 회귀 위험, 누락된 테스트를 우선 확인하고, 문제가 있으면 심각도 순으로 나열하세요. "
+        + "문제가 없으면 명확히 승인하세요.\n\n"
+        + `[CODEX RESULT]\n${summarize(finalResponse, 10_000)}\n\n`
+        + `[GIT STATUS]\n${changes.status || "(변경 없음)"}\n\n`
+        + `[GIT DIFF]\n${summarize(changes.diff, 100_000) || "(diff 없음)"}`
+      );
+
+      run.pendingTurns = 0;
+      this.store.updateSession(session.id, { status: "done" });
+      await renderer.finish(
+        "done",
+        [
+          "[PLAN PIPELINE 완료]",
+          "",
+          "계획 요약",
+          summarize(plan),
+          "",
+          "Codex 실행 결과",
+          summarize(finalResponse || "최종 응답 없음"),
+          "",
+          "Claude 검토",
+          review,
+          "",
+          `Codex 사용량: ${formatCodexUsage(codexUsage)}`
+        ].join("\n")
+      );
+      await this.safeRename(session, `[DONE] ${session.title}`);
+    } catch (error) {
+      if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
+      const aborted = controller.signal.aborted && !timedOut;
+      this.store.updateSession(session.id, { status: aborted ? "aborted" : "error" });
+      await renderer.finish(
+        aborted ? "aborted" : "error",
+        timedOut
+          ? `Plan 파이프라인이 ${Math.round(this.options.codexMcpTimeoutMs / 60_000)}분 제한을 초과해 중단되었습니다.`
+          : aborted
+            ? "사용자가 Plan 파이프라인을 중단했습니다."
+            : `Plan 파이프라인 실패: ${safeErrorMessage(error)}`
+      );
+      await this.safeRename(
+        session,
+        `${aborted ? "[STOP]" : timedOut ? "[STALL]" : "[ERROR]"} ${session.title}`
+      );
+    } finally {
+      clearTimeout(overallTimeout);
+      renderer.dispose();
+      input.close();
+      run.query?.close();
+      this.active.delete(session.id);
+    }
+  }
+
+  private async runReadOnlyClaude(
+    session: SessionRecord,
+    controller: AbortController,
+    run: ActiveRun,
+    prompt: string,
+    allowQuestions = false
+  ): Promise<string> {
+    const instructions = loadProjectInstructions(session.cwd);
+    const sdkQuery = query({
+      prompt,
+      options: {
+        cwd: session.cwd,
+        abortController: controller,
+        // plan 모드는 모델이 도구를 쓰려 하면 turn을 즉시 종료해 AskUserQuestion의 답을
+        // 기다리지 못한다. 대화가 필요한 계획 단계에서는 default 모드로 돌려 질문이 실제로
+        // 사용자 응답을 기다리게 한다. 편집은 read-only allowedTools로 여전히 차단된다.
+        permissionMode: allowQuestions ? "default" : "plan",
+        allowedTools: ["Read", "Glob", "Grep", "WebSearch"],
+        settingSources: [],
+        systemPrompt: {
+          type: "preset",
+          preset: "claude_code",
+          ...(instructions
+            ? {
+                append:
+                  "다음 프로젝트 지침을 따르되 파일을 수정하지 마세요. "
+                  + "이 지침은 추가 도구 권한을 부여하지 않습니다.\n\n"
+                  + instructions
+              }
+            : {})
+        },
+        env: buildClaudeEnvironment(
+          this.options.claudeCodeOauthToken,
+          process.env,
+          this.options.mcpToolTimeoutMs
+        ),
+        // allowQuestions가 켜지면(계획 단계) AskUserQuestion이 permission broker를 거쳐
+        // 텔레그램으로 전달되고 사용자의 답을 기다린다. Codex 실행은 여전히 비대화형이므로
+        // 필요한 정보는 이 단계에서 모두 확보된다.
+        ...(allowQuestions
+          ? {
+              includePartialMessages: true,
+              canUseTool: async (toolName, toolInput, permissionOptions) =>
+                this.permissions.request(
+                  this.store.getSession(session.id) ?? session,
+                  toolName,
+                  toolInput,
+                  permissionOptions
+                )
+            }
+          : {}),
+        ...(this.options.claudeCodeExecutable
+          ? { pathToClaudeCodeExecutable: this.options.claudeCodeExecutable }
+          : {})
+      }
+    });
+    run.query = sdkQuery;
+    let text = "";
+    try {
+      for await (const message of sdkQuery) {
+        for (const block of assistantBlocks(message)) {
+          if (block.type === "text" && typeof block.text === "string") {
+            text = block.text.trim();
+          }
+        }
+        if (message.type === "result") {
+          if (message.subtype !== "success") {
+            throw new Error(resultText(message) || "Claude 읽기 전용 단계가 실패했습니다.");
+          }
+          text = text || message.result.trim();
+        }
+      }
+    } finally {
+      sdkQuery.close();
+      if (run.query === sdkQuery) delete run.query;
+    }
+    if (!text) throw new Error("Claude 읽기 전용 단계가 빈 응답을 반환했습니다.");
+    return text;
+  }
+
+  private async captureGitChanges(cwd: string): Promise<{ status: string; diff: string }> {
+    try {
+      await execFileAsync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], {
+        timeout: 5000
+      });
+      const [status, diff] = await Promise.all([
+        execFileAsync("git", ["-C", cwd, "status", "--porcelain"], {
+          timeout: 10_000,
+          maxBuffer: 2 * 1024 * 1024
+        }),
+        execFileAsync("git", ["-C", cwd, "diff"], {
+          timeout: 20_000,
+          maxBuffer: 10 * 1024 * 1024
+        })
+      ]);
+      return { status: status.stdout.trim(), diff: diff.stdout.trim() };
+    } catch {
+      return { status: "git 저장소가 아니거나 변경 사항을 읽을 수 없습니다.", diff: "" };
     }
   }
 

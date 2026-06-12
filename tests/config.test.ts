@@ -57,6 +57,36 @@ describe("OAuth configuration", () => {
 });
 
 describe("project configuration", () => {
+  it("resolves project names and aliases case-insensitively", async () => {
+    const { resolveProject } = await import("../src/config.js");
+    const projects = [{
+      name: "Main Project",
+      aliases: ["main", "업무"],
+      cwd: "/tmp",
+      defaultMode: "default" as const
+    }];
+
+    expect(resolveProject(projects, "MAIN")).toBe(projects[0]);
+    expect(resolveProject(projects, "업무")).toBe(projects[0]);
+  });
+
+  it("rejects aliases that collide with another project name", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
+    directories.push(directory);
+    const first = join(directory, "first");
+    const second = join(directory, "second");
+    mkdirSync(first);
+    mkdirSync(second);
+    const projectsPath = join(directory, "projects.json");
+    writeFileSync(projectsPath, JSON.stringify([
+      { name: "first", aliases: ["SECOND"], cwd: first, defaultMode: "default" },
+      { name: "second", cwd: second, defaultMode: "default" }
+    ]));
+    const { loadProjects } = await import("../src/config.js");
+
+    await expect(loadProjects(projectsPath)).rejects.toThrow("Duplicate project name or alias");
+  });
+
   it("adds an absolute directory using its folder name", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
     directories.push(directory);

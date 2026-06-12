@@ -190,3 +190,84 @@ describe("session deletion", () => {
     }
   });
 });
+
+describe("session inspection", () => {
+  it("maps active runs to stored sessions and reports the oldest Codex start", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-inspect-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const now = Date.now();
+    const session: SessionRecord = {
+      id: "inspect-session",
+      sdkSessionId: "sdk-session",
+      chatId: -1001,
+      topicId: 42,
+      projectName: "test",
+      cwd: directory,
+      title: "inspect me",
+      status: "running",
+      permissionMode: "default",
+      usageSnapshot: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    store.createSession(session);
+    const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const manager = new SessionManager(store, fakeTransport, permissions, {
+      debounceMs: 1,
+      claudeCodeOauthToken: "test-token",
+      mcpToolTimeoutMs: 1000,
+      mcpMaxAttempts: 1,
+      codexMcpTimeoutMs: 1000,
+      codexMcpHeartbeatMs: 1000,
+      longRunningMcpServers: new Set(["codex"]),
+      turnIdleTimeoutMs: 600_000,
+      claudeMemoryDir: join(directory, ".claude", "memory")
+    });
+    const active = (manager as unknown as {
+      active: Map<string, {
+        controller: AbortController;
+        input: MessageQueue;
+        pendingTurns: number;
+        startedAt: number;
+        codexTimers: Map<string, NodeJS.Timeout>;
+        codexStarts: Map<string, number>;
+        mcpFailures: Map<string, number>;
+      }>;
+    }).active;
+    active.set(session.id, {
+      controller: new AbortController(),
+      input: new MessageQueue(),
+      pendingTurns: 2,
+      startedAt: now - 5000,
+      codexTimers: new Map(),
+      codexStarts: new Map([["newer", now - 1000], ["older", now - 3000]]),
+      mcpFailures: new Map()
+    });
+    active.set("missing-session", {
+      controller: new AbortController(),
+      input: new MessageQueue(),
+      pendingTurns: 1,
+      startedAt: now,
+      codexTimers: new Map(),
+      codexStarts: new Map(),
+      mcpFailures: new Map()
+    });
+
+    try {
+      const result = manager.inspect();
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        sessionId: session.id,
+        cwd: directory,
+        title: "inspect me",
+        pendingTurns: 2,
+        codexInFlight: true
+      });
+      expect(result[0]?.codexElapsedMs).toBeGreaterThanOrEqual(3000);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
