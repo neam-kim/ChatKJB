@@ -1,0 +1,7 @@
+[
+  {
+    "name": "my-project",
+    "cwd": "/absolute/path/to/my-project",
+    "defaultMode": "default"
+  }
+]

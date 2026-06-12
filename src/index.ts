@@ -1,0 +1,53 @@
+import { loadConfig } from "./config.js";
+import { createBot } from "./bot.js";
+import { StateStore } from "./store.js";
+import { safeErrorMessage } from "./telegram-transport.js";
+
+async function main(): Promise<void> {
+  const config = await loadConfig();
+  const store = new StateStore(config.databasePath);
+  store.syncProjects(config.projects);
+  const interrupted = store.interruptIncompleteSessions();
+  const { bot } = createBot(config, store);
+
+  await bot.api.setMyCommands([
+    { command: "new", description: "새 Claude 작업 시작" },
+    { command: "status", description: "오케스트레이터와 현재 작업 상태" },
+    { command: "addp", description: "절대경로 프로젝트 추가" },
+    { command: "sessions", description: "최근 세션 목록" },
+    { command: "usage", description: "현재 한도 사용량" },
+    { command: "projects", description: "등록 프로젝트 목록" },
+    { command: "steer", description: "실행 중 작업에 즉시 지시" },
+    { command: "next", description: "현재 작업 뒤 후속 작업 예약" },
+    { command: "stop", description: "현재 토픽 작업 중단" },
+    { command: "fork", description: "현재 세션 분기" },
+    { command: "compact", description: "현재 세션 컨텍스트 압축" },
+    { command: "mode", description: "권한 모드 확인 또는 변경" },
+    { command: "diff", description: "프로젝트 git diff 요약" },
+    { command: "delete", description: "토픽과 로컬 세션 삭제" }
+  ]);
+
+  if (interrupted > 0) {
+    await bot.api.sendMessage(
+      config.chatId,
+      `[RECOVERY] 재시작 전 실행 중이던 ${interrupted}개 세션을 중단 상태로 표시했습니다. 기존 토픽에 후속 지시를 보내 재개할 수 있습니다.`
+    );
+  }
+
+  const shutdown = () => {
+    bot.stop();
+    store.close();
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+
+  console.log(`Telegram Claude orchestrator started with ${config.projects.length} project(s).`);
+  await bot.start({
+    allowed_updates: ["message", "callback_query"]
+  });
+}
+
+main().catch((error: unknown) => {
+  console.error(safeErrorMessage(error));
+  process.exitCode = 1;
+});
