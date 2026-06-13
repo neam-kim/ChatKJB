@@ -7,7 +7,17 @@ import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { addProject, resolveProject, type AppConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { PermissionBroker } from "./permission-broker.js";
-import { buildMemoryPrompt, SessionManager } from "./session-manager.js";
+import {
+  buildMemoryPrompt,
+  CLAUDE_MODELS,
+  DEFAULT_CLAUDE_MODEL,
+  DEFAULT_THINKING_LEVEL,
+  modelLabel,
+  resolveModel,
+  SessionManager,
+  THINKING_OPTIONS,
+  thinkingLabel
+} from "./session-manager.js";
 import { StateStore } from "./store.js";
 import { safeErrorMessage, TelegramTransport } from "./telegram-transport.js";
 import type { ProjectConfig, SessionRecord } from "./types.js";
@@ -19,6 +29,8 @@ interface PendingStart {
   project: ProjectConfig;
   resumeSessionId?: string;
   forkSession?: boolean;
+  model?: string | undefined;
+  thinking?: string | undefined;
 }
 
 function pendingStartKey(userId: number, topicId?: number): string {
@@ -70,6 +82,8 @@ export function formatSessionStatus(session: SessionRecord, active: boolean): st
     `작업: ${state}`,
     `저장 상태: ${session.status}`,
     `프로젝트: ${session.projectName}`,
+    `모델: ${modelLabel(session.model ?? DEFAULT_CLAUDE_MODEL)}`,
+    `thinking: ${thinkingLabel(session.thinking ?? DEFAULT_THINKING_LEVEL)}`,
     `마지막 상태 변경: ${formatTimestamp(session.updatedAt)}`
   ].join("\n");
 }
@@ -78,6 +92,42 @@ function projectKeyboard(projects: ProjectConfig[]): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const [index, project] of projects.entries()) {
     keyboard.text(project.name, `newp:${index}`).row();
+  }
+  return keyboard;
+}
+
+export function modelKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [index, option] of CLAUDE_MODELS.entries()) {
+    keyboard.text(option.label, `model:${option.id}`);
+    if (index < CLAUDE_MODELS.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+function newModelKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [index, option] of CLAUDE_MODELS.entries()) {
+    keyboard.text(option.label, `newm:${option.id}`);
+    if (index < CLAUDE_MODELS.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+function newThinkingKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [index, option] of THINKING_OPTIONS.entries()) {
+    keyboard.text(option.label, `newt:${option.id}`);
+    if (index < THINKING_OPTIONS.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+function thinkingKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [index, option] of THINKING_OPTIONS.entries()) {
+    keyboard.text(option.label, `think:${option.id}`);
+    if (index < THINKING_OPTIONS.length - 1) keyboard.row();
   }
   return keyboard;
 }
@@ -190,7 +240,8 @@ export function createBot(config: AppConfig, store: StateStore) {
       const newTopicId = await transport.createTopic(config.chatId, title);
       const session = sessions.createSession(
         pending.project, config.chatId, newTopicId, title,
-        fileMessage, pending.resumeSessionId, pending.forkSession ?? false
+        fileMessage, pending.resumeSessionId, pending.forkSession ?? false,
+        pending.model ?? null, pending.thinking ?? null
       );
       await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;
@@ -216,7 +267,7 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /diff, /upload, /delete 사용"
+      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /diff, /upload, /delete 사용"
     );
   });
 
@@ -232,7 +283,10 @@ export function createBot(config: AppConfig, store: StateStore) {
         pendingStartKey(config.allowedUserId, ctx.message?.message_thread_id),
         { project }
       );
-      await ctx.reply(`${project.name} 프로젝트에서 실행할 작업을 입력하세요.`);
+      await ctx.reply(
+        `${project.name} 프로젝트. 모델을 선택하세요.`,
+        { reply_markup: newModelKeyboard() }
+      );
       return;
     }
     await ctx.reply("프로젝트를 선택하세요.", { reply_markup: projectKeyboard(config.projects) });
@@ -423,7 +477,9 @@ export function createBot(config: AppConfig, store: StateStore) {
     pendingStarts.set(pendingStartKey(config.allowedUserId, topicId), {
       project,
       resumeSessionId: session.sdkSessionId,
-      forkSession: true
+      forkSession: true,
+      model: session.model ?? undefined,
+      thinking: session.thinking ?? undefined
     });
     await ctx.reply("새 분기에서 실행할 지시를 입력하세요.");
   });
@@ -492,6 +548,66 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply(`다음 실행부터 권한 모드를 ${mode}(으)로 사용합니다.`);
   });
 
+  bot.command("model", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const input = ctx.match.trim();
+    if (!input) {
+      await ctx.reply(
+        `현재 모델: ${modelLabel(session.model ?? DEFAULT_CLAUDE_MODEL)}\n`
+        + "사용 가능 별칭: opus, sonnet, fable",
+        { reply_markup: modelKeyboard() }
+      );
+      return;
+    }
+    const model = resolveModel(input);
+    if (!model) {
+      await ctx.reply(
+        "지원하지 않는 모델입니다.\n사용 가능: opus, sonnet, fable "
+        + "(또는 등록된 전체 모델 ID)"
+      );
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
+      return;
+    }
+    store.updateSession(session.id, { model });
+    await ctx.reply(`다음 실행부터 ${modelLabel(model)} 모델을 사용합니다.`);
+  });
+
+  bot.command("thinking", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const input = ctx.match.trim().toLowerCase();
+    if (!input) {
+      await ctx.reply(
+        `현재 thinking: ${thinkingLabel(session.thinking ?? DEFAULT_THINKING_LEVEL)}`,
+        { reply_markup: thinkingKeyboard() }
+      );
+      return;
+    }
+    const option = THINKING_OPTIONS.find((item) => item.id === input);
+    if (!option) {
+      await ctx.reply("지원하지 않는 thinking 수준입니다.\n사용 가능: adaptive, high, off");
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
+      return;
+    }
+    store.updateSession(session.id, { thinking: option.id });
+    await ctx.reply(`다음 실행부터 thinking을 ${option.label}(으)로 사용합니다.`);
+  });
+
   bot.command("diff", async (ctx) => {
     const topicId = ctx.message?.message_thread_id;
     const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
@@ -540,13 +656,108 @@ export function createBot(config: AppConfig, store: StateStore) {
       { project }
     );
     await ctx.answerCallbackQuery({ text: `${project.name} 선택` });
-    await ctx.reply("실행할 작업을 입력하세요.");
+    await ctx.reply("모델을 선택하세요.", { reply_markup: newModelKeyboard() });
+  });
+
+  bot.callbackQuery(/^newm:/, async (ctx) => {
+    const modelId = ctx.callbackQuery.data.slice("newm:".length);
+    const option = CLAUDE_MODELS.find((item) => item.id === modelId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 모델입니다.", show_alert: true });
+      return;
+    }
+    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
+    const pending = pendingStarts.get(key);
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: "먼저 /new로 프로젝트를 선택하세요.", show_alert: true });
+      return;
+    }
+    pendingStarts.set(key, { ...pending, model: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    await ctx.reply(`모델: ${option.label}. thinking 수준을 선택하세요.`, {
+      reply_markup: newThinkingKeyboard()
+    });
+  });
+
+  bot.callbackQuery(/^newt:/, async (ctx) => {
+    const thinkingId = ctx.callbackQuery.data.slice("newt:".length);
+    const option = THINKING_OPTIONS.find((item) => item.id === thinkingId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 thinking 수준입니다.", show_alert: true });
+      return;
+    }
+    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
+    const pending = pendingStarts.get(key);
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: "먼저 /new로 프로젝트를 선택하세요.", show_alert: true });
+      return;
+    }
+    pendingStarts.set(key, { ...pending, thinking: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    const modelText = modelLabel(pending.model ?? DEFAULT_CLAUDE_MODEL);
+    await ctx.reply(
+      `모델: ${modelText} / thinking: ${option.label}\n실행할 작업을 입력하세요.`
+    );
   });
 
   bot.callbackQuery(/^stop:/, async (ctx) => {
     const sessionId = ctx.callbackQuery.data.slice("stop:".length);
     const stopped = sessions.stop(sessionId);
     await ctx.answerCallbackQuery({ text: stopped ? "중단 요청을 보냈습니다." : "실행 중이 아닙니다." });
+  });
+
+  bot.callbackQuery(/^model:/, async (ctx) => {
+    const modelId = ctx.callbackQuery.data.slice("model:".length);
+    const option = CLAUDE_MODELS.find((item) => item.id === modelId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 모델입니다.", show_alert: true });
+      return;
+    }
+    const topicId = ctx.callbackQuery.message?.message_thread_id;
+    const session = topicId
+      ? store.getSessionByTopic(config.chatId, topicId)
+      : undefined;
+    if (!session) {
+      await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.answerCallbackQuery({
+        text: "실행 중에는 모델을 바꿀 수 없습니다.",
+        show_alert: true
+      });
+      return;
+    }
+    store.updateSession(session.id, { model: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    await ctx.reply(`다음 실행부터 ${option.label} 모델을 사용합니다.`);
+  });
+
+  bot.callbackQuery(/^think:/, async (ctx) => {
+    const thinkingId = ctx.callbackQuery.data.slice("think:".length);
+    const option = THINKING_OPTIONS.find((item) => item.id === thinkingId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 thinking 수준입니다.", show_alert: true });
+      return;
+    }
+    const topicId = ctx.callbackQuery.message?.message_thread_id;
+    const session = topicId
+      ? store.getSessionByTopic(config.chatId, topicId)
+      : undefined;
+    if (!session) {
+      await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.answerCallbackQuery({
+        text: "실행 중에는 thinking을 바꿀 수 없습니다.",
+        show_alert: true
+      });
+      return;
+    }
+    store.updateSession(session.id, { thinking: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    await ctx.reply(`다음 실행부터 thinking을 ${option.label}(으)로 사용합니다.`);
   });
 
   bot.callbackQuery(/^delcancel:/, async (ctx) => {
@@ -638,7 +849,9 @@ export function createBot(config: AppConfig, store: StateStore) {
         title,
         ctx.message.text,
         pending.resumeSessionId,
-        pending.forkSession ?? false
+        pending.forkSession ?? false,
+        pending.model ?? null,
+        pending.thinking ?? null
       );
       await ctx.reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;

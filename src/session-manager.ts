@@ -10,6 +10,7 @@ import {
   type HookCallback,
   type Options,
   type Query,
+  type ThinkingConfig,
   type SDKUserMessage,
   type SDKMessage
 } from "@anthropic-ai/claude-agent-sdk";
@@ -33,8 +34,73 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-export const CLAUDE_MODEL = "claude-opus-4-8";
+export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
+export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
+export interface ClaudeModelOption {
+  id: string;
+  label: string;
+  aliases: string[];
+}
+export const CLAUDE_MODELS: ClaudeModelOption[] = [
+  {
+    id: "claude-opus-4-8",
+    label: "Opus 4.8",
+    aliases: ["opus", "opus-4-8"]
+  },
+  {
+    id: "claude-sonnet-4-6",
+    label: "Sonnet 4.6",
+    aliases: ["sonnet", "sonnet-4-6"]
+  },
+  {
+    id: "claude-fable-5",
+    label: "Fable 5",
+    aliases: ["fable", "fable-5"]
+  }
+];
+
+export function resolveModel(input: string): string | undefined {
+  const value = input.trim().toLowerCase();
+  if (!value) return undefined;
+  return CLAUDE_MODELS.find((option) =>
+    option.aliases.includes(value) || option.id.toLowerCase() === value
+  )?.id;
+}
+
+export function modelLabel(id: string): string {
+  return CLAUDE_MODELS.find((option) => option.id === id)?.label ?? id;
+}
+
 export const CLAUDE_THINKING = { type: "adaptive" } as const;
+
+export type ThinkingLevel = "adaptive" | "high" | "off";
+export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "adaptive";
+export interface ThinkingOption {
+  id: ThinkingLevel;
+  label: string;
+}
+export const THINKING_OPTIONS: ThinkingOption[] = [
+  { id: "adaptive", label: "자동 (Adaptive)" },
+  { id: "high", label: "깊게 (High)" },
+  { id: "off", label: "끄기 (Off)" }
+];
+
+export function resolveThinkingConfig(level: string | null | undefined): ThinkingConfig {
+  switch (level) {
+    case "off":
+      return { type: "disabled" };
+    case "high":
+      return { type: "enabled", budgetTokens: 31999 };
+    case "adaptive":
+    default:
+      return { type: "adaptive" };
+  }
+}
+
+export function thinkingLabel(level: string | null | undefined): string {
+  return THINKING_OPTIONS.find((option) => option.id === level)?.label
+    ?? "자동 (Adaptive)";
+}
 
 interface RunRequest {
   session: SessionRecord;
@@ -166,7 +232,7 @@ export function buildMemoryPrompt(focus?: string): string {
     "[EXPLICIT_MEMORY_UPDATE]",
     "사용자가 /memory 명령으로 전역 장기 메모리 업데이트를 명시적으로 승인했다.",
     scope,
-    "메모리는 시스템 프롬프트에 지정된 전역 메모리 디렉터리에만 기록한다.",
+    `메모리는 시스템 프롬프트에 지정된 전역 메모리 디렉터리에만 기록한다.`,
     "기존 MEMORY.md와 관련 메모리 파일을 먼저 읽고, 중복 없이 최소 범위로 갱신한다.",
     "일시적인 작업 상태, 이미 끝난 세부 절차, 추측, 비밀정보, 자격증명은 저장하지 않는다.",
     "새 사실을 발명하지 말고 현재 대화에서 확인된 사용자 선호, 결정, 반복 사용 가능한 프로젝트 지식만 기록한다.",
@@ -303,7 +369,9 @@ export class SessionManager {
     title: string,
     prompt: string,
     resumeSessionId?: string,
-    forkSession = false
+    forkSession = false,
+    model?: string | null,
+    thinking?: string | null
   ): SessionRecord {
     const now = Date.now();
     const session: SessionRecord = {
@@ -316,6 +384,8 @@ export class SessionManager {
       title,
       status: "queued",
       permissionMode: project.defaultMode,
+      model: model ?? null,
+      thinking: thinking ?? null,
       usageSnapshot: null,
       createdAt: now,
       updatedAt: now
@@ -586,8 +656,8 @@ export class SessionManager {
       const queryOptions: Options = {
         cwd: session.cwd,
         abortController,
-        model: CLAUDE_MODEL,
-        thinking: CLAUDE_THINKING,
+        model: session.model ?? DEFAULT_CLAUDE_MODEL,
+        thinking: resolveThinkingConfig(session.thinking),
         permissionMode: session.permissionMode,
         allowedTools: ["Read", "Glob", "Grep", "WebSearch"],
         settingSources: [],
@@ -814,11 +884,7 @@ export class SessionManager {
     };
     this.active.set(session.id, run);
     let timedOut = false;
-    const overallTimeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-      run.query?.close();
-    }, this.options.codexMcpTimeoutMs);
+    let overallTimeout: NodeJS.Timeout | undefined;
 
     try {
       await this.safeRename(session, `[PLAN] ${session.title}`);
@@ -826,7 +892,7 @@ export class SessionManager {
       this.store.updateSession(session.id, { status: "running" });
 
       renderer.note("Claude 구현 계획 작성 중");
-      const plan = await this.runReadOnlyClaude(
+      let plan = await this.runReadOnlyClaude(
         session,
         controller,
         run,
@@ -839,8 +905,40 @@ export class SessionManager {
         + "이 단계에서 필요한 정보를 모두 확보해야 합니다.",
         true
       );
-      await renderer.text(`[PLAN]\n${plan}`);
+      while (true) {
+        await renderer.text(`[PLAN]\n${plan}`);
+        const decision = await this.permissions.requestPlanDecision(session, controller.signal);
+        if (controller.signal.aborted) throw new Error("Plan approval aborted");
+        if (decision.action === "approve") break;
+        if (decision.action === "reject") {
+          run.pendingTurns = 0;
+          this.store.updateSession(session.id, { status: "done" });
+          await renderer.finish("done", "사용자가 계획을 거절해 파이프라인을 종료했습니다.");
+          await this.safeRename(session, `[STOP] ${session.title}`);
+          return;
+        }
 
+        renderer.note("Claude 계획 재작성 중");
+        plan = await this.runReadOnlyClaude(
+          session,
+          controller,
+          run,
+          `${request.instruction}\n\n`
+          + "위 요청을 구현하기 위한 구체적이고 순서가 명확하며 자기완결적인 실행 계획을 작성하세요. "
+          + "관련 파일과 검증 방법을 포함하되 파일을 수정하거나 명령으로 변경하지 마세요. "
+          + "아래 이전 계획과 사용자 수정 요청을 반영해 계획을 다시 작성하세요. "
+          + "요청이 모호하거나 핵심 정보가 여전히 빠졌다면 AskUserQuestion 도구로 사용자에게 질문하세요.\n\n"
+          + `[이전 계획]\n${plan}\n\n`
+          + `[사용자 수정 요청]\n${decision.text ?? ""}`,
+          true
+        );
+      }
+
+      overallTimeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        run.query?.close();
+      }, this.options.codexMcpTimeoutMs);
       renderer.note("Codex 계획 실행 시작");
       run.codexStarts.set("plan-codex", Date.now());
       const codex = new Codex();
@@ -881,9 +979,12 @@ export class SessionManager {
         session,
         controller,
         run,
-        "다음 Codex 실행 결과와 git 변경 사항을 읽기 전용으로 검토하세요. "
-        + "정확성, 회귀 위험, 누락된 테스트를 우선 확인하고, 문제가 있으면 심각도 순으로 나열하세요. "
+        "Codex가 아래 계획의 구현을 완료했다고 보고했습니다. "
+        + "계획의 각 항목이 실제 변경(git diff)에 반영돼 구현 완료되었는지 "
+        + "항목별로 ✅(완료)/⚠️(부분)/❌(누락)으로 명시하세요. "
+        + "그다음 정확성, 회귀 위험, 누락된 테스트를 심각도 순으로 정리하고, "
         + "문제가 없으면 명확히 승인하세요.\n\n"
+        + `[PLAN]\n${summarize(plan, 10_000)}\n\n`
         + `[CODEX RESULT]\n${summarize(finalResponse, 10_000)}\n\n`
         + `[GIT STATUS]\n${changes.status || "(변경 없음)"}\n\n`
         + `[GIT DIFF]\n${summarize(changes.diff, 100_000) || "(diff 없음)"}`
@@ -926,7 +1027,7 @@ export class SessionManager {
         `${aborted ? "[STOP]" : timedOut ? "[STALL]" : "[ERROR]"} ${session.title}`
       );
     } finally {
-      clearTimeout(overallTimeout);
+      if (overallTimeout) clearTimeout(overallTimeout);
       renderer.dispose();
       input.close();
       run.query?.close();
@@ -947,8 +1048,8 @@ export class SessionManager {
       options: {
         cwd: session.cwd,
         abortController: controller,
-        model: CLAUDE_MODEL,
-        thinking: CLAUDE_THINKING,
+        model: session.model ?? DEFAULT_CLAUDE_MODEL,
+        thinking: resolveThinkingConfig(session.thinking),
         // plan 모드는 모델이 도구를 쓰려 하면 turn을 즉시 종료해 AskUserQuestion의 답을
         // 기다리지 못한다. 대화가 필요한 계획 단계에서는 default 모드로 돌려 질문이 실제로
         // 사용자 응답을 기다리게 한다. 편집은 read-only allowedTools로 여전히 차단된다.

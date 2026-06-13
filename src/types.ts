@@ -48,6 +48,8 @@ export interface SessionRecord {
   title: string;
   status: SessionStatus;
   permissionMode: PermissionMode;
+  model: string | null;
+  thinking: string | null;
   usageSnapshot: UsageSnapshot | null;
   createdAt: number;
   updatedAt: number;

@@ -20,6 +20,8 @@ interface SessionRow {
   title: string;
   status: SessionStatus;
   permission_mode: PermissionMode;
+  model: string | null;
+  thinking: string | null;
   usage_snapshot: string | null;
   always_allowed_tools: string;
   created_at: number;
@@ -72,6 +74,8 @@ export class StateStore {
         title TEXT NOT NULL,
         status TEXT NOT NULL,
         permission_mode TEXT NOT NULL,
+        model TEXT,
+        thinking TEXT,
         usage_snapshot TEXT,
         always_allowed_tools TEXT NOT NULL DEFAULT '[]',
         created_at INTEGER NOT NULL,
@@ -101,6 +105,12 @@ export class StateStore {
     if (!sessionColumns.some((column) => column.name === "usage_snapshot")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN usage_snapshot TEXT");
     }
+    if (!sessionColumns.some((column) => column.name === "model")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN model TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "thinking")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN thinking TEXT");
+    }
   }
 
   syncProjects(projects: ProjectConfig[]): void {
@@ -124,8 +134,8 @@ export class StateStore {
     this.db.prepare(`
       INSERT INTO sessions(
         id, sdk_session_id, chat_id, topic_id, project_name, cwd, title,
-        status, permission_mode, usage_snapshot, always_allowed_tools, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        status, permission_mode, model, thinking, usage_snapshot, always_allowed_tools, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.sdkSessionId,
@@ -136,6 +146,8 @@ export class StateStore {
       session.title,
       session.status,
       session.permissionMode,
+      session.model,
+      session.thinking,
       session.usageSnapshot ? JSON.stringify(session.usageSnapshot) : null,
       "[]",
       session.createdAt,
@@ -173,7 +185,7 @@ export class StateStore {
     id: string,
     fields: Partial<Pick<
       SessionRecord,
-      "sdkSessionId" | "title" | "status" | "permissionMode" | "usageSnapshot"
+      "sdkSessionId" | "title" | "status" | "permissionMode" | "model" | "thinking" | "usageSnapshot"
     >>
   ): void {
     const entries: Array<[string, unknown]> = [];
@@ -181,6 +193,8 @@ export class StateStore {
     if ("title" in fields) entries.push(["title", fields.title]);
     if ("status" in fields) entries.push(["status", fields.status]);
     if ("permissionMode" in fields) entries.push(["permission_mode", fields.permissionMode]);
+    if ("model" in fields) entries.push(["model", fields.model]);
+    if ("thinking" in fields) entries.push(["thinking", fields.thinking]);
     if ("usageSnapshot" in fields) {
       entries.push([
         "usage_snapshot",
@@ -274,6 +288,8 @@ export class StateStore {
       title: row.title,
       status: row.status,
       permissionMode: row.permission_mode,
+      model: row.model,
+      thinking: row.thinking,
       usageSnapshot: this.parseUsageSnapshot(row.usage_snapshot),
       createdAt: row.created_at,
       updatedAt: row.updated_at

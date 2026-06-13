@@ -109,6 +109,29 @@ export class PermissionBroker {
     return this.requestApproval(current, toolName, input, options);
   }
 
+  async requestPlanDecision(
+    session: SessionRecord,
+    signal: AbortSignal
+  ): Promise<{ action: "approve" | "reject" | "change"; text?: string }> {
+    const question = "이 구현 계획을 진행할까요? 수정이 필요하면 '기타-직접 입력'으로 변경 요청을 보내세요.";
+    const result = await this.requestQuestions(session, {
+      questions: [{
+        question,
+        header: "계획 승인",
+        options: [{ label: "승인" }, { label: "거절" }],
+        multiSelect: false
+      }]
+    }, signal);
+    if (result.behavior === "deny") return { action: "reject" };
+
+    const answers = (result.updatedInput?.answers ?? {}) as Record<string, string | string[]>;
+    const raw = answers[question];
+    const answer = Array.isArray(raw) ? raw[0] ?? "" : raw ?? "";
+    if (answer === "승인") return { action: "approve" };
+    if (answer === "거절") return { action: "reject" };
+    return { action: "change", text: answer };
+  }
+
   async handleCallback(data: string): Promise<string> {
     const [kind, id, action, rawIndex] = data.split(":");
     if (kind === "ap" && id && action) {
