@@ -28,6 +28,8 @@ function makeSession(cwd: string): SessionRecord {
     title: "test session",
     status: "running",
     permissionMode: "default",
+    model: null,
+    thinking: null,
     usageSnapshot: null,
     createdAt: now,
     updatedAt: now
@@ -75,13 +77,145 @@ describe("StateStore", () => {
     store.close();
   });
 
-  it("marks unfinished work interrupted on restart", () => {
+  it("persists a session model and defaults new sessions to null", () => {
     const store = makeStore();
     const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));
     store.createSession(session);
 
+    expect(store.getSession(session.id)?.model).toBeNull();
+    store.updateSession(session.id, { model: "claude-sonnet-4-6" });
+    expect(store.getSession(session.id)?.model).toBe("claude-sonnet-4-6");
+    store.close();
+  });
+
+  it("marks unfinished work interrupted on restart", () => {
+    const store = makeStore();
+    const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));
+    store.createSession(session);
+    store.createPlanRun({
+      id: "plan-run",
+      sessionId: session.id,
+      instruction: "구현",
+      planText: "계획",
+      status: "executing",
+      reviewerVerdict: null,
+      reviewText: null,
+      codexResult: null,
+      attemptCount: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      completedAt: null
+    });
+
     expect(store.interruptIncompleteSessions()).toBe(1);
     expect(store.getSession(session.id)?.status).toBe("interrupted");
+    expect(store.getPlanRun("plan-run")?.status).toBe("interrupted");
+    store.close();
+  });
+
+  it("persists plan criteria and evidence with reviewer results", () => {
+    const store = makeStore();
+    const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));
+    store.createSession(session);
+    store.createPlanRun({
+      id: "plan-run",
+      sessionId: session.id,
+      instruction: "구현",
+      planText: "계획",
+      status: "planning",
+      reviewerVerdict: null,
+      reviewText: null,
+      codexResult: null,
+      attemptCount: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      completedAt: null
+    });
+
+    const [criterion] = store.replacePlanCriteria("plan-run", ["npm test가 통과한다."]);
+    expect(criterion).toBeDefined();
+    store.updatePlanCriterion(criterion!.id, "pass", "종료 코드 0");
+    store.addPlanEvidence({
+      id: "evidence-1",
+      planRunId: "plan-run",
+      criterionId: criterion!.id,
+      kind: "command",
+      source: "codex",
+      summary: "completed: npm test",
+      details: { exitCode: 0 },
+      createdAt: 2
+    });
+    store.updatePlanRun("plan-run", {
+      status: "passed",
+      reviewerVerdict: "APPROVE",
+      reviewText: "{}",
+      completedAt: 3
+    });
+
+    expect(store.getLatestPlanRunForSession(session.id)).toMatchObject({
+      status: "passed",
+      reviewerVerdict: "APPROVE"
+    });
+    expect(store.listPlanCriteria("plan-run")).toMatchObject([{
+      status: "pass",
+      evidenceSummary: "종료 코드 0"
+    }]);
+    expect(store.listPlanEvidence("plan-run")).toMatchObject([{
+      criterionId: criterion!.id,
+      details: { exitCode: 0 }
+    }]);
+    store.close();
+  });
+
+  it("redacts secrets before persisting plan text and evidence", () => {
+    const store = makeStore();
+    const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));
+    const apiKey = `sk-${"a".repeat(24)}`;
+    const oauthToken = `sk-ant-oat01-${"private_token"}`;
+    const telegramToken = `123456789:${"A".repeat(32)}`;
+    store.createSession(session);
+    store.createPlanRun({
+      id: "secret-plan",
+      sessionId: session.id,
+      instruction: `use OPENAI_API_KEY=${apiKey}`,
+      planText: `token ${oauthToken}`,
+      status: "planning",
+      reviewerVerdict: null,
+      reviewText: null,
+      codexResult: null,
+      attemptCount: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      completedAt: null
+    });
+    const [criterion] = store.replacePlanCriteria(
+      "secret-plan",
+      [`API_KEY=${apiKey}를 출력하지 않는다.`]
+    );
+    store.updatePlanCriterion(criterion!.id, "pass", `Bearer ${"sensitive-token"}`);
+    store.addPlanEvidence({
+      id: "secret-evidence",
+      planRunId: "secret-plan",
+      criterionId: null,
+      kind: "command",
+      source: "codex",
+      summary: "Bearer sensitive-token",
+      details: { output: `TELEGRAM_BOT_TOKEN=${telegramToken}` },
+      createdAt: 2
+    });
+
+    expect(store.getPlanRun("secret-plan")).toMatchObject({
+      instruction: "use OPENAI_API_KEY=[REDACTED]",
+      planText: "token [REDACTED]"
+    });
+    expect(store.listPlanCriteria("secret-plan")).toMatchObject([{
+      description: "API_KEY=[REDACTED] 출력하지 않는다.",
+      evidenceSummary: "[REDACTED]"
+    }]);
+    expect(store.listPlanEvidence("secret-plan")).toMatchObject([{
+      summary: "[REDACTED]",
+      details: { output: "TELEGRAM_BOT_TOKEN=[REDACTED]" }
+    }]);
     store.close();
   });
 
@@ -100,15 +234,30 @@ describe("StateStore", () => {
       expiresAt: Date.now() + 60_000,
       messageId: 1
     });
+    store.createPlanRun({
+      id: "plan-run",
+      sessionId: session.id,
+      instruction: "구현",
+      planText: "계획",
+      status: "planning",
+      reviewerVerdict: null,
+      reviewText: null,
+      codexResult: null,
+      attemptCount: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      completedAt: null
+    });
 
     expect(store.deleteSession(session.id)).toBe(true);
     expect(store.getSession(session.id)).toBeUndefined();
     expect(store.getApproval("approval-1")).toBeUndefined();
+    expect(store.getPlanRun("plan-run")).toBeUndefined();
     expect(store.deleteSession(session.id)).toBe(false);
     store.close();
   });
 
-  it("adds usage snapshots to databases created by the cost-tracking schema", () => {
+  it("adds usage snapshots and models to databases created by the cost-tracking schema", () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-claude-legacy-store-"));
     tempDirs.push(directory);
     const path = join(directory, "state.sqlite");
@@ -141,6 +290,7 @@ describe("StateStore", () => {
     const store = new StateStore(path);
     const columns = store.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toContain("usage_snapshot");
+    expect(columns.map((column) => column.name)).toContain("model");
     store.close();
   });
 });

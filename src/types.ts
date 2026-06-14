@@ -6,9 +6,71 @@ export type SessionStatus =
   | "running"
   | "waiting_approval"
   | "done"
+  | "verification_failed"
   | "aborted"
   | "error"
   | "interrupted";
+
+export type PlanRunStatus =
+  | "planning"
+  | "awaiting_approval"
+  | "executing"
+  | "reviewing"
+  | "passed"
+  | "failed"
+  | "rejected"
+  | "aborted"
+  | "interrupted";
+
+export type PlanCriterionStatus = "pending" | "pass" | "fail" | "blocked";
+
+export type PlanEvidenceKind =
+  | "command"
+  | "file_change"
+  | "todo"
+  | "mcp"
+  | "web_search"
+  | "agent_result"
+  | "git_status"
+  | "git_diff"
+  | "review"
+  | "error";
+
+export interface PlanRunRecord {
+  id: string;
+  sessionId: string;
+  instruction: string;
+  planText: string;
+  status: PlanRunStatus;
+  reviewerVerdict: "APPROVE" | "REJECT" | null;
+  reviewText: string | null;
+  codexResult: string | null;
+  attemptCount: number;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+}
+
+export interface PlanCriterionRecord {
+  id: string;
+  planRunId: string;
+  ordinal: number;
+  description: string;
+  status: PlanCriterionStatus;
+  evidenceSummary: string | null;
+  updatedAt: number;
+}
+
+export interface PlanEvidenceRecord {
+  id: string;
+  planRunId: string;
+  criterionId: string | null;
+  kind: PlanEvidenceKind;
+  source: "codex" | "claude" | "orchestrator";
+  summary: string;
+  details: Record<string, unknown>;
+  createdAt: number;
+}
 
 export interface ProjectConfig {
   name: string;

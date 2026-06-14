@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -21,11 +22,24 @@ import {
   mcpCallKey,
   mcpServerName
 } from "./mcp-policy.js";
+import {
+  buildPlanPrompt,
+  buildReviewPrompt,
+  formatStructuredReview,
+  parseAcceptanceCriteria,
+  parsePlanReview
+} from "./plan-verification.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { StateStore } from "./store.js";
 import { StreamRenderer } from "./stream-renderer.js";
 import { safeErrorMessage } from "./telegram-transport.js";
-import type { MessageTransport, ProjectConfig, SessionRecord, UsageSnapshot } from "./types.js";
+import type {
+  MessageTransport,
+  PlanEvidenceKind,
+  ProjectConfig,
+  SessionRecord,
+  UsageSnapshot
+} from "./types.js";
 import {
   mergeUsageSnapshots,
   snapshotFromRateLimitInfo,
@@ -33,6 +47,9 @@ import {
 } from "./usage.js";
 
 const execFileAsync = promisify(execFile);
+const MAX_PLAN_EXECUTION_ATTEMPTS = 3;
+export const CODEX_MODEL = "gpt-5.5";
+export const CODEX_REASONING_EFFORT = "high" as const;
 
 export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
@@ -179,6 +196,74 @@ function codexProgress(item: ThreadItem): string | null {
   return null;
 }
 
+function codexEvidence(item: ThreadItem): {
+  kind: PlanEvidenceKind;
+  summary: string;
+  details: Record<string, unknown>;
+} | null {
+  if (item.type === "command_execution") {
+    return {
+      kind: "command",
+      summary: `${item.status}: ${item.command.split("\n")[0]?.slice(0, 500) ?? ""}`,
+      details: {
+        command: item.command,
+        status: item.status,
+        exitCode: item.exit_code ?? null,
+        output: item.aggregated_output.slice(-20_000)
+      }
+    };
+  }
+  if (item.type === "file_change") {
+    return {
+      kind: "file_change",
+      summary: `${item.status}: ${item.changes.map((change) => change.path).join(", ").slice(0, 1000)}`,
+      details: { status: item.status, changes: item.changes }
+    };
+  }
+  if (item.type === "todo_list") {
+    const completed = item.items.filter((todo) => todo.completed).length;
+    return {
+      kind: "todo",
+      summary: `${completed}/${item.items.length} 완료`,
+      details: { items: item.items }
+    };
+  }
+  if (item.type === "mcp_tool_call") {
+    return {
+      kind: "mcp",
+      summary: `${item.status}: ${item.server}/${item.tool}`,
+      details: {
+        server: item.server,
+        tool: item.tool,
+        status: item.status,
+        error: item.error?.message ?? null
+      }
+    };
+  }
+  if (item.type === "web_search") {
+    return {
+      kind: "web_search",
+      summary: item.query.slice(0, 1000),
+      details: { query: item.query }
+    };
+  }
+  if (item.type === "agent_message") {
+    return {
+      kind: "agent_result",
+      summary: item.text.slice(0, 2000),
+      details: { text: item.text.slice(0, 20_000) }
+    };
+  }
+  if (item.type === "error") {
+    return {
+      kind: "error",
+      summary: item.message.slice(0, 2000),
+      details: { message: item.message.slice(0, 20_000) }
+    };
+  }
+  return null;
+}
+
 function formatCodexUsage(usage: Usage | null): string {
   if (!usage) return "사용량 정보 없음";
   return [
@@ -189,9 +274,64 @@ function formatCodexUsage(usage: Usage | null): string {
   ].join(" · ");
 }
 
+function addCodexUsage(current: Usage | null, next: Usage): Usage {
+  if (!current) return next;
+  return {
+    input_tokens: current.input_tokens + next.input_tokens,
+    cached_input_tokens: current.cached_input_tokens + next.cached_input_tokens,
+    output_tokens: current.output_tokens + next.output_tokens,
+    reasoning_output_tokens:
+      current.reasoning_output_tokens + next.reasoning_output_tokens
+  };
+}
+
 function summarize(text: string, length = 1200): string {
   const clean = text.trim();
   return clean.length <= length ? clean : `${clean.slice(0, length)}\n...`;
+}
+
+export function buildCodexEnvironment(
+  source: NodeJS.ProcessEnv = process.env
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    if ([
+      "OPENAI_API_KEY",
+      "CODEX_API_KEY",
+      "OPENAI_BASE_URL",
+      "OPENAI_API_BASE"
+    ].includes(key)) {
+      continue;
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
+export function requireCodexSubscriptionAuth(
+  source: NodeJS.ProcessEnv = process.env
+): void {
+  const codexHome = source.CODEX_HOME?.trim() || join(homedir(), ".codex");
+  const authPath = join(codexHome, "auth.json");
+  let auth: unknown;
+  try {
+    auth = JSON.parse(readFileSync(authPath, "utf8")) as unknown;
+  } catch {
+    throw new Error(
+      "Codex 구독 로그인을 확인할 수 없습니다. 로컬 Codex CLI에서 Sign in with ChatGPT를 완료하세요."
+    );
+  }
+  if (
+    typeof auth !== "object"
+    || auth === null
+    || Array.isArray(auth)
+    || (auth as Record<string, unknown>)["auth_mode"] !== "chatgpt"
+  ) {
+    throw new Error(
+      "Codex API 키 인증은 허용하지 않습니다. Codex CLI를 ChatGPT 구독 계정으로 로그인하세요."
+    );
+  }
 }
 
 export class StreamingTextCollector {
@@ -883,6 +1023,22 @@ export class SessionManager {
       mcpFailures: new Map()
     };
     this.active.set(session.id, run);
+    const planRunId = randomUUID();
+    const planRunCreatedAt = Date.now();
+    this.store.createPlanRun({
+      id: planRunId,
+      sessionId: session.id,
+      instruction: request.instruction,
+      planText: "",
+      status: "planning",
+      reviewerVerdict: null,
+      reviewText: null,
+      codexResult: null,
+      attemptCount: 0,
+      createdAt: planRunCreatedAt,
+      updatedAt: planRunCreatedAt,
+      completedAt: null
+    });
     let timedOut = false;
     let overallTimeout: NodeJS.Timeout | undefined;
 
@@ -896,22 +1052,44 @@ export class SessionManager {
         session,
         controller,
         run,
-        `${request.instruction}\n\n`
-        + "위 요청을 구현하기 위한 구체적이고 순서가 명확하며 자기완결적인 실행 계획을 작성하세요. "
-        + "관련 파일과 검증 방법을 포함하되 파일을 수정하거나 명령으로 변경하지 마세요. "
-        + "요청이 모호하거나 추가할 정확한 문구·삽입 위치·대상 파일 같은 핵심 정보가 빠졌다면, "
-        + "계획을 확정하기 전에 AskUserQuestion 도구로 사용자에게 질문해 확인하세요. "
-        + "핵심 사항을 임의로 추측하지 마세요. 이후 Codex 실행은 비대화형이므로 "
-        + "이 단계에서 필요한 정보를 모두 확보해야 합니다.",
+        buildPlanPrompt(request.instruction),
         true
       );
+      let criteria = parseAcceptanceCriteria(plan);
+      if (criteria.length === 0) {
+        renderer.note("완료 기준 형식 보정 중");
+        plan = await this.runReadOnlyClaude(
+          session,
+          controller,
+          run,
+          buildPlanPrompt(
+            request.instruction,
+            plan,
+            "계획 마지막의 [ACCEPTANCE_CRITERIA] 블록이 누락됐습니다. 계획 내용은 유지하고 독립 검증 가능한 기준을 추가하세요."
+          ),
+          true
+        );
+        criteria = parseAcceptanceCriteria(plan);
+      }
+      if (criteria.length === 0) {
+        throw new Error("계획에 구조화된 완료 기준이 없어 실행을 시작하지 않았습니다.");
+      }
       while (true) {
+        this.store.updatePlanRun(planRunId, {
+          planText: plan,
+          status: "awaiting_approval"
+        });
+        this.store.replacePlanCriteria(planRunId, criteria);
         await renderer.text(`[PLAN]\n${plan}`);
         const decision = await this.permissions.requestPlanDecision(session, controller.signal);
         if (controller.signal.aborted) throw new Error("Plan approval aborted");
         if (decision.action === "approve") break;
         if (decision.action === "reject") {
           run.pendingTurns = 0;
+          this.store.updatePlanRun(planRunId, {
+            status: "rejected",
+            completedAt: Date.now()
+          });
           this.store.updateSession(session.id, { status: "done" });
           await renderer.finish("done", "사용자가 계획을 거절해 파이프라인을 종료했습니다.");
           await this.safeRename(session, `[STOP] ${session.title}`);
@@ -923,17 +1101,17 @@ export class SessionManager {
           session,
           controller,
           run,
-          `${request.instruction}\n\n`
-          + "위 요청을 구현하기 위한 구체적이고 순서가 명확하며 자기완결적인 실행 계획을 작성하세요. "
-          + "관련 파일과 검증 방법을 포함하되 파일을 수정하거나 명령으로 변경하지 마세요. "
-          + "아래 이전 계획과 사용자 수정 요청을 반영해 계획을 다시 작성하세요. "
-          + "요청이 모호하거나 핵심 정보가 여전히 빠졌다면 AskUserQuestion 도구로 사용자에게 질문하세요.\n\n"
-          + `[이전 계획]\n${plan}\n\n`
-          + `[사용자 수정 요청]\n${decision.text ?? ""}`,
+          buildPlanPrompt(request.instruction, plan, decision.text ?? ""),
           true
         );
+        criteria = parseAcceptanceCriteria(plan);
+        if (criteria.length === 0) {
+          throw new Error("수정된 계획에 구조화된 완료 기준이 없어 실행을 시작하지 않았습니다.");
+        }
       }
 
+      this.store.updatePlanRun(planRunId, { status: "executing" });
+      requireCodexSubscriptionAuth();
       overallTimeout = setTimeout(() => {
         timedOut = true;
         controller.abort();
@@ -941,61 +1119,182 @@ export class SessionManager {
       }, this.options.codexMcpTimeoutMs);
       renderer.note("Codex 계획 실행 시작");
       run.codexStarts.set("plan-codex", Date.now());
-      const codex = new Codex();
+      const codex = new Codex({ env: buildCodexEnvironment() });
       const thread = codex.startThread({
+        model: CODEX_MODEL,
+        modelReasoningEffort: CODEX_REASONING_EFFORT,
         workingDirectory: session.cwd,
         skipGitRepoCheck: true,
         sandboxMode: "workspace-write",
         approvalPolicy: "never"
       });
-      const streamed = await thread.runStreamed(
-        `다음 구현 계획을 현재 작업 디렉터리에서 끝까지 실행하세요. `
-        + `필요한 파일을 수정하고 관련 테스트와 타입 검사를 실행하세요.\n\n${plan}`,
-        { signal: controller.signal }
-      );
       let finalResponse = "";
       let codexUsage: Usage | null = null;
-      let codexCompleted = false;
-      for await (const event of streamed.events) {
-        if (event.type === "item.completed") {
-          if (event.item.type === "agent_message") finalResponse = event.item.text;
-          const progress = codexProgress(event.item);
-          if (progress) renderer.note(progress);
-        } else if (event.type === "turn.completed") {
-          codexUsage = event.usage;
-          codexCompleted = true;
-        } else if (event.type === "turn.failed") {
-          throw new Error(`Codex 실행 실패: ${event.error.message}`);
-        } else if (event.type === "error") {
-          throw new Error(`Codex 스트림 오류: ${event.message}`);
-        }
-      }
-      if (!codexCompleted) throw new Error("Codex 실행이 완료 이벤트 없이 종료되었습니다.");
-      run.codexStarts.delete("plan-codex");
+      let finalReview: ReturnType<typeof parsePlanReview> | null = null;
+      let codexPrompt =
+        `다음 구현 계획을 현재 작업 디렉터리에서 끝까지 실행하세요. `
+        + `필요한 파일을 수정하고 관련 테스트와 타입 검사를 실제로 실행하세요. `
+        + `각 완료 기준을 어떤 명령과 결과로 검증했는지 최종 응답에 명시하세요.\n\n${plan}`;
 
-      const changes = await this.captureGitChanges(session.cwd);
-      renderer.note("Claude 변경 사항 검토 중");
-      const review = await this.runReadOnlyClaude(
-        session,
-        controller,
-        run,
-        "Codex가 아래 계획의 구현을 완료했다고 보고했습니다. "
-        + "계획의 각 항목이 실제 변경(git diff)에 반영돼 구현 완료되었는지 "
-        + "항목별로 ✅(완료)/⚠️(부분)/❌(누락)으로 명시하세요. "
-        + "그다음 정확성, 회귀 위험, 누락된 테스트를 심각도 순으로 정리하고, "
-        + "문제가 없으면 명확히 승인하세요.\n\n"
-        + `[PLAN]\n${summarize(plan, 10_000)}\n\n`
-        + `[CODEX RESULT]\n${summarize(finalResponse, 10_000)}\n\n`
-        + `[GIT STATUS]\n${changes.status || "(변경 없음)"}\n\n`
-        + `[GIT DIFF]\n${summarize(changes.diff, 100_000) || "(diff 없음)"}`
-      );
+      for (let attempt = 1; attempt <= MAX_PLAN_EXECUTION_ATTEMPTS; attempt += 1) {
+        this.store.updatePlanRun(planRunId, {
+          status: "executing",
+          attemptCount: attempt
+        });
+        renderer.note(`Codex 실행 ${attempt}/${MAX_PLAN_EXECUTION_ATTEMPTS}`);
+        run.codexStarts.set("plan-codex", Date.now());
+        const streamed = await thread.runStreamed(codexPrompt, { signal: controller.signal });
+        let attemptResponse = "";
+        let codexCompleted = false;
+        try {
+          for await (const event of streamed.events) {
+            if (event.type === "item.completed") {
+              if (event.item.type === "agent_message") attemptResponse = event.item.text;
+              const progress = codexProgress(event.item);
+              if (progress) renderer.note(progress);
+              const recorded = codexEvidence(event.item);
+              if (recorded) {
+                this.store.addPlanEvidence({
+                  id: randomUUID(),
+                  planRunId,
+                  criterionId: null,
+                  kind: recorded.kind,
+                  source: "codex",
+                  summary: `시도 ${attempt}: ${recorded.summary}`,
+                  details: { attempt, ...recorded.details },
+                  createdAt: Date.now()
+                });
+              }
+            } else if (event.type === "turn.completed") {
+              codexUsage = addCodexUsage(codexUsage, event.usage);
+              codexCompleted = true;
+            } else if (event.type === "turn.failed") {
+              throw new Error(`Codex 실행 실패: ${event.error.message}`);
+            } else if (event.type === "error") {
+              throw new Error(`Codex 스트림 오류: ${event.message}`);
+            }
+          }
+        } finally {
+          run.codexStarts.delete("plan-codex");
+        }
+        if (!codexCompleted) throw new Error("Codex 실행이 완료 이벤트 없이 종료되었습니다.");
+        finalResponse = attemptResponse || finalResponse;
+        this.store.updatePlanRun(planRunId, { codexResult: finalResponse });
+
+        const changes = await this.captureGitChanges(session.cwd);
+        this.store.addPlanEvidence({
+          id: randomUUID(),
+          planRunId,
+          criterionId: null,
+          kind: "git_status",
+          source: "orchestrator",
+          summary: `시도 ${attempt}: ${changes.status || "변경 없음"}`,
+          details: { attempt, status: changes.status },
+          createdAt: Date.now()
+        });
+        this.store.addPlanEvidence({
+          id: randomUUID(),
+          planRunId,
+          criterionId: null,
+          kind: "git_diff",
+          source: "orchestrator",
+          summary: `시도 ${attempt}: ${changes.diff ? "git diff 캡처 완료" : "git diff 없음"}`,
+          details: { attempt, diff: changes.diff.slice(0, 200_000) },
+          createdAt: Date.now()
+        });
+        renderer.note(`Claude 완료 검토 ${attempt}/${MAX_PLAN_EXECUTION_ATTEMPTS}`);
+        this.store.updatePlanRun(planRunId, { status: "reviewing" });
+        const evidence = this.store.listPlanEvidence(planRunId);
+        const reviewText = await this.runReadOnlyClaude(
+          session,
+          controller,
+          run,
+          buildReviewPrompt(plan, finalResponse, criteria, evidence, changes.status, changes.diff)
+        );
+        const review = parsePlanReview(reviewText, criteria.length);
+        finalReview = review;
+        const storedCriteria = this.store.listPlanCriteria(planRunId);
+        for (const criterion of review.criteria) {
+          const stored = storedCriteria[criterion.ordinal - 1];
+          if (!stored) continue;
+          this.store.updatePlanCriterion(stored.id, criterion.status, criterion.evidence);
+          this.store.addPlanEvidence({
+            id: randomUUID(),
+            planRunId,
+            criterionId: stored.id,
+            kind: "review",
+            source: "claude",
+            summary: `시도 ${attempt} ${criterion.status}: ${criterion.evidence}`,
+            details: {
+              attempt,
+              ordinal: criterion.ordinal,
+              status: criterion.status,
+              description: stored.description
+            },
+            createdAt: Date.now()
+          });
+        }
+        this.store.addPlanEvidence({
+          id: randomUUID(),
+          planRunId,
+          criterionId: null,
+          kind: "review",
+          source: "claude",
+          summary: `시도 ${attempt} ${review.verdict}: ${review.summary}`,
+          details: {
+            attempt,
+            verdict: review.verdict,
+            blockers: review.blockers,
+            criteria: review.criteria,
+            raw: reviewText.slice(0, 20_000)
+          },
+          createdAt: Date.now()
+        });
+        this.store.updatePlanRun(planRunId, {
+          reviewerVerdict: review.verdict,
+          reviewText
+        });
+        if (review.approved || attempt === MAX_PLAN_EXECUTION_ATTEMPTS) break;
+
+        await renderer.text(
+          `[검증 실패 ${attempt}/${MAX_PLAN_EXECUTION_ATTEMPTS}]\n`
+          + `${formatStructuredReview(review)}\n\n`
+          + "같은 Codex 스레드에서 차단 문제를 수정하고 다시 검증합니다."
+        );
+        const failedCriteria = review.criteria
+          .filter((criterion) => criterion.status !== "pass")
+          .map((criterion) => `${criterion.ordinal}. ${criterion.status}: ${criterion.evidence}`)
+          .join("\n");
+        codexPrompt = [
+          "독립 검토에서 구현이 거절되었습니다. 설명만 하지 말고 현재 작업 디렉터리의 파일을 직접 수정하세요.",
+          "아래 차단 문제와 실패 기준만 해결하되 기존에 통과한 동작을 회귀시키지 마세요.",
+          "수정 후 관련 테스트와 타입 검사를 실제로 다시 실행하고 결과를 보고하세요.",
+          "",
+          "[차단 문제]",
+          review.blockers.length > 0 ? review.blockers.map((item) => `- ${item}`).join("\n") : "- 명시된 차단 문제 없음",
+          "",
+          "[실패 또는 차단된 완료 기준]",
+          failedCriteria || "- 검토 형식 또는 증거가 부족함",
+          "",
+          "[검토 요약]",
+          review.summary
+        ].join("\n");
+      }
+
+      if (!finalReview) throw new Error("Claude 완료 검토 결과가 생성되지 않았습니다.");
+      this.store.updatePlanRun(planRunId, {
+        status: finalReview.approved ? "passed" : "failed",
+        completedAt: Date.now()
+      });
 
       run.pendingTurns = 0;
-      this.store.updateSession(session.id, { status: "done" });
+      this.store.updateSession(session.id, {
+        status: finalReview.approved ? "done" : "verification_failed"
+      });
       await renderer.finish(
-        "done",
+        finalReview.approved ? "done" : "error",
         [
-          "[PLAN PIPELINE 완료]",
+          finalReview.approved ? "[PLAN PIPELINE 완료]" : "[PLAN PIPELINE 검증 실패]",
           "",
           "계획 요약",
           summarize(plan),
@@ -1004,15 +1303,23 @@ export class SessionManager {
           summarize(finalResponse || "최종 응답 없음"),
           "",
           "Claude 검토",
-          review,
+          formatStructuredReview(finalReview),
           "",
           `Codex 사용량: ${formatCodexUsage(codexUsage)}`
         ].join("\n")
       );
-      await this.safeRename(session, `[DONE] ${session.title}`);
+      await this.safeRename(
+        session,
+        `${finalReview.approved ? "[DONE]" : "[REVIEW FAILED]"} ${session.title}`
+      );
     } catch (error) {
       if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
       const aborted = controller.signal.aborted && !timedOut;
+      this.store.updatePlanRun(planRunId, {
+        status: aborted ? "aborted" : "failed",
+        reviewText: safeErrorMessage(error),
+        completedAt: Date.now()
+      });
       this.store.updateSession(session.id, { status: aborted ? "aborted" : "error" });
       await renderer.finish(
         aborted ? "aborted" : "error",

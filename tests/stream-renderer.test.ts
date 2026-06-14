@@ -29,6 +29,8 @@ describe("StreamRenderer text deduplication", () => {
       title: "test",
       status: "running",
       permissionMode: "auto",
+      model: null,
+      thinking: null,
       usageSnapshot: null,
       createdAt: now,
       updatedAt: now

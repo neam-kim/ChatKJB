@@ -3,6 +3,7 @@ import {
   accessSync,
   constants,
   existsSync,
+  readdirSync,
   readFileSync,
   statfsSync,
   statSync
@@ -11,12 +12,29 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { CLAUDE_OAUTH_TOKEN_PATTERN, type AppConfig } from "./config.js";
+import { requireCodexSubscriptionAuth } from "./session-manager.js";
 import { StateStore } from "./store.js";
 import { safeErrorMessage } from "./telegram-transport.js";
 
 const execFileAsync = promisify(execFile);
-export const LAUNCH_AGENT_LABEL =
-  process.env.LAUNCH_AGENT_LABEL ?? "com.local.telegram-claude-orchestrator";
+const localLaunchAgentLabel = "com.local.telegram-claude-orchestrator";
+
+function detectLaunchAgentLabel(): string {
+  if (process.env.LAUNCH_AGENT_LABEL) return process.env.LAUNCH_AGENT_LABEL;
+  const directory = join(homedir(), "Library", "LaunchAgents");
+  if (existsSync(join(directory, `${localLaunchAgentLabel}.plist`))) {
+    return localLaunchAgentLabel;
+  }
+  try {
+    const suffix = "telegram-claude-orchestrator.plist";
+    const filename = readdirSync(directory).find((entry) => entry.endsWith(suffix));
+    return filename?.replace(/\.plist$/, "") ?? localLaunchAgentLabel;
+  } catch {
+    return localLaunchAgentLabel;
+  }
+}
+
+export const LAUNCH_AGENT_LABEL = detectLaunchAgentLabel();
 
 interface DoctorDeps {
   config: AppConfig;
@@ -142,6 +160,10 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
         ? "✅ OAuth 토큰: 형식 유효"
         : "❌ OAuth 토큰: 형식 오류"
     ]),
+    check("Codex 구독 인증", 1000, async () => {
+      requireCodexSubscriptionAuth();
+      return ["✅ Codex 구독 인증: ChatGPT 로그인 확인"];
+    }),
     check("launchd", 3000, async () => {
       const uid = process.getuid?.();
       if (uid === undefined) return ["⚠️ launchd: 현재 사용자 ID 확인 불가"];

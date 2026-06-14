@@ -5,13 +5,18 @@ import { describe, expect, it } from "vitest";
 import { PermissionBroker } from "../src/permission-broker.js";
 import {
   buildClaudeEnvironment,
+  buildCodexEnvironment,
   buildCompactCommand,
   buildMemoryPrompt,
   buildUserMessage,
   CLAUDE_MODEL,
   CLAUDE_THINKING,
+  CODEX_MODEL,
+  CODEX_REASONING_EFFORT,
   loadProjectInstructions,
   MessageQueue,
+  requireCodexSubscriptionAuth,
+  resolveModel,
   resultSummary,
   SessionManager,
   StreamingTextCollector
@@ -48,10 +53,56 @@ describe("Claude child environment", () => {
   });
 });
 
+describe("Codex subscription authentication", () => {
+  it("removes API billing credentials from the Codex child environment", () => {
+    expect(buildCodexEnvironment({
+      PATH: "/usr/bin",
+      HOME: "/tmp/home",
+      OPENAI_API_KEY: "openai-key",
+      CODEX_API_KEY: "codex-key",
+      OPENAI_BASE_URL: "https://example.test",
+      CODEX_HOME: "/tmp/codex"
+    })).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/tmp/home",
+      CODEX_HOME: "/tmp/codex"
+    });
+  });
+
+  it("accepts ChatGPT login and rejects API-key auth mode", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-codex-auth-"));
+    try {
+      writeFileSync(join(directory, "auth.json"), JSON.stringify({ auth_mode: "chatgpt" }));
+      expect(() => requireCodexSubscriptionAuth({ CODEX_HOME: directory })).not.toThrow();
+
+      writeFileSync(join(directory, "auth.json"), JSON.stringify({ auth_mode: "apikey" }));
+      expect(() => requireCodexSubscriptionAuth({ CODEX_HOME: directory }))
+        .toThrow("API 키 인증은 허용하지 않습니다");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("Claude model policy", () => {
   it("forces Opus 4.8 with adaptive thinking", () => {
     expect(CLAUDE_MODEL).toBe("claude-opus-4-8");
     expect(CLAUDE_THINKING).toEqual({ type: "adaptive" });
+  });
+
+  it("resolves supported model aliases and rejects unknown models", () => {
+    expect(resolveModel("sonnet")).toBe("claude-sonnet-4-6");
+    expect(resolveModel("fable")).toBe("claude-fable-5");
+    expect(resolveModel("opus")).toBe("claude-opus-4-8");
+    expect(resolveModel(" CLAUDE-SONNET-4-6 ")).toBe("claude-sonnet-4-6");
+    expect(resolveModel("없는모델")).toBeUndefined();
+  });
+});
+
+describe("Codex model policy", () => {
+  it("forces GPT-5.5 with high reasoning", () => {
+    expect(CODEX_MODEL).toBe("gpt-5.5");
+    expect(CODEX_REASONING_EFFORT).toBe("high");
   });
 });
 
@@ -194,6 +245,8 @@ describe("session deletion", () => {
       title: "delete me",
       status: "done",
       permissionMode: "default",
+      model: null,
+      thinking: null,
       usageSnapshot: null,
       createdAt: now,
       updatedAt: now

@@ -10,6 +10,8 @@ import { PermissionBroker } from "./permission-broker.js";
 import {
   buildMemoryPrompt,
   CLAUDE_MODELS,
+  CODEX_MODEL,
+  CODEX_REASONING_EFFORT,
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_THINKING_LEVEL,
   modelLabel,
@@ -72,6 +74,8 @@ function formatDuration(milliseconds: number): string {
 export function formatSessionStatus(session: SessionRecord, active: boolean): string {
   const state = session.status === "waiting_approval"
     ? "승인 대기 중"
+    : session.status === "verification_failed"
+      ? "완료 검증 실패"
     : active
       ? "실행 중"
       : session.status === "queued"
@@ -84,7 +88,23 @@ export function formatSessionStatus(session: SessionRecord, active: boolean): st
     `프로젝트: ${session.projectName}`,
     `모델: ${modelLabel(session.model ?? DEFAULT_CLAUDE_MODEL)}`,
     `thinking: ${thinkingLabel(session.thinking ?? DEFAULT_THINKING_LEVEL)}`,
+    `Codex: ${CODEX_MODEL} · reasoning ${CODEX_REASONING_EFFORT}`,
     `마지막 상태 변경: ${formatTimestamp(session.updatedAt)}`
+  ].join("\n");
+}
+
+function formatPlanProgress(store: StateStore, sessionId: string): string {
+  const run = store.getLatestPlanRunForSession(sessionId);
+  if (!run) return "";
+  const criteria = store.listPlanCriteria(run.id);
+  const pass = criteria.filter((criterion) => criterion.status === "pass").length;
+  const fail = criteria.filter((criterion) => criterion.status === "fail").length;
+  const blocked = criteria.filter((criterion) => criterion.status === "blocked").length;
+  return [
+    "",
+    `계획 실행: ${run.status} · Codex 시도 ${run.attemptCount}회`,
+    `완료 기준: ${pass}/${criteria.length} 통과 · 실패 ${fail} · 차단 ${blocked}`,
+    `검토 판정: ${run.reviewerVerdict ?? "대기"}`
   ].join("\n");
 }
 
@@ -346,7 +366,10 @@ export function createBot(config: AppConfig, store: StateStore) {
       const codex = inspection?.codexInFlight && inspection.codexElapsedMs !== null
         ? `\nCodex: 실행 중 ${formatDuration(inspection.codexElapsedMs)}`
         : "";
-      await ctx.reply(`${formatSessionStatus(session, sessions.isActive(session.id))}${codex}`);
+      await ctx.reply(
+        `${formatSessionStatus(session, sessions.isActive(session.id))}`
+        + `${formatPlanProgress(store, session.id)}${codex}`
+      );
       return;
     }
 
@@ -400,7 +423,10 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("이 세션에서 이미 실행 중이거나 대기 중인 작업이 있습니다.");
       return;
     }
-    await ctx.reply("계획 작성, Codex 실행, Claude 검토 파이프라인을 예약했습니다.");
+    await ctx.reply(
+      "계획 작성, Codex 실행, 완료 기준별 증거 수집, Claude 승인 검토 파이프라인을 예약했습니다. "
+      + "Claude 구독 OAuth와 ChatGPT 구독 로그인을 사용하며 API 키 인증은 허용하지 않습니다."
+    );
   });
 
   bot.command("usage", async (ctx) => {

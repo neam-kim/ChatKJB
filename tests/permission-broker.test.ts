@@ -69,6 +69,8 @@ function setup() {
     title: "test",
     status: "running",
     permissionMode: "default",
+    model: null,
+    thinking: null,
     usageSnapshot: null,
     createdAt: now,
     updatedAt: now
@@ -192,6 +194,43 @@ describe("PermissionBroker", () => {
           "포함할 항목은?": ["A", "B"]
         }
       }
+    });
+  });
+
+  it("returns an approved plan decision", async () => {
+    const { session, transport, broker } = setup();
+    const controller = new AbortController();
+    const decision = broker.requestPlanDecision(session, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await broker.handleCallback(callbackData(transport, "승인"));
+
+    await expect(decision).resolves.toEqual({ action: "approve" });
+  });
+
+  it("returns a rejected plan decision", async () => {
+    const { session, transport, broker } = setup();
+    const controller = new AbortController();
+    const decision = broker.requestPlanDecision(session, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await broker.handleCallback(callbackData(transport, "거절"));
+
+    await expect(decision).resolves.toEqual({ action: "reject" });
+  });
+
+  it("returns free text as a plan change request", async () => {
+    const { session, transport, broker } = setup();
+    const controller = new AbortController();
+    const decision = broker.requestPlanDecision(session, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await broker.handleCallback(callbackData(transport, "기타-직접 입력"));
+    await broker.handleTextInput(session.id, "테스트 단계를 먼저 실행해 주세요.");
+
+    await expect(decision).resolves.toEqual({
+      action: "change",
+      text: "테스트 단계를 먼저 실행해 주세요."
     });
   });
 
