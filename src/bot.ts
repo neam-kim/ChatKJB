@@ -877,7 +877,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     await ctx.reply(
-      `Codex ${codexModelLabel(codexModel)} · ${option.label}로 계획 작성, Codex 실행, `
+      `Claude가 계획 작성, Codex ${codexModelLabel(codexModel)} · ${option.label}로 실행, `
       + "완료 기준별 증거 수집, Claude 승인 검토 파이프라인을 예약했습니다. "
       + "Claude 구독 OAuth와 ChatGPT 구독 로그인을 사용하며 API 키 인증은 허용하지 않습니다."
     );
