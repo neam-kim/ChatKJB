@@ -48,8 +48,53 @@ import {
 
 const execFileAsync = promisify(execFile);
 const MAX_PLAN_EXECUTION_ATTEMPTS = 3;
-export const CODEX_MODEL = "gpt-5.5";
-export const CODEX_REASONING_EFFORT = "high" as const;
+export interface CodexModelOption {
+  id: string;
+  label: string;
+}
+export const CODEX_MODELS: CodexModelOption[] = [
+  { id: "gpt-5.5", label: "GPT-5.5" }
+];
+export const DEFAULT_CODEX_MODEL = "gpt-5.5";
+// 하위 호환: 상태 표시 등에서 참조하는 기본 모델 별칭.
+export const CODEX_MODEL = DEFAULT_CODEX_MODEL;
+
+export function resolveCodexModel(input: string): string | undefined {
+  const value = input.trim().toLowerCase();
+  if (!value) return undefined;
+  return CODEX_MODELS.find((option) => option.id.toLowerCase() === value)?.id;
+}
+
+export function codexModelLabel(id: string | null | undefined): string {
+  if (!id) return codexModelLabel(DEFAULT_CODEX_MODEL);
+  return CODEX_MODELS.find((option) => option.id === id)?.label ?? id;
+}
+
+export type CodexReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+export interface CodexReasoningOption {
+  id: CodexReasoningEffort;
+  label: string;
+}
+export const CODEX_REASONING_OPTIONS: CodexReasoningOption[] = [
+  { id: "minimal", label: "최소 (Minimal)" },
+  { id: "low", label: "낮음 (Low)" },
+  { id: "medium", label: "보통 (Medium)" },
+  { id: "high", label: "높음 (High)" },
+  { id: "xhigh", label: "매우 높음 (xHigh)" }
+];
+export const DEFAULT_CODEX_REASONING: CodexReasoningEffort = "high";
+// 하위 호환: 상태 표시 등에서 참조하는 기본 추론 강도 별칭.
+export const CODEX_REASONING_EFFORT: CodexReasoningEffort = DEFAULT_CODEX_REASONING;
+
+export function resolveCodexReasoning(input: string): CodexReasoningEffort | undefined {
+  const value = input.trim().toLowerCase();
+  return CODEX_REASONING_OPTIONS.find((option) => option.id === value)?.id;
+}
+
+export function codexReasoningLabel(id: string | null | undefined): string {
+  return CODEX_REASONING_OPTIONS.find((option) => option.id === id)?.label
+    ?? "높음 (High)";
+}
 
 export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
@@ -130,6 +175,8 @@ interface RunRequest {
 interface PlanRequest {
   session: SessionRecord;
   instruction: string;
+  codexModel?: string | undefined;
+  codexReasoning?: CodexReasoningEffort | undefined;
 }
 
 interface SessionManagerOptions {
@@ -597,13 +644,19 @@ export class SessionManager {
     return inspections;
   }
 
-  runPlanPipeline(session: SessionRecord, instruction: string): boolean {
+  runPlanPipeline(
+    session: SessionRecord,
+    instruction: string,
+    options?: { codexModel?: string; codexReasoning?: CodexReasoningEffort }
+  ): boolean {
     const clean = instruction.trim();
     if (!clean || this.active.has(session.id) || this.sessionTasks.has(session.id)) return false;
     this.store.updateSession(session.id, { status: "queued" });
     this.enqueuePlan({
       session: this.store.getSession(session.id) ?? session,
-      instruction: clean
+      instruction: clean,
+      codexModel: options?.codexModel,
+      codexReasoning: options?.codexReasoning
     });
     return true;
   }
@@ -1117,12 +1170,16 @@ export class SessionManager {
         controller.abort();
         run.query?.close();
       }, this.options.codexMcpTimeoutMs);
-      renderer.note("Codex 계획 실행 시작");
+      const codexModel = request.codexModel ?? DEFAULT_CODEX_MODEL;
+      const codexReasoning = request.codexReasoning ?? DEFAULT_CODEX_REASONING;
+      renderer.note(
+        `Codex 계획 실행 시작 (${codexModelLabel(codexModel)} · ${codexReasoningLabel(codexReasoning)})`
+      );
       run.codexStarts.set("plan-codex", Date.now());
       const codex = new Codex({ env: buildCodexEnvironment() });
       const thread = codex.startThread({
-        model: CODEX_MODEL,
-        modelReasoningEffort: CODEX_REASONING_EFFORT,
+        model: codexModel,
+        modelReasoningEffort: codexReasoning,
         workingDirectory: session.cwd,
         skipGitRepoCheck: true,
         sandboxMode: "workspace-write",

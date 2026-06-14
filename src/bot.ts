@@ -11,8 +11,12 @@ import {
   buildMemoryPrompt,
   CLAUDE_MODELS,
   CODEX_MODEL,
+  CODEX_MODELS,
   CODEX_REASONING_EFFORT,
+  CODEX_REASONING_OPTIONS,
+  codexModelLabel,
   DEFAULT_CLAUDE_MODEL,
+  DEFAULT_CODEX_MODEL,
   DEFAULT_THINKING_LEVEL,
   modelLabel,
   resolveModel,
@@ -33,6 +37,12 @@ interface PendingStart {
   forkSession?: boolean;
   model?: string | undefined;
   thinking?: string | undefined;
+}
+
+interface PendingPlan {
+  sessionId: string;
+  instruction: string;
+  codexModel?: string | undefined;
 }
 
 function pendingStartKey(userId: number, topicId?: number): string {
@@ -152,6 +162,24 @@ function thinkingKeyboard(): InlineKeyboard {
   return keyboard;
 }
 
+function codexModelKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [index, option] of CODEX_MODELS.entries()) {
+    keyboard.text(option.label, `planm:${option.id}`);
+    if (index < CODEX_MODELS.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+function codexReasoningKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [index, option] of CODEX_REASONING_OPTIONS.entries()) {
+    keyboard.text(option.label, `plant:${option.id}`);
+    if (index < CODEX_REASONING_OPTIONS.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
 function cleanPathInput(text: string): string {
   const clean = text.trim();
   if (
@@ -190,6 +218,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       : {})
   });
   const pendingStarts = new Map<string, PendingStart>();
+  const pendingPlans = new Map<string, PendingPlan>();
   const pendingProjectPaths = new Set<string>();
 
   const registerProject = async (path: string): Promise<ProjectConfig> => {
@@ -415,17 +444,21 @@ export function createBot(config: AppConfig, store: StateStore) {
     const topicId = ctx.message?.message_thread_id;
     const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
     const instruction = ctx.match.trim();
-    if (!session || !instruction) {
+    if (!session || !instruction || !topicId) {
       await ctx.reply("기존 세션 토픽에서 `/plan 구현할 작업` 형식으로 사용하세요.");
       return;
     }
-    if (!sessions.runPlanPipeline(session, instruction)) {
+    if (sessions.isActive(session.id)) {
       await ctx.reply("이 세션에서 이미 실행 중이거나 대기 중인 작업이 있습니다.");
       return;
     }
+    pendingPlans.set(pendingStartKey(config.allowedUserId, topicId), {
+      sessionId: session.id,
+      instruction
+    });
     await ctx.reply(
-      "계획 작성, Codex 실행, 완료 기준별 증거 수집, Claude 승인 검토 파이프라인을 예약했습니다. "
-      + "Claude 구독 OAuth와 ChatGPT 구독 로그인을 사용하며 API 키 인증은 허용하지 않습니다."
+      "Codex 모델을 선택하세요. (이후 추론 강도를 고른 뒤 파이프라인이 시작됩니다)",
+      { reply_markup: codexModelKeyboard() }
     );
   });
 
@@ -784,6 +817,70 @@ export function createBot(config: AppConfig, store: StateStore) {
     store.updateSession(session.id, { thinking: option.id });
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
     await ctx.reply(`다음 실행부터 thinking을 ${option.label}(으)로 사용합니다.`);
+  });
+
+  bot.callbackQuery(/^planm:/, async (ctx) => {
+    const modelId = ctx.callbackQuery.data.slice("planm:".length);
+    const option = CODEX_MODELS.find((item) => item.id === modelId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 Codex 모델입니다.", show_alert: true });
+      return;
+    }
+    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
+    const pending = pendingPlans.get(key);
+    if (!pending) {
+      await ctx.answerCallbackQuery({
+        text: "먼저 /plan 명령으로 시작하세요.",
+        show_alert: true
+      });
+      return;
+    }
+    pendingPlans.set(key, { ...pending, codexModel: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    await ctx.reply(`Codex 모델: ${option.label}. 추론 강도를 선택하세요.`, {
+      reply_markup: codexReasoningKeyboard()
+    });
+  });
+
+  bot.callbackQuery(/^plant:/, async (ctx) => {
+    const reasoningId = ctx.callbackQuery.data.slice("plant:".length);
+    const option = CODEX_REASONING_OPTIONS.find((item) => item.id === reasoningId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 추론 강도입니다.", show_alert: true });
+      return;
+    }
+    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
+    const pending = pendingPlans.get(key);
+    if (!pending) {
+      await ctx.answerCallbackQuery({
+        text: "먼저 /plan 명령으로 시작하세요.",
+        show_alert: true
+      });
+      return;
+    }
+    const session = store.getSession(pending.sessionId);
+    if (!session) {
+      pendingPlans.delete(key);
+      await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    const codexModel = pending.codexModel ?? DEFAULT_CODEX_MODEL;
+    pendingPlans.delete(key);
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    if (
+      !sessions.runPlanPipeline(session, pending.instruction, {
+        codexModel,
+        codexReasoning: option.id
+      })
+    ) {
+      await ctx.reply("이 세션에서 이미 실행 중이거나 대기 중인 작업이 있습니다.");
+      return;
+    }
+    await ctx.reply(
+      `Codex ${codexModelLabel(codexModel)} · ${option.label}로 계획 작성, Codex 실행, `
+      + "완료 기준별 증거 수집, Claude 승인 검토 파이프라인을 예약했습니다. "
+      + "Claude 구독 OAuth와 ChatGPT 구독 로그인을 사용하며 API 키 인증은 허용하지 않습니다."
+    );
   });
 
   bot.callbackQuery(/^delcancel:/, async (ctx) => {
