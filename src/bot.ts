@@ -37,6 +37,7 @@ interface PendingStart {
   forkSession?: boolean;
   model?: string | undefined;
   thinking?: string | undefined;
+  leanMode?: boolean | undefined;
 }
 
 interface PendingPlan {
@@ -98,6 +99,7 @@ export function formatSessionStatus(session: SessionRecord, active: boolean): st
     `프로젝트: ${session.projectName}`,
     `모델: ${modelLabel(session.model ?? DEFAULT_CLAUDE_MODEL)}`,
     `thinking: ${thinkingLabel(session.thinking ?? DEFAULT_THINKING_LEVEL)}`,
+    `lean: ${session.leanMode ? "on" : "off"}`,
     `Codex: ${CODEX_MODEL} · reasoning ${CODEX_REASONING_EFFORT}`,
     `마지막 상태 변경: ${formatTimestamp(session.updatedAt)}`
   ].join("\n");
@@ -290,7 +292,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       const session = sessions.createSession(
         pending.project, config.chatId, newTopicId, title,
         fileMessage, pending.resumeSessionId, pending.forkSession ?? false,
-        pending.model ?? null, pending.thinking ?? null
+        pending.model ?? null, pending.thinking ?? null, pending.leanMode ?? true
       );
       await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;
@@ -316,7 +318,7 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /diff, /upload, /delete 사용"
+      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /lean, /diff, /upload, /delete 사용"
     );
   });
 
@@ -538,7 +540,8 @@ export function createBot(config: AppConfig, store: StateStore) {
       resumeSessionId: session.sdkSessionId,
       forkSession: true,
       model: session.model ?? undefined,
-      thinking: session.thinking ?? undefined
+      thinking: session.thinking ?? undefined,
+      leanMode: session.leanMode
     });
     await ctx.reply("새 분기에서 실행할 지시를 입력하세요.");
   });
@@ -665,6 +668,36 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
     store.updateSession(session.id, { thinking: option.id });
     await ctx.reply(`다음 실행부터 thinking을 ${option.label}(으)로 사용합니다.`);
+  });
+
+  bot.command("lean", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const input = ctx.match.trim().toLowerCase();
+    if (!input) {
+      await ctx.reply(
+        `현재 lean 모드: ${session.leanMode ? "on" : "off"}\n사용 가능: on, off`
+      );
+      return;
+    }
+    if (input !== "on" && input !== "off") {
+      await ctx.reply("지원하지 않는 lean 모드입니다.\n사용 가능: on, off");
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
+      return;
+    }
+    store.updateSession(session.id, { leanMode: input === "on" });
+    await ctx.reply(
+      input === "on"
+        ? "다음 실행부터 최소 구현 원칙을 적용합니다."
+        : "다음 실행부터 최소 구현 원칙을 적용하지 않습니다."
+    );
   });
 
   bot.command("diff", async (ctx) => {
@@ -974,7 +1007,8 @@ export function createBot(config: AppConfig, store: StateStore) {
         pending.resumeSessionId,
         pending.forkSession ?? false,
         pending.model ?? null,
-        pending.thinking ?? null
+        pending.thinking ?? null,
+        pending.leanMode ?? true
       );
       await ctx.reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;

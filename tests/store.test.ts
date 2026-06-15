@@ -30,6 +30,7 @@ function makeSession(cwd: string): SessionRecord {
     permissionMode: "default",
     model: null,
     thinking: null,
+    leanMode: true,
     usageSnapshot: null,
     createdAt: now,
     updatedAt: now
@@ -69,6 +70,7 @@ describe("StateStore", () => {
     expect(store.getSessionByTopic(-1001, 42)).toMatchObject({
       sdkSessionId: "sdk-1",
       status: "done",
+      leanMode: true,
       usageSnapshot: {
         subscriptionType: "pro",
         fiveHour: { utilization: 42 }
@@ -291,6 +293,7 @@ describe("StateStore", () => {
     const columns = store.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toContain("usage_snapshot");
     expect(columns.map((column) => column.name)).toContain("model");
+    expect(columns.map((column) => column.name)).toContain("lean_mode");
     store.close();
   });
 });

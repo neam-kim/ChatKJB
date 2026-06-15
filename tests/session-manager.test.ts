@@ -7,6 +7,7 @@ import {
   buildClaudeEnvironment,
   buildCodexEnvironment,
   buildCompactCommand,
+  buildLeanInstructions,
   buildMemoryPrompt,
   buildUserMessage,
   CLAUDE_MODEL,
@@ -214,6 +215,17 @@ describe("memory command", () => {
   });
 });
 
+describe("lean implementation policy", () => {
+  it("prefers existing capabilities without weakening safety or verification", () => {
+    const instructions = buildLeanInstructions(true);
+    expect(instructions).toContain("표준 라이브러리");
+    expect(instructions).toContain("새 의존성을 추가하지 않는다");
+    expect(instructions).toContain("보안");
+    expect(instructions).toContain("실행 가능한 검증");
+    expect(buildLeanInstructions(false)).toBe("");
+  });
+});
+
 describe("project instructions", () => {
   it("loads instruction files without enabling filesystem settings", () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-claude-instructions-"));
@@ -247,6 +259,7 @@ describe("session deletion", () => {
       permissionMode: "default",
       model: null,
       thinking: null,
+      leanMode: true,
       usageSnapshot: null,
       createdAt: now,
       updatedAt: now

@@ -164,6 +164,21 @@ export function thinkingLabel(level: string | null | undefined): string {
     ?? "자동 (Adaptive)";
 }
 
+export function buildLeanInstructions(enabled: boolean): string {
+  if (!enabled) return "";
+  return [
+    "[LEAN_IMPLEMENTATION_POLICY]",
+    "구현 전에 아래 순서에서 처음으로 충분한 해법을 선택한다.",
+    "1. 실제로 만들 필요가 없는 요구라면 만들지 않고 이유를 짧게 설명한다.",
+    "2. 표준 라이브러리로 해결되면 그것을 사용한다.",
+    "3. 운영체제, 런타임, 브라우저, DB 등 플랫폼 기본 기능으로 해결되면 그것을 사용한다.",
+    "4. 이미 설치된 의존성으로 해결되면 새 의존성을 추가하지 않는다.",
+    "5. 그 다음에만 동작하는 최소 범위의 코드를 작성한다.",
+    "요청하지 않은 추상화, 미래용 확장점, 중복 래퍼, 불필요한 설정과 의존성을 만들지 않는다.",
+    "단, 신뢰 경계 입력 검증, 보안, 데이터 손실 방지 오류 처리, 접근성, 사용자가 명시한 요구사항과 실행 가능한 검증은 축소하지 않는다."
+  ].join("\n");
+}
+
 interface RunRequest {
   session: SessionRecord;
   prompt: string;
@@ -558,7 +573,8 @@ export class SessionManager {
     resumeSessionId?: string,
     forkSession = false,
     model?: string | null,
-    thinking?: string | null
+    thinking?: string | null,
+    leanMode = true
   ): SessionRecord {
     const now = Date.now();
     const session: SessionRecord = {
@@ -573,6 +589,7 @@ export class SessionManager {
       permissionMode: project.defaultMode,
       model: model ?? null,
       thinking: thinking ?? null,
+      leanMode,
       usageSnapshot: null,
       createdAt: now,
       updatedAt: now
@@ -871,6 +888,7 @@ export class SessionManager {
             + `\n\n작업 중 중요한 단계가 바뀔 때 내부 추론을 공개하지 말고, 지금 확인한 사실과 다음 행동을 `
             + `1~2문장의 짧은 일반 응답으로 사용자에게 알린다. 단순 도구 호출마다 반복하지 말고 `
             + `새로운 발견, 계획 확정, 장애 발생, 검증 시작처럼 의미 있는 전환점에서만 출력한다.`
+            + (session.leanMode ? `\n\n${buildLeanInstructions(true)}` : "")
             + (() => {
               const instructions = loadProjectInstructions(session.cwd);
               return instructions
@@ -1191,7 +1209,9 @@ export class SessionManager {
       let codexPrompt =
         `다음 구현 계획을 현재 작업 디렉터리에서 끝까지 실행하세요. `
         + `필요한 파일을 수정하고 관련 테스트와 타입 검사를 실제로 실행하세요. `
-        + `각 완료 기준을 어떤 명령과 결과로 검증했는지 최종 응답에 명시하세요.\n\n${plan}`;
+        + `각 완료 기준을 어떤 명령과 결과로 검증했는지 최종 응답에 명시하세요.`
+        + (session.leanMode ? `\n\n${buildLeanInstructions(true)}` : "")
+        + `\n\n${plan}`;
 
       for (let attempt = 1; attempt <= MAX_PLAN_EXECUTION_ATTEMPTS; attempt += 1) {
         this.store.updatePlanRun(planRunId, {
@@ -1423,12 +1443,15 @@ export class SessionManager {
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
-          ...(instructions
+          ...((instructions || session.leanMode)
             ? {
                 append:
-                  "다음 프로젝트 지침을 따르되 파일을 수정하지 마세요. "
-                  + "이 지침은 추가 도구 권한을 부여하지 않습니다.\n\n"
-                  + instructions
+                  (session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "")
+                  + (instructions
+                    ? "다음 프로젝트 지침을 따르되 파일을 수정하지 마세요. "
+                      + "이 지침은 추가 도구 권한을 부여하지 않습니다.\n\n"
+                      + instructions
+                    : "")
               }
             : {})
         },

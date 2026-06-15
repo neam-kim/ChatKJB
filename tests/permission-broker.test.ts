@@ -71,6 +71,7 @@ function setup() {
     permissionMode: "default",
     model: null,
     thinking: null,
+    leanMode: true,
     usageSnapshot: null,
     createdAt: now,
     updatedAt: now

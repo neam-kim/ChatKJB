@@ -22,6 +22,7 @@ function session(status: SessionRecord["status"]): SessionRecord {
     permissionMode: "default",
     model: null,
     thinking: null,
+    leanMode: true,
     usageSnapshot: null,
     createdAt: 0,
     updatedAt: 0
@@ -103,6 +104,16 @@ function modelCommand(text: string, updateId = 1) {
   };
 }
 
+function leanCommand(text: string, updateId = 1) {
+  return {
+    ...modelCommand(text, updateId),
+    message: {
+      ...modelCommand(text, updateId).message,
+      entities: [{ type: "bot_command" as const, offset: 0, length: 5 }]
+    }
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const item of cleanup.splice(0)) {
@@ -117,6 +128,7 @@ describe("session status formatting", () => {
     expect(formatSessionStatus(session("running"), false)).toContain("작업: 실행 중인 작업 없음");
     expect(formatSessionStatus(session("running"), true))
       .toContain("Codex: gpt-5.5 · reasoning high");
+    expect(formatSessionStatus(session("running"), true)).toContain("lean: on");
   });
 
   it("shows queued and approval states", () => {
@@ -124,6 +136,27 @@ describe("session status formatting", () => {
     expect(formatSessionStatus(session("waiting_approval"), false)).toContain("작업: 승인 대기 중");
     expect(formatSessionStatus(session("verification_failed"), false))
       .toContain("작업: 완료 검증 실패");
+  });
+});
+
+describe("/lean command", () => {
+  it("persists the session policy", async () => {
+    const { bot, store } = botSetup();
+
+    await bot.handleUpdate(leanCommand("/lean off"));
+
+    expect(store.getSession("session")?.leanMode).toBe(false);
+  });
+
+  it("rejects changes while the session is active", async () => {
+    const { bot, sessions, store, calls } = botSetup();
+    vi.spyOn(sessions, "isActive").mockReturnValue(true);
+
+    await bot.handleUpdate(leanCommand("/lean off"));
+
+    expect(store.getSession("session")?.leanMode).toBe(true);
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
+      .toContain("실행 중에는 바꿀 수 없습니다.");
   });
 });
 

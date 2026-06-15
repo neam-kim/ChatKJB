@@ -112,6 +112,7 @@ export interface SessionRecord {
   permissionMode: PermissionMode;
   model: string | null;
   thinking: string | null;
+  leanMode: boolean;
   usageSnapshot: UsageSnapshot | null;
   createdAt: number;
   updatedAt: number;
