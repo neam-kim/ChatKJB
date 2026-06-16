@@ -630,6 +630,7 @@ export class SessionManager {
       permissionMode: project.defaultMode,
       model: model ?? null,
       thinking: thinking ?? null,
+      codexReasoning: null,
       leanMode,
       usageSnapshot: null,
       createdAt: now,
@@ -1400,7 +1401,7 @@ export class SessionManager {
         run.query?.close();
       }, this.options.codexMcpTimeoutMs);
       const codexModel = request.codexModel ?? DEFAULT_CODEX_MODEL;
-      const codexReasoning = request.codexReasoning ?? DEFAULT_CODEX_REASONING;
+      const codexReasoning = request.codexReasoning ?? (session.codexReasoning as CodexReasoningEffort | null) ?? DEFAULT_CODEX_REASONING;
       renderer.note(
         `Codex 계획 실행 시작 (${codexModelLabel(this.options.modelCatalog, codexModel)} · ${codexReasoningLabel(codexReasoning)})`
       );

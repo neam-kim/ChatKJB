@@ -300,6 +300,7 @@ describe("session deletion", () => {
       permissionMode: "default",
       model: null,
       thinking: null,
+      codexReasoning: null,
       leanMode: true,
       usageSnapshot: null,
       createdAt: now,

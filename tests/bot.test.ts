@@ -23,6 +23,7 @@ function session(status: SessionRecord["status"]): SessionRecord {
     permissionMode: "default",
     model: null,
     thinking: null,
+    codexReasoning: null,
     leanMode: true,
     usageSnapshot: null,
     createdAt: 0,
@@ -140,8 +141,13 @@ describe("session status formatting", () => {
     expect(formatSessionStatus(session("running"), true)).toContain("작업: 실행 중");
     expect(formatSessionStatus(session("running"), false)).toContain("작업: 실행 중인 작업 없음");
     expect(formatSessionStatus(session("running"), true))
-      .toContain("Codex: gpt-5.5 · reasoning high");
+      .toContain("Codex: GPT-5.5 · reasoning 높음 (High)");
     expect(formatSessionStatus(session("running"), true)).toContain("lean: on");
+  });
+
+  it("reflects the per-session Codex reasoning effort", () => {
+    const tuned = { ...session("running"), codexReasoning: "low" };
+    expect(formatSessionStatus(tuned, true)).toContain("reasoning 낮음 (Low)");
   });
 
   it("shows queued and approval states", () => {
