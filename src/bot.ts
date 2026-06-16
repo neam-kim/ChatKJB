@@ -18,7 +18,6 @@ import {
   DEFAULT_CODEX_REASONING,
   DEFAULT_THINKING_LEVEL,
   FALLBACK_MODEL_CATALOG,
-  type CodexReasoningEffort,
   type ModelCatalog,
   modelLabel,
   normalizeThinkingForModel,
@@ -45,6 +44,7 @@ interface PendingStart {
   forkSession?: boolean;
   model?: string | undefined;
   thinking?: string | undefined;
+  claudeEffort?: string | undefined;
   leanMode?: boolean | undefined;
 }
 
@@ -164,6 +164,16 @@ function newThinkingKeyboard(catalog: ModelCatalog, modelId: string | null | und
   const options = thinkingToggleOptionsForModel(catalog, modelId);
   for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `newt:${option.id}`);
+    if (index < options.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+function newPowerKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const options = claudeEffortOptionsForModel(catalog, modelId);
+  for (const [index, option] of options.entries()) {
+    keyboard.text(option.label, `newpw:${option.id}`);
     if (index < options.length - 1) keyboard.row();
   }
   return keyboard;
@@ -357,7 +367,8 @@ export function createBot(config: AppConfig, store: StateStore) {
       const session = sessions.createSession(
         pending.project, config.chatId, newTopicId, title,
         fileMessage, pending.resumeSessionId, pending.forkSession ?? false,
-        pending.model ?? null, pending.thinking ?? null, pending.leanMode ?? true
+        pending.model ?? null, pending.thinking ?? null,
+        pending.claudeEffort ?? null, pending.leanMode ?? true
       );
       await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;
@@ -982,7 +993,32 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
     const modelText = modelLabel(config.modelCatalog, selectedModel);
     await ctx.reply(
-      `모델: ${modelText} / thinking: ${option.label}\n실행할 작업을 입력하세요.`
+      `모델: ${modelText} / thinking: ${option.label}\nClaude 작업량(power)을 선택하세요.`,
+      { reply_markup: newPowerKeyboard(config.modelCatalog, selectedModel) }
+    );
+  });
+
+  bot.callbackQuery(/^newpw:/, async (ctx) => {
+    const effortId = ctx.callbackQuery.data.slice("newpw:".length);
+    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
+    const pending = pendingStarts.get(key);
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: "먼저 /new로 프로젝트를 선택하세요.", show_alert: true });
+      return;
+    }
+    const selectedModel = pending.model ?? DEFAULT_CLAUDE_MODEL;
+    const option = claudeEffortOptionsForModel(config.modelCatalog, selectedModel)
+      .find((item) => item.id === effortId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 작업량입니다.", show_alert: true });
+      return;
+    }
+    pendingStarts.set(key, { ...pending, claudeEffort: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    const modelText = modelLabel(config.modelCatalog, selectedModel);
+    const thinkingText = thinkingLabel(pending.thinking ?? DEFAULT_THINKING_LEVEL);
+    await ctx.reply(
+      `모델: ${modelText} / thinking: ${thinkingText} / 작업량: ${option.label}\n실행할 작업을 입력하세요.`
     );
   });
 
@@ -1119,30 +1155,16 @@ export function createBot(config: AppConfig, store: StateStore) {
       });
       return;
     }
-    const session = store.getSession(pending.sessionId);
-    if (session?.codexReasoning) {
-      pendingPlans.delete(key);
-      await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-      const reasoningLabel = codexReasoningLabel(session.codexReasoning);
-      if (
-        !sessions.runPlanPipeline(session, pending.instruction, {
-          codexModel: option.id,
-          codexReasoning: session.codexReasoning as CodexReasoningEffort
-        })
-      ) {
-        await ctx.reply("이 세션에서 이미 실행 중이거나 대기 중인 작업이 있습니다.");
-        return;
-      }
-      await ctx.reply(
-        `Codex 파이프라인 시작 (${codexModelLabel(config.modelCatalog, option.id)} · ${reasoningLabel})`
-      );
-      return;
-    }
     pendingPlans.set(key, { ...pending, codexModel: option.id });
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    await ctx.reply(`Codex 모델: ${option.label}. 추론 강도를 선택하세요.`, {
-      reply_markup: codexReasoningKeyboard(config.modelCatalog, option.id)
-    });
+    const session = store.getSession(pending.sessionId);
+    const current = session?.codexReasoning
+      ? `\n현재 기본값: ${codexReasoningLabel(session.codexReasoning)} (/effort로 변경)`
+      : "";
+    await ctx.reply(
+      `Codex 모델: ${option.label}. 추론 강도(작업량)를 선택하세요.${current}`,
+      { reply_markup: codexReasoningKeyboard(config.modelCatalog, option.id) }
+    );
   });
 
   bot.callbackQuery(/^plant:/, async (ctx) => {
@@ -1318,6 +1340,7 @@ export function createBot(config: AppConfig, store: StateStore) {
         pending.forkSession ?? false,
         pending.model ?? null,
         pending.thinking ?? null,
+        pending.claudeEffort ?? null,
         pending.leanMode ?? true
       );
       await ctx.reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);

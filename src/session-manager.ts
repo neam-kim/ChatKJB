@@ -615,6 +615,7 @@ export class SessionManager {
     forkSession = false,
     model?: string | null,
     thinking?: string | null,
+    claudeEffort?: string | null,
     leanMode = true
   ): SessionRecord {
     const now = Date.now();
@@ -630,7 +631,7 @@ export class SessionManager {
       permissionMode: project.defaultMode,
       model: model ?? null,
       thinking: thinking ?? null,
-      claudeEffort: null,
+      claudeEffort: claudeEffort ?? null,
       codexReasoning: null,
       leanMode,
       usageSnapshot: null,

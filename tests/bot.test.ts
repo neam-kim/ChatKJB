@@ -78,17 +78,18 @@ function botSetup() {
   const calls: Array<{ method: string; payload: Record<string, unknown> }> = [];
   instance.bot.api.config.use(async (_prev, method, payload) => {
     calls.push({ method, payload: payload as Record<string, unknown> });
-    return {
-      ok: true,
-      result: method === "sendMessage"
-        ? {
-            message_id: calls.length,
-            date: 0,
-            chat: { id: -1001, type: "supergroup", title: "Test" },
-            text: String((payload as { text?: string }).text ?? "")
-          }
-        : true
-    } as never;
+    let result: unknown = true;
+    if (method === "sendMessage") {
+      result = {
+        message_id: calls.length,
+        date: 0,
+        chat: { id: -1001, type: "supergroup", title: "Test" },
+        text: String((payload as { text?: string }).text ?? "")
+      };
+    } else if (method === "createForumTopic") {
+      result = { message_thread_id: 7777, name: "topic", icon_color: 0 };
+    }
+    return { ok: true, result } as never;
   });
   cleanup.push({ store, directory });
   return { ...instance, store, calls };
@@ -105,6 +106,49 @@ function modelCommand(text: string, updateId = 1) {
       from: { id: 7, is_bot: false, first_name: "User" },
       text,
       entities: [{ type: "bot_command" as const, offset: 0, length: 6 }]
+    }
+  };
+}
+
+function newCommand(updateId = 1) {
+  return {
+    ...modelCommand("/new", updateId),
+    message: {
+      ...modelCommand("/new", updateId).message,
+      entities: [{ type: "bot_command" as const, offset: 0, length: 4 }]
+    }
+  };
+}
+
+function callbackUpdate(data: string, updateId = 1) {
+  return {
+    update_id: updateId,
+    callback_query: {
+      id: String(updateId),
+      from: { id: 7, is_bot: false, first_name: "User" },
+      chat_instance: "instance",
+      data,
+      message: {
+        message_id: updateId,
+        date: 0,
+        message_thread_id: 42,
+        chat: { id: -1001, type: "supergroup" as const, title: "Test" },
+        from: { id: 123456789, is_bot: true, first_name: "Test" }
+      }
+    }
+  };
+}
+
+function textMessage(text: string, updateId = 1) {
+  return {
+    update_id: updateId,
+    message: {
+      message_id: updateId,
+      date: 0,
+      message_thread_id: 42,
+      chat: { id: -1001, type: "supergroup" as const, title: "Test" },
+      from: { id: 7, is_bot: false, first_name: "User" },
+      text
     }
   };
 }
@@ -218,6 +262,39 @@ describe("/thinking command", () => {
     expect(store.getSession("session")?.thinking).toBe("off");
     expect(calls.filter((call) => call.method === "sendMessage").at(-1)?.payload.text)
       .toContain("지원하지 않는 thinking 수준입니다");
+  });
+});
+
+describe("/new wizard", () => {
+  it("carries the chosen Claude 작업량(power) into the created session", async () => {
+    const { bot, store } = botSetup();
+
+    await bot.handleUpdate(newCommand());
+    await bot.handleUpdate(callbackUpdate("newp:0", 2));
+    await bot.handleUpdate(callbackUpdate("newm:claude-opus-4-8", 3));
+    await bot.handleUpdate(callbackUpdate("newt:adaptive", 4));
+    await bot.handleUpdate(callbackUpdate("newpw:max", 5));
+    await bot.handleUpdate(textMessage("작업을 실행해줘", 6));
+
+    const created = store
+      .listSessions(10)
+      .find((item) => item.topicId === 7777);
+    expect(created?.claudeEffort).toBe("max");
+    expect(created?.model).toBe("claude-opus-4-8");
+    expect(created?.thinking).toBe("adaptive");
+  });
+
+  it("prompts for power after thinking is chosen", async () => {
+    const { bot, calls } = botSetup();
+
+    await bot.handleUpdate(newCommand());
+    await bot.handleUpdate(callbackUpdate("newp:0", 2));
+    await bot.handleUpdate(callbackUpdate("newm:claude-opus-4-8", 3));
+    await bot.handleUpdate(callbackUpdate("newt:adaptive", 4));
+
+    const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
+    expect(reply?.text).toContain("작업량(power)을 선택하세요");
+    expect(reply?.reply_markup).toBeDefined();
   });
 });
 
