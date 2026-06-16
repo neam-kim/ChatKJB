@@ -144,8 +144,7 @@ function formatExtraUsage(extra: ExtraUsage): string | null {
 }
 
 // 한도 윈도우를 항상 같은 순서로, 서버가 실제로 반환한 것만 표시한다.
-// (철회된 "월간 Agent SDK 크레딧" 추측 표시는 제거했다 — SDK 사용량 API가
-// 해당 필드를 노출하지 않으므로 정상 경로인 rate_limits 윈도우만 보여준다.)
+// SDK 사용량 API가 노출하지 않는 과금 항목은 추정해서 만들지 않는다.
 export function formatUsageSnapshot(snapshot: UsageSnapshot): string {
   const lines: string[] = [];
   if (snapshot.fiveHour) lines.push(formatWindow("5시간 한도", snapshot.fiveHour));
