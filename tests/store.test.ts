@@ -30,6 +30,7 @@ function makeSession(cwd: string): SessionRecord {
     permissionMode: "default",
     model: null,
     thinking: null,
+    claudeEffort: null,
     codexReasoning: null,
     leanMode: true,
     usageSnapshot: null,

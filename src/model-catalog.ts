@@ -55,7 +55,14 @@ export interface ModelCatalog {
 export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
 export const DEFAULT_THINKING_LEVEL: ClaudeThinkingLevel = "adaptive";
+// Claude 작업량(effort). API 기본값과 동일하게 high. null이면 SDK에 effort를 넘기지 않아 API 기본(high)이 적용된다.
+export const DEFAULT_CLAUDE_EFFORT: ClaudeThinkingLevel = "high";
 export const DEFAULT_CODEX_REASONING: CodexReasoningEffort = "high";
+
+// /thinking은 확장적 사고 on/off만, /power는 작업량(effort) 수준만 다룬다. 두 축은 Claude API에서
+// 서로 독립이다(thinking: adaptive|disabled vs output_config.effort: low~max).
+const THINKING_TOGGLE_IDS: ClaudeThinkingLevel[] = ["adaptive", "off"];
+const CLAUDE_EFFORT_IDS: ClaudeThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
 
 const CLAUDE_THINKING_LABELS: Record<ClaudeThinkingLevel, string> = {
   adaptive: "자동 (Adaptive)",
@@ -162,6 +169,33 @@ export function thinkingOptionsForModel(
     ?? catalog.claudeModels.find((option) => option.id === DEFAULT_CLAUDE_MODEL)
     ?? catalog.claudeModels[0];
   return model?.thinkingOptions.length ? model.thinkingOptions : thinkingOptions(["adaptive", "off"]);
+}
+
+// /thinking 명령용: 확장적 사고 on/off만. 모델이 노출하는 thinking 옵션 중 adaptive·off만 추린다.
+export function thinkingToggleOptionsForModel(
+  catalog: ModelCatalog,
+  modelId: string | null | undefined
+): ThinkingOption[] {
+  const filtered = thinkingOptionsForModel(catalog, modelId).filter((option) =>
+    THINKING_TOGGLE_IDS.includes(option.id)
+  );
+  return filtered.length ? filtered : thinkingOptions(THINKING_TOGGLE_IDS);
+}
+
+// /power 명령용: Claude 작업량(effort) 수준만. thinking 옵션 중 adaptive·off를 제외한 나머지.
+export function claudeEffortOptionsForModel(
+  catalog: ModelCatalog,
+  modelId: string | null | undefined
+): ThinkingOption[] {
+  const filtered = thinkingOptionsForModel(catalog, modelId).filter((option) =>
+    CLAUDE_EFFORT_IDS.includes(option.id)
+  );
+  return filtered.length ? filtered : thinkingOptions(CLAUDE_EFFORT_IDS);
+}
+
+export function claudeEffortLabel(level: string | null | undefined): string {
+  return CLAUDE_THINKING_LABELS[level as ClaudeThinkingLevel]
+    ?? CLAUDE_THINKING_LABELS[DEFAULT_CLAUDE_EFFORT];
 }
 
 export function codexReasoningOptionsForModel(

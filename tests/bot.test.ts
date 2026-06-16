@@ -23,6 +23,7 @@ function session(status: SessionRecord["status"]): SessionRecord {
     permissionMode: "default",
     model: null,
     thinking: null,
+    claudeEffort: null,
     codexReasoning: null,
     leanMode: true,
     usageSnapshot: null,
@@ -150,11 +151,73 @@ describe("session status formatting", () => {
     expect(formatSessionStatus(tuned, true)).toContain("reasoning 낮음 (Low)");
   });
 
+  it("shows the default Claude 작업량 and reflects an override", () => {
+    expect(formatSessionStatus(session("running"), true))
+      .toContain("Claude 작업량: 높음 (High)");
+    const tuned = { ...session("running"), claudeEffort: "max" };
+    expect(formatSessionStatus(tuned, true)).toContain("Claude 작업량: 최대 (Max)");
+  });
+
   it("shows queued and approval states", () => {
     expect(formatSessionStatus(session("queued"), false)).toContain("작업: 대기 중");
     expect(formatSessionStatus(session("waiting_approval"), false)).toContain("작업: 승인 대기 중");
     expect(formatSessionStatus(session("verification_failed"), false))
       .toContain("작업: 완료 검증 실패");
+  });
+});
+
+describe("/power command", () => {
+  it("persists the Claude 작업량 for the next run", async () => {
+    const { bot, store } = botSetup();
+
+    await bot.handleUpdate(modelCommand("/power max"));
+
+    expect(store.getSession("session")?.claudeEffort).toBe("max");
+  });
+
+  it("rejects an unsupported 작업량", async () => {
+    const { bot, store, calls } = botSetup();
+
+    await bot.handleUpdate(modelCommand("/power adaptive"));
+
+    expect(store.getSession("session")?.claudeEffort).toBeNull();
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
+      .toContain("지원하지 않는 작업량입니다");
+  });
+
+  it("rejects changes while the session is active", async () => {
+    const { bot, sessions, store, calls } = botSetup();
+    vi.spyOn(sessions, "isActive").mockReturnValue(true);
+
+    await bot.handleUpdate(modelCommand("/power low"));
+
+    expect(store.getSession("session")?.claudeEffort).toBeNull();
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
+      .toContain("실행 중에는 바꿀 수 없습니다.");
+  });
+});
+
+function thinkingCommand(text: string, updateId = 1) {
+  return {
+    ...modelCommand(text, updateId),
+    message: {
+      ...modelCommand(text, updateId).message,
+      entities: [{ type: "bot_command" as const, offset: 0, length: 9 }]
+    }
+  };
+}
+
+describe("/thinking command", () => {
+  it("accepts a thinking toggle but rejects effort levels", async () => {
+    const { bot, store, calls } = botSetup();
+
+    await bot.handleUpdate(thinkingCommand("/thinking off"));
+    expect(store.getSession("session")?.thinking).toBe("off");
+
+    await bot.handleUpdate(thinkingCommand("/thinking high"));
+    expect(store.getSession("session")?.thinking).toBe("off");
+    expect(calls.filter((call) => call.method === "sendMessage").at(-1)?.payload.text)
+      .toContain("지원하지 않는 thinking 수준입니다");
   });
 });
 

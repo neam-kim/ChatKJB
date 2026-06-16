@@ -27,6 +27,7 @@ interface SessionRow {
   permission_mode: PermissionMode;
   model: string | null;
   thinking: string | null;
+  claude_effort: string | null;
   codex_reasoning: string | null;
   lean_mode: number;
   usage_snapshot: string | null;
@@ -208,6 +209,9 @@ export class StateStore {
     if (!sessionColumns.some((column) => column.name === "codex_reasoning")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN codex_reasoning TEXT");
     }
+    if (!sessionColumns.some((column) => column.name === "claude_effort")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN claude_effort TEXT");
+    }
     const planRunColumns = this.db
       .prepare("PRAGMA table_info(plan_runs)")
       .all() as Array<{ name: string }>;
@@ -249,9 +253,9 @@ export class StateStore {
     this.db.prepare(`
       INSERT INTO sessions(
         id, sdk_session_id, chat_id, topic_id, project_name, cwd, title,
-        status, permission_mode, model, thinking, codex_reasoning, lean_mode, usage_snapshot,
+        status, permission_mode, model, thinking, claude_effort, codex_reasoning, lean_mode, usage_snapshot,
         always_allowed_tools, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.sdkSessionId,
@@ -264,6 +268,7 @@ export class StateStore {
       session.permissionMode,
       session.model,
       session.thinking,
+      session.claudeEffort ?? null,
       session.codexReasoning ?? null,
       session.leanMode ? 1 : 0,
       session.usageSnapshot ? JSON.stringify(session.usageSnapshot) : null,
@@ -303,7 +308,7 @@ export class StateStore {
     id: string,
     fields: Partial<Pick<
       SessionRecord,
-      "sdkSessionId" | "title" | "status" | "permissionMode" | "model" | "thinking" | "codexReasoning" | "leanMode" | "usageSnapshot"
+      "sdkSessionId" | "title" | "status" | "permissionMode" | "model" | "thinking" | "claudeEffort" | "codexReasoning" | "leanMode" | "usageSnapshot"
     >>
   ): void {
     const entries: Array<[string, unknown]> = [];
@@ -313,6 +318,7 @@ export class StateStore {
     if ("permissionMode" in fields) entries.push(["permission_mode", fields.permissionMode]);
     if ("model" in fields) entries.push(["model", fields.model]);
     if ("thinking" in fields) entries.push(["thinking", fields.thinking]);
+    if ("claudeEffort" in fields) entries.push(["claude_effort", fields.claudeEffort]);
     if ("codexReasoning" in fields) entries.push(["codex_reasoning", fields.codexReasoning]);
     if ("leanMode" in fields) entries.push(["lean_mode", fields.leanMode ? 1 : 0]);
     if ("usageSnapshot" in fields) {
@@ -579,6 +585,7 @@ export class StateStore {
       permissionMode: row.permission_mode,
       model: row.model,
       thinking: row.thinking,
+      claudeEffort: row.claude_effort,
       codexReasoning: row.codex_reasoning,
       leanMode: row.lean_mode !== 0,
       usageSnapshot: this.parseUsageSnapshot(row.usage_snapshot),

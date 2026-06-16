@@ -630,6 +630,7 @@ export class SessionManager {
       permissionMode: project.defaultMode,
       model: model ?? null,
       thinking: thinking ?? null,
+      claudeEffort: null,
       codexReasoning: null,
       leanMode,
       usageSnapshot: null,
@@ -998,7 +999,7 @@ export class SessionManager {
         claudeModel,
         session.thinking
       );
-      const effort = resolveClaudeEffort(thinking);
+      const effort = resolveClaudeEffort(session.claudeEffort);
       const queryOptions: Options = {
         cwd: session.cwd,
         abortController,
@@ -1653,7 +1654,7 @@ export class SessionManager {
       claudeModel,
       session.thinking
     );
-    const effort = resolveClaudeEffort(thinking);
+    const effort = resolveClaudeEffort(session.claudeEffort);
     const sdkQuery = query({
       prompt,
       options: {

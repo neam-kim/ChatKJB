@@ -6,7 +6,7 @@ Telegram Forum Topic 하나를 Claude Agent SDK 세션 하나에 연결하는 Ma
 
 - `/new` 프로젝트 선택 후 새 토픽과 Claude 세션 생성
 - 토픽의 일반 메시지를 기존 Claude 세션으로 `resume`
-- `/addp`, `/deltp`, `/steer`, `/next`, `/fork`, `/stop`, `/compact`, `/memory`, `/mode`, `/model`, `/thinking`, `/effort`, `/lean`, `/status`, `/sessions`, `/usage`, `/projects`, `/diff`, `/delete`
+- `/addp`, `/deltp`, `/steer`, `/next`, `/fork`, `/stop`, `/compact`, `/memory`, `/mode`, `/model`, `/thinking`, `/power`, `/effort`, `/lean`, `/status`, `/sessions`, `/usage`, `/projects`, `/diff`, `/delete`
 - 실행 중 메시지 스티어링과 현재 작업 뒤 후속 작업 예약
 - 일반 MCP 60초 타임아웃 및 최대 3회 순차 재시도
 - Codex MCP 30분 타임아웃 및 60초 주기 장기 실행 상태 알림
@@ -104,9 +104,16 @@ Telegram에서 `/addp /절대/프로젝트/경로`를 입력해 재시작 없이
 
 Claude Agent SDK에는 `.env`의 `CLAUDE_CODE_OAUTH_TOKEN`을 명시적으로 전달한다. 실행 환경에 `ANTHROPIC_API_KEY`나 `ANTHROPIC_AUTH_TOKEN`이 있더라도 Claude 자식 프로세스에서는 제거하여 OAuth 인증이 우선되게 한다. Keychain 자격증명은 사용하지 않는다.
 
-기본 Claude Agent SDK 모델은 `claude-opus-4-8`이며, 토픽에서 `/model`로 세션별 변경할 수 있다(Opus 4.8 / Sonnet 4.6 / Fable 5). 일반 대화와 세션 재개뿐 아니라 `/plan`의 계획·검토 단계도 선택한 세션 모델을 따르며 adaptive thinking은 공통 적용된다.
+기본 Claude Agent SDK 모델은 `claude-opus-4-8`이며, 토픽에서 `/model`로 세션별 변경할 수 있다(Opus 4.8 / Sonnet 4.6 / Fable 5). 일반 대화와 세션 재개뿐 아니라 `/plan`의 계획·검토 단계도 선택한 세션 모델을 따른다.
 
-Codex 실행 모델은 `gpt-5.5`로 코드에서 명시 강제하며 `~/.codex/config.toml`의 기본값이나 Codex 자동 모델 선택에 의존하지 않는다. reasoning effort는 기본 `high`이고, 토픽에서 `/effort`로 세션별로 바꿀 수 있다(`minimal`, `low`, `medium`, `high`, `xhigh`). `/effort`만 입력하면 현재 값과 선택 버튼을 보여 주고, `/effort medium`처럼 인자를 주면 다음 `/plan`부터 그 작업량을 사용한다. 세션에 값을 정해 두면 `/plan` 모델 선택 후 작업량을 다시 묻지 않고 그 값을 그대로 적용한다. 선택한 값은 `/status`의 `Codex: ... · reasoning ...` 줄에 반영된다. Telegram `/status`의 `thinking: 자동 (Adaptive)` 표시는 Claude thinking 설정이며 Codex 작업량 설정과는 별개다.
+Claude에는 서로 독립인 두 개의 추론 노브가 있고, 명령도 분리되어 있다.
+
+- `/thinking` — 확장적 사고(extended thinking)를 켜고 끈다. `adaptive`(기본, Claude가 필요할 때 스스로 사고)와 `off` 중 선택한다.
+- `/power` — 작업량(effort, "더 빠름 ↔ 더 스마트함")을 정한다. `low`, `medium`, `high`(기본), `xhigh`, `max`. 값이 높을수록 더 깊게 사고하고 토큰을 더 쓴다. Claude 데스크톱/Code의 "작업량" 슬라이더와 같은 파라미터다.
+
+각각 인자 없이 부르면 현재 값과 인라인 버튼을 보여 주고, `/thinking off`·`/power high`처럼 인자를 주면 다음 실행부터 적용한다. 실행 중에는 둘 다 바꿀 수 없다. 두 값은 일반 대화·세션 재개·`/plan` 계획·검토에 함께 적용되며 `/status`에 `thinking`과 `Claude 작업량`으로 표시된다. Codex의 작업량은 `/effort`로 따로 관리한다(아래).
+
+Codex 실행 모델은 `gpt-5.5`로 코드에서 명시 강제하며 `~/.codex/config.toml`의 기본값이나 Codex 자동 모델 선택에 의존하지 않는다. reasoning effort는 기본 `high`이고, 토픽에서 `/effort`로 세션별로 바꿀 수 있다(`minimal`, `low`, `medium`, `high`, `xhigh`). `/effort`만 입력하면 현재 값과 선택 버튼을 보여 주고, `/effort medium`처럼 인자를 주면 다음 `/plan`부터 그 작업량을 사용한다. 세션에 값을 정해 두면 `/plan` 모델 선택 후 작업량을 다시 묻지 않고 그 값을 그대로 적용한다. 선택한 값은 `/status`의 `Codex: ... · reasoning ...` 줄에 반영된다. `/effort`는 Codex 전용이며 Claude의 작업량은 위 `/power`가 담당한다.
 
 기본 장기 메모리 경로는 `~/.claude/memory`다. 다른 위치를 사용하려면 `.env`의 `CLAUDE_MEMORY_DIR`을 변경한다.
 
@@ -189,7 +196,7 @@ launchctl bootout gui/$(id -u)/com.neam.telegram-claude-orchestrator
 - 기본 프로젝트 모드는 `auto`다. Claude의 권한 분류기가 일반적인 파일 편집과 명령 실행을 자동 판단하고, 위험하거나 불확실한 작업만 Telegram 승인을 요청한다.
 - 토픽에서 `/mode default`로 보수적 승인 방식, `/mode acceptEdits`로 파일 편집 자동 허용, `/mode auto`로 자동 판단 방식으로 바꿀 수 있다.
 - 토픽에서 `/model`로 현재 모델과 선택 버튼을 확인하거나 `/model opus`, `/model sonnet`, `/model fable`로 다음 실행부터 사용할 모델을 바꿀 수 있다. 실행 중에는 변경할 수 없다.
-- 토픽에서 `/thinking`으로 Claude thinking 수준을, `/effort`로 Codex reasoning 작업량을, `/lean`으로 최소 구현 원칙을 세션별로 확인하고 바꿀 수 있다.
+- 토픽에서 `/thinking`으로 Claude 확장적 사고 on/off를, `/power`로 Claude 작업량(effort)을, `/effort`로 Codex reasoning 작업량을, `/lean`으로 최소 구현 원칙을 세션별로 확인하고 바꿀 수 있다.
 
 ## 안전 정책
 

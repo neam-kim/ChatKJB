@@ -71,6 +71,7 @@ function setup() {
     permissionMode: "default",
     model: null,
     thinking: null,
+    claudeEffort: null,
     codexReasoning: null,
     leanMode: true,
     usageSnapshot: null,

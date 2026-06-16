@@ -31,6 +31,7 @@ describe("StreamRenderer text deduplication", () => {
       permissionMode: "auto",
       model: null,
       thinking: null,
+      claudeEffort: null,
       codexReasoning: null,
       leanMode: true,
       usageSnapshot: null,

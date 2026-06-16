@@ -7,9 +7,12 @@ import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { addProject, removeProject, resolveProject, type AppConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import {
+  claudeEffortLabel,
+  claudeEffortOptionsForModel,
   codexModelLabel,
   codexReasoningLabel,
   codexReasoningOptionsForModel,
+  DEFAULT_CLAUDE_EFFORT,
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING,
@@ -21,7 +24,7 @@ import {
   normalizeThinkingForModel,
   resolveModel,
   thinkingLabel,
-  thinkingOptionsForModel
+  thinkingToggleOptionsForModel
 } from "./model-catalog.js";
 import { PermissionBroker } from "./permission-broker.js";
 import {
@@ -108,6 +111,7 @@ export function formatSessionStatus(
     `프로젝트: ${session.projectName}`,
     `모델: ${modelLabel(catalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`,
     `thinking: ${thinkingLabel(session.thinking ?? DEFAULT_THINKING_LEVEL)}`,
+    `Claude 작업량: ${claudeEffortLabel(session.claudeEffort ?? DEFAULT_CLAUDE_EFFORT)}`,
     `lean: ${session.leanMode ? "on" : "off"}`,
     `Codex: ${codexModelLabel(catalog, CODEX_MODEL)} · reasoning ${codexReasoningLabel(session.codexReasoning ?? DEFAULT_CODEX_REASONING)}`,
     `마지막 상태 변경: ${formatTimestamp(session.updatedAt)}`
@@ -157,7 +161,7 @@ function newModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
 
 function newThinkingKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  const options = thinkingOptionsForModel(catalog, modelId);
+  const options = thinkingToggleOptionsForModel(catalog, modelId);
   for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `newt:${option.id}`);
     if (index < options.length - 1) keyboard.row();
@@ -167,9 +171,19 @@ function newThinkingKeyboard(catalog: ModelCatalog, modelId: string | null | und
 
 function thinkingKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  const options = thinkingOptionsForModel(catalog, modelId);
+  const options = thinkingToggleOptionsForModel(catalog, modelId);
   for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `think:${option.id}`);
+    if (index < options.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+function powerKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const options = claudeEffortOptionsForModel(catalog, modelId);
+  for (const [index, option] of options.entries()) {
+    keyboard.text(option.label, `power:${option.id}`);
     if (index < options.length - 1) keyboard.row();
   }
   return keyboard;
@@ -369,7 +383,7 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /effort, /lean, /diff, /upload, /delete 사용"
+      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /power, /effort, /lean, /diff, /upload, /delete 사용"
     );
   });
 
@@ -776,12 +790,12 @@ export function createBot(config: AppConfig, store: StateStore) {
       );
       return;
     }
-    const option = thinkingOptionsForModel(
+    const option = thinkingToggleOptionsForModel(
       config.modelCatalog,
       session.model ?? DEFAULT_CLAUDE_MODEL
     ).find((item) => item.id === input);
     if (!option) {
-      await ctx.reply("지원하지 않는 thinking 수준입니다.\n사용 가능: adaptive, high, off");
+      await ctx.reply("지원하지 않는 thinking 수준입니다.\n사용 가능: adaptive, off (작업량은 /power)");
       return;
     }
     if (sessions.isActive(session.id)) {
@@ -790,6 +804,37 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
     store.updateSession(session.id, { thinking: option.id });
     await ctx.reply(`다음 실행부터 thinking을 ${option.label}(으)로 사용합니다.`);
+  });
+
+  bot.command("power", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const input = ctx.match.trim().toLowerCase();
+    if (!input) {
+      await ctx.reply(
+        `현재 Claude 작업량: ${claudeEffortLabel(session.claudeEffort ?? DEFAULT_CLAUDE_EFFORT)}`,
+        { reply_markup: powerKeyboard(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL) }
+      );
+      return;
+    }
+    const option = claudeEffortOptionsForModel(
+      config.modelCatalog,
+      session.model ?? DEFAULT_CLAUDE_MODEL
+    ).find((item) => item.id === input);
+    if (!option) {
+      await ctx.reply("지원하지 않는 작업량입니다.\n사용 가능: low, medium, high, xhigh, max");
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
+      return;
+    }
+    store.updateSession(session.id, { claudeEffort: option.id });
+    await ctx.reply(`다음 실행부터 Claude 작업량을 ${option.label}(으)로 사용합니다.`);
   });
 
   bot.command("effort", async (ctx) => {
@@ -927,7 +972,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     const selectedModel = pending.model ?? DEFAULT_CLAUDE_MODEL;
-    const option = thinkingOptionsForModel(config.modelCatalog, selectedModel)
+    const option = thinkingToggleOptionsForModel(config.modelCatalog, selectedModel)
       .find((item) => item.id === thinkingId);
     if (!option) {
       await ctx.answerCallbackQuery({ text: "지원하지 않는 thinking 수준입니다.", show_alert: true });
@@ -988,7 +1033,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
       return;
     }
-    const option = thinkingOptionsForModel(
+    const option = thinkingToggleOptionsForModel(
       config.modelCatalog,
       session.model ?? DEFAULT_CLAUDE_MODEL
     ).find((item) => item.id === thinkingId);
@@ -1006,6 +1051,36 @@ export function createBot(config: AppConfig, store: StateStore) {
     store.updateSession(session.id, { thinking: option.id });
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
     await ctx.reply(`다음 실행부터 thinking을 ${option.label}(으)로 사용합니다.`);
+  });
+
+  bot.callbackQuery(/^power:/, async (ctx) => {
+    const effortId = ctx.callbackQuery.data.slice("power:".length);
+    const topicId = ctx.callbackQuery.message?.message_thread_id;
+    const session = topicId
+      ? store.getSessionByTopic(config.chatId, topicId)
+      : undefined;
+    if (!session) {
+      await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    const option = claudeEffortOptionsForModel(
+      config.modelCatalog,
+      session.model ?? DEFAULT_CLAUDE_MODEL
+    ).find((item) => item.id === effortId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 작업량입니다.", show_alert: true });
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.answerCallbackQuery({
+        text: "실행 중에는 작업량을 바꿀 수 없습니다.",
+        show_alert: true
+      });
+      return;
+    }
+    store.updateSession(session.id, { claudeEffort: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    await ctx.reply(`다음 실행부터 Claude 작업량을 ${option.label}(으)로 사용합니다.`);
   });
 
   bot.callbackQuery(/^effort:/, async (ctx) => {

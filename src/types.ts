@@ -119,6 +119,7 @@ export interface SessionRecord {
   permissionMode: PermissionMode;
   model: string | null;
   thinking: string | null;
+  claudeEffort: string | null;
   codexReasoning: string | null;
   leanMode: boolean;
   usageSnapshot: UsageSnapshot | null;
