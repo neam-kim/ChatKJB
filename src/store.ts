@@ -229,6 +229,18 @@ export class StateStore {
     })();
   }
 
+  countSessionsByProject(name: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM sessions WHERE project_name = ?")
+      .get(name) as { count: number };
+    return row.count;
+  }
+
+  deleteProject(name: string): boolean {
+    const result = this.db.prepare("DELETE FROM projects WHERE name = ?").run(name);
+    return result.changes > 0;
+  }
+
   createSession(session: SessionRecord): void {
     this.db.prepare(`
       INSERT INTO sessions(

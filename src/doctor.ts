@@ -17,7 +17,7 @@ import { StateStore } from "./store.js";
 import { safeErrorMessage } from "./telegram-transport.js";
 
 const execFileAsync = promisify(execFile);
-const localLaunchAgentLabel = "com.local.telegram-claude-orchestrator";
+const localLaunchAgentLabel = "com.neam.telegram-claude-orchestrator";
 
 function detectLaunchAgentLabel(): string {
   if (process.env.LAUNCH_AGENT_LABEL) return process.env.LAUNCH_AGENT_LABEL;
@@ -155,11 +155,18 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
   const dataDir = dirname(deps.config.databasePath);
   const claudeConfigPath = deps.claudeConfigPath ?? join(homedir(), ".claude.json");
   const checks = await Promise.all([
-    check("OAuth 토큰", 1000, async () => [
-      CLAUDE_OAUTH_TOKEN_PATTERN.test(deps.config.claudeCodeOauthToken)
-        ? "✅ OAuth 토큰: 형식 유효"
-        : "❌ OAuth 토큰: 형식 오류"
-    ]),
+    check("OAuth 토큰", 1000, async () => {
+      const tokens = deps.config.claudeCodeOauthTokens;
+      const invalid = tokens.filter((token) => !CLAUDE_OAUTH_TOKEN_PATTERN.test(token));
+      if (invalid.length > 0) {
+        return [`❌ OAuth 토큰: ${invalid.length}개 형식 오류 (총 ${tokens.length}개)`];
+      }
+      return [
+        tokens.length > 1
+          ? `✅ OAuth 토큰: 형식 유효 · ${tokens.length}개 (한도 도달 시 자동 페일오버)`
+          : "✅ OAuth 토큰: 형식 유효"
+      ];
+    }),
     check("Codex 구독 인증", 1000, async () => {
       requireCodexSubscriptionAuth();
       return ["✅ Codex 구독 인증: ChatGPT 로그인 확인"];
@@ -219,7 +226,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
     }),
     check("최근 stderr", 2000, async () => recentStderr(
       join(projectDir, "data", "stderr.log"),
-      [deps.config.telegramBotToken, deps.config.claudeCodeOauthToken]
+      [deps.config.telegramBotToken, ...deps.config.claudeCodeOauthTokens]
     ))
   ]);
 

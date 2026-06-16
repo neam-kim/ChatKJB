@@ -2,9 +2,7 @@ import type {
   SDKControlGetUsageResponse,
   SDKRateLimitInfo
 } from "@anthropic-ai/claude-agent-sdk";
-import type { UsageSnapshot, UsageWindow } from "./types.js";
-
-export const AGENT_SDK_CREDIT_START_AT = Date.parse("2026-06-15T00:00:00+09:00");
+import type { ExtraUsage, UsageSnapshot, UsageWindow } from "./types.js";
 
 function percentage(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
@@ -30,67 +28,45 @@ function usageWindow(value: unknown): UsageWindow | undefined {
   return { utilization, resetsAt };
 }
 
-function agentSdkCredit(value: unknown): UsageSnapshot["agentSdkCredit"] {
-  if (!value || typeof value !== "object") return undefined;
-  const record = value as Record<string, unknown>;
-  const window = usageWindow(record);
-  const usedCredits = typeof record.used_credits === "number"
-    ? record.used_credits
-    : typeof record.usedCredits === "number"
-      ? record.usedCredits
-      : null;
-  const monthlyLimit = typeof record.monthly_limit === "number"
-    ? record.monthly_limit
-    : typeof record.monthlyLimit === "number"
-      ? record.monthlyLimit
-      : null;
-  const currency = typeof record.currency === "string" ? record.currency : null;
-  if (!window && usedCredits === null && monthlyLimit === null) return undefined;
-  return {
-    utilization: window?.utilization ?? null,
-    resetsAt: window?.resetsAt ?? null,
-    usedCredits,
-    monthlyLimit,
-    currency
-  };
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function findAgentSdkCredit(response: SDKControlGetUsageResponse): UsageSnapshot["agentSdkCredit"] {
-  const raw = response as unknown as Record<string, unknown>;
-  const rateLimits = raw.rate_limits && typeof raw.rate_limits === "object"
-    ? raw.rate_limits as Record<string, unknown>
-    : {};
-  const candidates = [
-    raw.agent_sdk_credit,
-    raw.agent_sdk_monthly_credit,
-    raw.monthly_agent_sdk_credit,
-    rateLimits.agent_sdk_credit,
-    rateLimits.agent_sdk_monthly_credit,
-    rateLimits.monthly_agent_sdk_credit
-  ];
-  for (const candidate of candidates) {
-    const parsed = agentSdkCredit(candidate);
-    if (parsed) return parsed;
+function extraUsage(value: unknown): ExtraUsage | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const isEnabled = record.is_enabled === true;
+  const utilization = percentage(record.utilization);
+  const usedCredits = numberOrNull(record.used_credits);
+  const monthlyLimit = numberOrNull(record.monthly_limit);
+  const currency = typeof record.currency === "string" ? record.currency : null;
+  if (!isEnabled && utilization === null && usedCredits === null && monthlyLimit === null) {
+    return undefined;
   }
-  return undefined;
+  return { isEnabled, utilization, usedCredits, monthlyLimit, currency };
 }
 
 export function snapshotFromUsageResponse(
   response: SDKControlGetUsageResponse,
   capturedAt = Date.now()
 ): UsageSnapshot {
-  const fiveHour = usageWindow(response.rate_limits?.five_hour);
-  const sevenDay = usageWindow(response.rate_limits?.seven_day);
-  const agentSdkLegacy = usageWindow(response.rate_limits?.seven_day_oauth_apps);
-  const monthlyCredit = findAgentSdkCredit(response);
+  const limits = response.rate_limits ?? undefined;
+  const fiveHour = usageWindow(limits?.five_hour);
+  const sevenDay = usageWindow(limits?.seven_day);
+  const sevenDayOpus = usageWindow(limits?.seven_day_opus);
+  const sevenDaySonnet = usageWindow(limits?.seven_day_sonnet);
+  const agentSdkWeekly = usageWindow(limits?.seven_day_oauth_apps);
+  const extra = extraUsage(limits?.extra_usage);
   return {
     capturedAt,
     subscriptionType: response.subscription_type,
     rateLimitsAvailable: response.rate_limits_available,
     ...(fiveHour ? { fiveHour } : {}),
     ...(sevenDay ? { sevenDay } : {}),
-    ...(agentSdkLegacy ? { agentSdkLegacy } : {}),
-    ...(monthlyCredit ? { agentSdkCredit: monthlyCredit } : {})
+    ...(sevenDayOpus ? { sevenDayOpus } : {}),
+    ...(sevenDaySonnet ? { sevenDaySonnet } : {}),
+    ...(agentSdkWeekly ? { agentSdkWeekly } : {}),
+    ...(extra ? { extraUsage: extra } : {})
   };
 }
 
@@ -111,6 +87,15 @@ export function snapshotFromRateLimitInfo(
   if (info.rateLimitType === "seven_day") snapshot.sevenDay = window;
   if (info.rateLimitType === "seven_day_opus") snapshot.sevenDayOpus = window;
   if (info.rateLimitType === "seven_day_sonnet") snapshot.sevenDaySonnet = window;
+  if (info.rateLimitType === "overage") {
+    snapshot.extraUsage = {
+      isEnabled: true,
+      utilization: percentage(info.utilization),
+      usedCredits: null,
+      monthlyLimit: null,
+      currency: null
+    };
+  }
   return snapshot;
 }
 
@@ -144,51 +129,44 @@ function formatWindow(label: string, window: UsageWindow): string {
   return `${label}: ${utilization}${reset}`;
 }
 
-function formatAgentSdkCredit(snapshot: UsageSnapshot): string {
-  const credit = snapshot.agentSdkCredit;
-  if (!credit) {
-    return "월간 Agent SDK 크레딧: 공식 사용량 정보 미제공 · Claude 설정 > 사용량에서 확인";
-  }
-  const currency = credit.currency?.toUpperCase() === "USD" || !credit.currency ? "$" : `${credit.currency} `;
-  const amount = credit.usedCredits !== null && credit.monthlyLimit !== null
-    ? `${currency}${credit.usedCredits.toFixed(2)} / ${currency}${credit.monthlyLimit.toFixed(2)}`
-    : null;
-  const window = formatWindow("월간 Agent SDK 크레딧", credit);
-  return amount ? `${window} · ${amount}` : window;
+function formatExtraUsage(extra: ExtraUsage): string | null {
+  if (!extra.isEnabled) return null;
+  const currency = extra.currency?.toUpperCase() === "USD" || !extra.currency
+    ? "$"
+    : `${extra.currency} `;
+  const amount = extra.usedCredits !== null && extra.monthlyLimit !== null
+    ? ` · ${currency}${extra.usedCredits.toFixed(2)} / ${currency}${extra.monthlyLimit.toFixed(2)}`
+    : "";
+  const utilization = extra.utilization === null
+    ? "사용 중"
+    : `${Math.round(extra.utilization)}% 사용`;
+  return `추가 사용(overage): ${utilization}${amount}`;
 }
 
-export function formatUsageSnapshot(snapshot: UsageSnapshot, now = Date.now()): string {
+// 한도 윈도우를 항상 같은 순서로, 서버가 실제로 반환한 것만 표시한다.
+// (철회된 "월간 Agent SDK 크레딧" 추측 표시는 제거했다 — SDK 사용량 API가
+// 해당 필드를 노출하지 않으므로 정상 경로인 rate_limits 윈도우만 보여준다.)
+export function formatUsageSnapshot(snapshot: UsageSnapshot): string {
   const lines: string[] = [];
-  if (now >= AGENT_SDK_CREDIT_START_AT) {
-    lines.push(formatAgentSdkCredit(snapshot));
-    const credit = snapshot.agentSdkCredit;
-    const creditUtilization = credit?.utilization
-      ?? (credit?.usedCredits !== null
-        && credit?.usedCredits !== undefined
-        && credit.monthlyLimit !== null
-        && credit.monthlyLimit !== undefined
-        && credit.monthlyLimit > 0
-        ? credit.usedCredits / credit.monthlyLimit * 100
-        : 0);
-    if (creditUtilization >= 80) {
-      lines.push("주의: 월간 크레딧이 80% 이상 사용되었습니다.");
-    }
-    if (snapshot.fiveHour) {
-      lines.push(formatWindow("Claude 구독 5시간 한도 (참고)", snapshot.fiveHour));
-    }
-    if (snapshot.sevenDay) {
-      lines.push(formatWindow("Claude 구독 7일 한도 (참고)", snapshot.sevenDay));
-    }
-  } else {
-    if (snapshot.fiveHour) lines.push(formatWindow("5시간 한도", snapshot.fiveHour));
-    if (snapshot.sevenDay) lines.push(formatWindow("7일 한도", snapshot.sevenDay));
-    if (snapshot.agentSdkLegacy) {
-      lines.push(formatWindow("Agent SDK 앱 한도", snapshot.agentSdkLegacy));
-    }
-    if ((snapshot.fiveHour?.utilization ?? 0) >= 80) {
-      lines.push("주의: 긴 작업을 추가 실행하면 5시간 한도에 도달할 수 있습니다.");
-    }
+  if (snapshot.fiveHour) lines.push(formatWindow("5시간 한도", snapshot.fiveHour));
+  if (snapshot.sevenDay) lines.push(formatWindow("주간 한도", snapshot.sevenDay));
+  if (snapshot.sevenDayOpus) lines.push(formatWindow("주간 한도 (Opus)", snapshot.sevenDayOpus));
+  if (snapshot.sevenDaySonnet) lines.push(formatWindow("주간 한도 (Sonnet)", snapshot.sevenDaySonnet));
+  if (snapshot.agentSdkWeekly) {
+    lines.push(formatWindow("Agent SDK 주간 한도", snapshot.agentSdkWeekly));
   }
+  if (snapshot.extraUsage) {
+    const extra = formatExtraUsage(snapshot.extraUsage);
+    if (extra) lines.push(extra);
+  }
+
+  if ((snapshot.fiveHour?.utilization ?? 0) >= 80) {
+    lines.push("주의: 5시간 한도가 80% 이상 사용되었습니다.");
+  }
+  if ((snapshot.sevenDay?.utilization ?? 0) >= 80) {
+    lines.push("주의: 주간 한도가 80% 이상 사용되었습니다.");
+  }
+
   if (lines.length === 0) {
     lines.push(snapshot.rateLimitsAvailable
       ? "한도 사용량: 서버가 사용률을 반환하지 않았습니다."

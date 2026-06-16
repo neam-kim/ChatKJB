@@ -84,6 +84,15 @@ export interface UsageWindow {
   resetsAt: string | null;
 }
 
+export interface ExtraUsage {
+  /** 오버에이지(추가 사용 과금)가 활성화되어 있는지. */
+  isEnabled: boolean;
+  utilization: number | null;
+  usedCredits: number | null;
+  monthlyLimit: number | null;
+  currency: string | null;
+}
+
 export interface UsageSnapshot {
   capturedAt: number;
   subscriptionType: string | null;
@@ -92,12 +101,10 @@ export interface UsageSnapshot {
   sevenDay?: UsageWindow;
   sevenDayOpus?: UsageWindow;
   sevenDaySonnet?: UsageWindow;
-  agentSdkLegacy?: UsageWindow;
-  agentSdkCredit?: UsageWindow & {
-    usedCredits: number | null;
-    monthlyLimit: number | null;
-    currency: string | null;
-  };
+  /** seven_day_oauth_apps — Agent SDK/프로그래매틱 호출의 주간 한도. */
+  agentSdkWeekly?: UsageWindow;
+  /** extra_usage — 한도 초과 시 사용하는 오버에이지 크레딧(있을 때만). */
+  extraUsage?: ExtraUsage;
 }
 
 export interface SessionRecord {

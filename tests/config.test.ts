@@ -21,7 +21,7 @@ afterEach(() => {
   }
 });
 
-async function setup(token?: string) {
+async function setup(token?: string, extra?: { token2?: string; token3?: string }) {
   const directory = mkdtempSync(join(tmpdir(), "telegram-claude-config-"));
   directories.push(directory);
   const project = join(directory, "project");
@@ -35,7 +35,9 @@ async function setup(token?: string) {
     TELEGRAM_ALLOWED_USER_ID: "1",
     TELEGRAM_CHAT_ID: "-1001",
     PROJECTS_PATH: projectsPath,
-    CLAUDE_CODE_OAUTH_TOKEN: token ?? ""
+    CLAUDE_CODE_OAUTH_TOKEN: token ?? "",
+    ...(extra?.token2 !== undefined ? { CLAUDE_CODE_OAUTH_TOKEN_2: extra.token2 } : {}),
+    ...(extra?.token3 !== undefined ? { CLAUDE_CODE_OAUTH_TOKEN_3: extra.token3 } : {})
   };
   const { loadConfig } = await import("../src/config.js");
   return loadConfig();
@@ -52,7 +54,32 @@ describe("OAuth configuration", () => {
   it("loads a valid setup-token credential", async () => {
     const config = await setup("sk-ant-oat01-test_token-123");
     expect(config.claudeCodeOauthToken).toBe("sk-ant-oat01-test_token-123");
+    expect(config.claudeCodeOauthTokens).toEqual(["sk-ant-oat01-test_token-123"]);
     expect(config.claudeMemoryDir).toMatch(/\.claude\/memory$/);
+  });
+
+  it("collects additional account tokens for failover", async () => {
+    const config = await setup("sk-ant-oat01-primary-1", {
+      token2: "sk-ant-oat01-secondary-2"
+    });
+    expect(config.claudeCodeOauthTokens).toEqual([
+      "sk-ant-oat01-primary-1",
+      "sk-ant-oat01-secondary-2"
+    ]);
+  });
+
+  it("ignores blank additional tokens and de-duplicates", async () => {
+    const config = await setup("sk-ant-oat01-primary-1", {
+      token2: "   ",
+      token3: "sk-ant-oat01-primary-1"
+    });
+    expect(config.claudeCodeOauthTokens).toEqual(["sk-ant-oat01-primary-1"]);
+  });
+
+  it("rejects malformed additional tokens", async () => {
+    await expect(
+      setup("sk-ant-oat01-primary-1", { token2: "nope" })
+    ).rejects.toThrow();
   });
 });
 
@@ -107,6 +134,47 @@ describe("project configuration", () => {
       defaultMode: "auto"
     });
     expect(JSON.parse(readFileSync(projectsPath, "utf8"))).toHaveLength(2);
+  });
+
+  it("removes a project by name or alias and rewrites projects.json", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
+    directories.push(directory);
+    const first = join(directory, "first");
+    const second = join(directory, "second");
+    mkdirSync(first);
+    mkdirSync(second);
+    const projectsPath = join(directory, "projects.json");
+    const projects = [
+      { name: "first", aliases: ["uno"], cwd: first, defaultMode: "default" as const },
+      { name: "second", cwd: second, defaultMode: "default" as const }
+    ];
+    writeFileSync(projectsPath, JSON.stringify(projects));
+    const { removeProject } = await import("../src/config.js");
+
+    const removed = await removeProject(projectsPath, projects, "UNO");
+
+    expect(removed.name).toBe("first");
+    const remaining = JSON.parse(readFileSync(projectsPath, "utf8")) as Array<{ name: string }>;
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]!.name).toBe("second");
+  });
+
+  it("rejects removing an unknown or the last project", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
+    directories.push(directory);
+    const only = join(directory, "only");
+    mkdirSync(only);
+    const projectsPath = join(directory, "projects.json");
+    const projects = [{ name: "only", cwd: only, defaultMode: "default" as const }];
+    writeFileSync(projectsPath, JSON.stringify(projects));
+    const { removeProject } = await import("../src/config.js");
+
+    await expect(removeProject(projectsPath, projects, "missing")).rejects.toThrow(
+      "찾을 수 없습니다"
+    );
+    await expect(removeProject(projectsPath, projects, "only")).rejects.toThrow(
+      "마지막 프로젝트"
+    );
   });
 
   it("rejects relative and duplicate project paths", async () => {

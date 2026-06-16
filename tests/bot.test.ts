@@ -40,6 +40,7 @@ function botSetup() {
     allowedUserId: 7,
     chatId: -1001,
     claudeCodeOauthToken: "test-oauth-token",
+    claudeCodeOauthTokens: ["test-oauth-token"],
     databasePath: join(directory, "state.sqlite"),
     projectsPath: join(directory, "projects.json"),
     projects: [project],

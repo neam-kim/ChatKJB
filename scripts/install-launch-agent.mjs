@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const label = "com.local.telegram-claude-orchestrator";
+const label = "com.neam.telegram-claude-orchestrator";
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const nodePath = process.execPath;
 const agentDir = join(homedir(), "Library", "LaunchAgents");

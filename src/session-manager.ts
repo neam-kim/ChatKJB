@@ -33,6 +33,7 @@ import { PermissionBroker } from "./permission-broker.js";
 import { StateStore } from "./store.js";
 import { StreamRenderer } from "./stream-renderer.js";
 import { safeErrorMessage } from "./telegram-transport.js";
+import { TokenPool } from "./token-pool.js";
 import type {
   MessageTransport,
   PlanEvidenceKind,
@@ -197,6 +198,8 @@ interface PlanRequest {
 interface SessionManagerOptions {
   debounceMs: number;
   claudeCodeOauthToken: string;
+  // 한도 도달 시 페일오버할 추가 계정 토큰(선택). 기본 토큰 다음 우선순위로 사용된다.
+  additionalOauthTokens?: string[];
   claudeCodeExecutable?: string;
   mcpToolTimeoutMs: number;
   mcpMaxAttempts: number;
@@ -486,6 +489,20 @@ async function readUsageSnapshot(
   }
 }
 
+// 한도/요금 한계로 턴이 실패했는지 휴리스틱으로 판별한다. utilization 100% 이벤트가
+// 오기 전에 곧장 에러로 끝나는 경우를 잡아 다음 세션을 다른 토큰으로 유도하기 위함이다.
+export function isRateLimitError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    message.includes("rate limit")
+    || message.includes("rate_limit")
+    || message.includes("429")
+    || message.includes("usage limit")
+    || message.includes("quota")
+    || (message.includes("limit") && message.includes("reset"))
+  );
+}
+
 export function buildClaudeEnvironment(
   oauthToken: string,
   baseEnvironment: NodeJS.ProcessEnv = process.env,
@@ -556,13 +573,19 @@ export class SessionManager {
   private readonly queuedCounts = new Map<string, number>();
   private readonly sessionTasks = new Map<string, Promise<void>>();
   private readonly deleting = new Set<string>();
+  private readonly tokenPool: TokenPool;
 
   constructor(
     private readonly store: StateStore,
     private readonly transport: MessageTransport,
     private readonly permissions: PermissionBroker,
     private readonly options: SessionManagerOptions
-  ) {}
+  ) {
+    this.tokenPool = new TokenPool([
+      options.claudeCodeOauthToken,
+      ...(options.additionalOauthTokens ?? [])
+    ]);
+  }
 
   createSession(
     project: ProjectConfig,
@@ -775,6 +798,9 @@ export class SessionManager {
       mcpFailures: new Map()
     };
     this.active.set(session.id, run);
+    // 한도에 도달하지 않은 토큰을 고른다. 전부 소진이면 가장 빨리 회복될 토큰을 시도한다.
+    const oauthToken = this.tokenPool.select();
+    const tokenIndex = this.tokenPool.indexOf(oauthToken);
     let sdkSessionId = request.resumeSessionId ?? session.sdkSessionId;
     let latestUsage: UsageSnapshot | null = session.usageSnapshot;
     let lastAssistantText = "";
@@ -790,6 +816,9 @@ export class SessionManager {
     try {
       await this.safeRename(session, `[RUNNING] ${session.title}`);
       await renderer.start(false);
+      if (this.tokenPool.size > 1 && tokenIndex > 0) {
+        renderer.note(`기본 토큰 한도 도달 → 계정 토큰 #${tokenIndex + 1}로 전환해 실행합니다.`);
+      }
       if (this.deleting.has(session.id)) return;
       this.store.updateSession(session.id, { status: "running" });
 
@@ -897,7 +926,7 @@ export class SessionManager {
             })()
         },
         env: buildClaudeEnvironment(
-          this.options.claudeCodeOauthToken,
+          oauthToken,
           process.env,
           this.options.mcpToolTimeoutMs
         ),
@@ -962,6 +991,7 @@ export class SessionManager {
           );
           this.store.updateSession(session.id, { usageSnapshot: latestUsage });
           renderer.usage(latestUsage);
+          this.tokenPool.observe(oauthToken, latestUsage);
         }
 
         if (message.type === "system" && message.subtype === "compact_boundary") {
@@ -1008,6 +1038,7 @@ export class SessionManager {
             latestUsage = serverUsage;
             renderer.usage(serverUsage);
           }
+          this.tokenPool.observe(oauthToken, latestUsage);
           run.pendingTurns = Math.max(0, run.pendingTurns - 1);
           finalStatus = message.subtype === "success" ? "done" : "error";
           this.store.updateSession(session.id, {
@@ -1063,6 +1094,14 @@ export class SessionManager {
         await renderer.finish("aborted", "사용자가 작업을 중단했습니다.");
         await this.safeRename(session, `[STOP] ${session.title}`);
       } else {
+        if (isRateLimitError(error)) {
+          // utilization 100% 이벤트 없이 곧장 한도 오류로 끝난 경우. 이 토큰을 잠시
+          // 봉인해 다음 세션이 다른 토큰을 쓰도록 유도한다.
+          this.tokenPool.noteRateLimited(oauthToken);
+          if (this.tokenPool.size > 1) {
+            renderer.note(`토큰 #${tokenIndex + 1} 한도 도달. 다음 세션은 다른 계정 토큰으로 전환됩니다.`);
+          }
+        }
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", String(error));
         await this.safeRename(session, `[ERROR] ${session.title}`);
@@ -1094,6 +1133,10 @@ export class SessionManager {
       mcpFailures: new Map()
     };
     this.active.set(session.id, run);
+    // 계획 단계도 동일하게 살아있는 토큰을 고른다. 이 단계는 사용량 스트림을 추적하지
+    // 않으므로 한도 도달은 rate-limit 오류로만 감지한다.
+    const oauthToken = this.tokenPool.select();
+    const tokenIndex = this.tokenPool.indexOf(oauthToken);
     const planRunId = randomUUID();
     const planRunCreatedAt = Date.now();
     this.store.createPlanRun({
@@ -1124,6 +1167,7 @@ export class SessionManager {
         controller,
         run,
         buildPlanPrompt(request.instruction),
+        oauthToken,
         true
       );
       let criteria = parseAcceptanceCriteria(plan);
@@ -1138,6 +1182,7 @@ export class SessionManager {
             plan,
             "계획 마지막의 [ACCEPTANCE_CRITERIA] 블록이 누락됐습니다. 계획 내용은 유지하고 독립 검증 가능한 기준을 추가하세요."
           ),
+          oauthToken,
           true
         );
         criteria = parseAcceptanceCriteria(plan);
@@ -1173,6 +1218,7 @@ export class SessionManager {
           controller,
           run,
           buildPlanPrompt(request.instruction, plan, decision.text ?? ""),
+          oauthToken,
           true
         );
         criteria = parseAcceptanceCriteria(plan);
@@ -1286,7 +1332,8 @@ export class SessionManager {
           session,
           controller,
           run,
-          buildReviewPrompt(plan, finalResponse, criteria, evidence, changes.status, changes.diff)
+          buildReviewPrompt(plan, finalResponse, criteria, evidence, changes.status, changes.diff),
+          oauthToken
         );
         const review = parsePlanReview(reviewText, criteria.length);
         finalReview = review;
@@ -1392,6 +1439,12 @@ export class SessionManager {
     } catch (error) {
       if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
       const aborted = controller.signal.aborted && !timedOut;
+      if (!aborted && !timedOut && isRateLimitError(error)) {
+        this.tokenPool.noteRateLimited(oauthToken);
+        if (this.tokenPool.size > 1) {
+          renderer.note(`토큰 #${tokenIndex + 1} 한도 도달. 다음 세션은 다른 계정 토큰으로 전환됩니다.`);
+        }
+      }
       this.store.updatePlanRun(planRunId, {
         status: aborted ? "aborted" : "failed",
         reviewText: safeErrorMessage(error),
@@ -1424,6 +1477,7 @@ export class SessionManager {
     controller: AbortController,
     run: ActiveRun,
     prompt: string,
+    oauthToken: string,
     allowQuestions = false
   ): Promise<string> {
     const instructions = loadProjectInstructions(session.cwd);
@@ -1456,7 +1510,7 @@ export class SessionManager {
             : {})
         },
         env: buildClaudeEnvironment(
-          this.options.claudeCodeOauthToken,
+          oauthToken,
           process.env,
           this.options.mcpToolTimeoutMs
         ),

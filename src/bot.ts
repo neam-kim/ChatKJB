@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { Bot, InlineKeyboard } from "grammy";
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
-import { addProject, resolveProject, type AppConfig } from "./config.js";
+import { addProject, removeProject, resolveProject, type AppConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { PermissionBroker } from "./permission-broker.js";
 import {
@@ -208,6 +208,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   const sessions = new SessionManager(store, transport, permissions, {
     debounceMs: config.statusDebounceMs,
     claudeCodeOauthToken: config.claudeCodeOauthToken,
+    additionalOauthTokens: config.claudeCodeOauthTokens.slice(1),
     mcpToolTimeoutMs: config.mcpToolTimeoutMs,
     mcpMaxAttempts: config.mcpMaxAttempts,
     codexMcpTimeoutMs: config.codexMcpTimeoutMs,
@@ -229,6 +230,28 @@ export function createBot(config: AppConfig, store: StateStore) {
     store.syncProjects([project]);
     return project;
   };
+
+  const unregisterProject = async (identifier: string): Promise<ProjectConfig> => {
+    const project = await removeProject(config.projectsPath, config.projects, identifier);
+    const index = config.projects.findIndex((item) => item.name === project.name);
+    if (index !== -1) config.projects.splice(index, 1);
+    // 세션이 참조하지 않을 때만 저장소 행을 지운다(외래키 무결성 유지).
+    if (store.countSessionsByProject(project.name) === 0) {
+      store.deleteProject(project.name);
+    }
+    return project;
+  };
+
+  const confirmDeleteProjectKeyboard = (index: number): InlineKeyboard =>
+    new InlineKeyboard()
+      .text("프로젝트 삭제", `delproj:${index}`)
+      .row()
+      .text("취소", "delprojcancel");
+
+  const deleteProjectConfirmText = (project: ProjectConfig): string =>
+    `프로젝트를 등록 목록에서 삭제합니다. 되돌릴 수 없습니다.\n`
+    + `폴더의 실제 파일은 지우지 않습니다.\n\n`
+    + `${project.name}\n${project.cwd}`;
 
   bot.use(async (ctx, next) => {
     if (ctx.from?.id !== config.allowedUserId) return;
@@ -318,7 +341,7 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /lean, /diff, /upload, /delete 사용"
+      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /lean, /diff, /upload, /delete 사용"
     );
   });
 
@@ -367,6 +390,33 @@ export function createBot(config: AppConfig, store: StateStore) {
     } catch (error) {
       await ctx.reply(`프로젝트를 추가하지 못했습니다.\n${safeErrorMessage(error)}`);
     }
+  });
+
+  bot.command("deltp", async (ctx) => {
+    if (config.projects.length === 0) {
+      await ctx.reply("등록된 프로젝트가 없습니다.");
+      return;
+    }
+    const identifier = ctx.match.trim();
+    if (!identifier) {
+      const keyboard = new InlineKeyboard();
+      for (const [index, project] of config.projects.entries()) {
+        keyboard.text(project.name, `delp:${index}`).row();
+      }
+      await ctx.reply("삭제할 프로젝트를 선택하세요.", { reply_markup: keyboard });
+      return;
+    }
+    const index = config.projects.findIndex((project) =>
+      resolveProject([project], identifier) !== undefined
+    );
+    const project = config.projects[index];
+    if (!project) {
+      await ctx.reply("등록된 프로젝트를 찾을 수 없습니다. /projects 로 이름을 확인하세요.");
+      return;
+    }
+    await ctx.reply(deleteProjectConfirmText(project), {
+      reply_markup: confirmDeleteProjectKeyboard(index)
+    });
   });
 
   bot.command("sessions", async (ctx) => {
@@ -916,6 +966,44 @@ export function createBot(config: AppConfig, store: StateStore) {
     );
   });
 
+  bot.callbackQuery(/^delp:/, async (ctx) => {
+    const index = Number.parseInt(ctx.callbackQuery.data.slice("delp:".length), 10);
+    const project = Number.isInteger(index) ? config.projects[index] : undefined;
+    if (!project) {
+      await ctx.answerCallbackQuery({ text: "프로젝트를 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: `${project.name} 선택` });
+    await ctx.reply(deleteProjectConfirmText(project), {
+      reply_markup: confirmDeleteProjectKeyboard(index)
+    });
+  });
+
+  bot.callbackQuery(/^delprojcancel$/, async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "삭제를 취소했습니다." });
+    await ctx.editMessageText("프로젝트 삭제를 취소했습니다.");
+  });
+
+  bot.callbackQuery(/^delproj:/, async (ctx) => {
+    const index = Number.parseInt(ctx.callbackQuery.data.slice("delproj:".length), 10);
+    const project = Number.isInteger(index) ? config.projects[index] : undefined;
+    if (!project) {
+      await ctx.answerCallbackQuery({ text: "프로젝트를 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "삭제 중입니다." });
+    try {
+      const removed = await unregisterProject(project.name);
+      const linked = store.countSessionsByProject(removed.name);
+      const note = linked > 0
+        ? `\n이 프로젝트의 기존 세션 ${linked}개는 그대로 유지됩니다.`
+        : "";
+      await ctx.editMessageText(`프로젝트를 삭제했습니다.\n${removed.name}\n${removed.cwd}${note}`);
+    } catch (error) {
+      await ctx.editMessageText(`프로젝트를 삭제하지 못했습니다.\n${safeErrorMessage(error)}`);
+    }
+  });
+
   bot.callbackQuery(/^delcancel:/, async (ctx) => {
     await ctx.answerCallbackQuery({ text: "삭제를 취소했습니다." });
     await ctx.editMessageText("삭제를 취소했습니다.");
@@ -936,7 +1024,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     } catch (error) {
       console.error(
         "Telegram topic deletion failed:",
-        safeErrorMessage(error, [config.telegramBotToken, config.claudeCodeOauthToken])
+        safeErrorMessage(error, [config.telegramBotToken, ...config.claudeCodeOauthTokens])
       );
       await ctx.reply("토픽을 삭제하지 못했습니다. 봇의 Delete Messages 권한을 확인하세요.");
       return;
@@ -1076,7 +1164,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   bot.catch((error) => {
     console.error(
       "Telegram update failed:",
-      safeErrorMessage(error.error, [config.telegramBotToken, config.claudeCodeOauthToken])
+      safeErrorMessage(error.error, [config.telegramBotToken, ...config.claudeCodeOauthTokens])
     );
   });
 

@@ -16,6 +16,7 @@ async function main(): Promise<void> {
     { command: "doctor", description: "실행 환경 진단" },
     { command: "plan", description: "계획·실행·검토 파이프라인" },
     { command: "addp", description: "절대경로 프로젝트 추가" },
+    { command: "deltp", description: "등록 프로젝트 삭제" },
     { command: "sessions", description: "최근 세션 목록" },
     { command: "usage", description: "현재 한도 사용량" },
     { command: "projects", description: "등록 프로젝트 목록" },
