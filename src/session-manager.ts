@@ -63,6 +63,10 @@ import {
 
 const execFileAsync = promisify(execFile);
 const MAX_PLAN_EXECUTION_ATTEMPTS = 3;
+// 일시적 과부하(Overloaded/5xx) 자동 재시도 상한과 백오프(지수, 상한 60초).
+const MAX_OVERLOAD_RETRIES = 5;
+const OVERLOAD_RETRY_BASE_MS = 5_000;
+const OVERLOAD_RETRY_CAP_MS = 60_000;
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
 export const CODEX_MODEL = DEFAULT_CODEX_MODEL;
 export const CODEX_REASONING_EFFORT = DEFAULT_CODEX_REASONING;
@@ -117,6 +121,10 @@ interface RunRequest {
   resumeSessionId?: string;
   forkSession?: boolean;
   operation?: "prompt" | "compact";
+  // 한도 오류로 다른 계정 토큰에 자동 전환해 재실행한 횟수. 무한 전환을 막는 가드.
+  autoSwitchCount?: number;
+  // 일시적 과부하(Overloaded/5xx)로 백오프 후 자동 재시도한 횟수. 무한 재시도를 막는 가드.
+  retryCount?: number;
 }
 
 interface PlanRequest {
@@ -493,6 +501,21 @@ export function isRateLimitError(error: unknown): boolean {
     || message.includes("usage limit")
     || message.includes("quota")
     || (message.includes("limit") && message.includes("reset"))
+  );
+}
+
+// 일시적 서버 과부하/장애로 턴이 실패했는지 판별한다. 토큰 한도가 아니라 Anthropic
+// 백엔드 전역 과부하(529 Overloaded)나 일시 장애(5xx)이므로, 토큰을 봉인/전환하지 않고
+// 짧은 백오프 후 같은 토큰으로 같은 작업을 재시도하면 대부분 회복된다.
+export function isOverloadedError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    message.includes("overloaded")
+    || message.includes("529")
+    || message.includes("503")
+    || message.includes("502")
+    || message.includes("service unavailable")
+    || message.includes("internal server error")
   );
 }
 
@@ -1177,15 +1200,73 @@ export class SessionManager {
         this.store.updateSession(session.id, { status: "aborted" });
         await renderer.finish("aborted", "사용자가 작업을 중단했습니다.");
         await this.safeRename(session, `[STOP] ${session.title}`);
-      } else {
-        if (isRateLimitError(error)) {
-          // utilization 100% 이벤트 없이 곧장 한도 오류로 끝난 경우. 이 토큰을 잠시
-          // 봉인해 다음 세션이 다른 토큰을 쓰도록 유도한다.
-          this.tokenPool.noteRateLimited(oauthToken);
-          if (this.tokenPool.size > 1) {
-            renderer.note(`토큰 #${tokenIndex + 1} 한도 도달. 다음 세션은 다른 계정 토큰으로 전환됩니다.`);
-          }
+      } else if (isRateLimitError(error)) {
+        // 한도 오류로 끝난 토큰을 봉인하고, 살아있는 다른 토큰이 있으면 같은 작업을
+        // 그 토큰으로 즉시 자동 재실행한다. 사용자가 "계속" 같은 추가 입력을 보낼 필요가 없다.
+        this.tokenPool.noteRateLimited(oauthToken);
+        const attempts = (request.autoSwitchCount ?? 0) + 1;
+        const nextToken = this.tokenPool.select();
+        const canAutoSwitch =
+          this.tokenPool.size > 1
+          && attempts < this.tokenPool.size
+          && !this.tokenPool.isExhausted(nextToken);
+        if (canAutoSwitch) {
+          const nextIndex = this.tokenPool.indexOf(nextToken);
+          await this.transport.sendText(
+            session.chatId,
+            session.topicId,
+            `토큰 #${tokenIndex + 1} 한도 도달 → 계정 토큰 #${nextIndex + 1}로 자동 전환해 이어서 실행합니다.`
+          ).catch(() => undefined);
+          await this.safeRename(session, `[SWITCH] ${session.title}`);
+          // 같은 프로젝트 큐의 맨 뒤에 재투입한다. 현재 실행의 finally가 active/렌더러를
+          // 정리한 뒤 살아있는 토큰으로 다시 실행된다. resume으로 대화 맥락을 잇는다.
+          const resumeId = sdkSessionId ?? request.resumeSessionId;
+          this.enqueue({
+            ...request,
+            ...(resumeId ? { resumeSessionId: resumeId } : {}),
+            autoSwitchCount: attempts
+          });
+          return;
         }
+        if (this.tokenPool.size > 1) {
+          renderer.note("모든 계정 토큰이 한도에 도달해 자동 전환할 수 없습니다.");
+        }
+        this.store.updateSession(session.id, { status: "error" });
+        await renderer.finish("error", String(error));
+        await this.safeRename(session, `[ERROR] ${session.title}`);
+      } else if (isOverloadedError(error)) {
+        // 일시적 서버 과부하/장애. 토큰을 봉인하지 않고 지수 백오프 후 같은 작업을
+        // 자동 재시도한다. 사용자가 직접 "계속"을 보낼 필요가 없다.
+        const attempt = (request.retryCount ?? 0) + 1;
+        if (attempt <= MAX_OVERLOAD_RETRIES) {
+          const delayMs = Math.min(
+            OVERLOAD_RETRY_BASE_MS * 2 ** (attempt - 1),
+            OVERLOAD_RETRY_CAP_MS
+          );
+          const seconds = Math.round(delayMs / 1000);
+          await this.transport.sendText(
+            session.chatId,
+            session.topicId,
+            `서버 과부하(Overloaded)로 일시 중단 → ${seconds}초 후 자동 재시도합니다. (${attempt}/${MAX_OVERLOAD_RETRIES})`
+          ).catch(() => undefined);
+          await this.safeRename(session, `[RETRY] ${session.title}`);
+          const resumeId = sdkSessionId ?? request.resumeSessionId;
+          const retryRequest: RunRequest = {
+            ...request,
+            ...(resumeId ? { resumeSessionId: resumeId } : {}),
+            retryCount: attempt
+          };
+          setTimeout(() => {
+            if (this.deleting.has(session.id)) return;
+            this.enqueue(retryRequest);
+          }, delayMs).unref();
+          return;
+        }
+        renderer.note(`과부하가 ${MAX_OVERLOAD_RETRIES}회 재시도 후에도 풀리지 않았습니다.`);
+        this.store.updateSession(session.id, { status: "error" });
+        await renderer.finish("error", String(error));
+        await this.safeRename(session, `[ERROR] ${session.title}`);
+      } else {
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", String(error));
         await this.safeRename(session, `[ERROR] ${session.title}`);

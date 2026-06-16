@@ -9,7 +9,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
-import { loadModelCatalog } from "./model-catalog.js";
+import { FALLBACK_MODEL_CATALOG } from "./model-catalog.js";
 import type { ProjectConfig } from "./types.js";
 
 export const CLAUDE_OAUTH_TOKEN_PATTERN = /^sk-ant-oat01-[A-Za-z0-9_-]+$/;
@@ -226,7 +226,9 @@ export async function loadConfig() {
       ].filter((token): token is string => Boolean(token))
     )
   ];
-  const modelCatalog = await loadModelCatalog(env.CLAUDE_CODE_OAUTH_TOKEN);
+  // 실제 카탈로그는 시작 시 index.ts가 제공사에서 읽어 config.modelCatalog에 채운다.
+  // 여기서는 정적 fallback을 둬, 설정 로드 단계가 외부 프로세스를 띄우지 않게 한다.
+  const modelCatalog = FALLBACK_MODEL_CATALOG;
 
   return {
     telegramBotToken: env.TELEGRAM_BOT_TOKEN,

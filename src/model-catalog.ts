@@ -1,8 +1,14 @@
 import { execFile } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { query, type ModelInfo } from "@anthropic-ai/claude-agent-sdk";
 
 const execFileAsync = promisify(execFile);
-const MODEL_DISCOVERY_TIMEOUT_MS = 3_000;
+// Claude 모델 조회는 Claude Code 자식 프로세스를 띄우므로 콜드스타트 여유를 둔다.
+const CLAUDE_DISCOVERY_TIMEOUT_MS = 20_000;
+const CODEX_DISCOVERY_TIMEOUT_MS = 15_000;
 
 export type ClaudeThinkingLevel =
   | "adaptive"
@@ -183,9 +189,18 @@ export function normalizeThinkingForModel(
     ?? DEFAULT_THINKING_LEVEL;
 }
 
-export async function loadModelCatalog(oauthToken: string): Promise<ModelCatalog> {
+// 제공사 카탈로그 조회에 필요한 입력. Claude는 SDK가 Claude Code 자식 프로세스를 띄우므로
+// 실제 프로젝트 경로(cwd)와 OAuth 토큰이 필요하다.
+export interface CatalogProbe {
+  cwd: string;
+  oauthToken: string;
+  claudeCodeExecutable?: string | undefined;
+  mcpToolTimeoutMs?: number | undefined;
+}
+
+export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalog> {
   const [claudeModels, codexModels] = await Promise.all([
-    discoverClaudeModels(oauthToken).catch(() => FALLBACK_CLAUDE_MODELS),
+    discoverClaudeModels(probe).catch(() => FALLBACK_CLAUDE_MODELS),
     discoverCodexModels().catch(() => FALLBACK_CODEX_MODELS)
   ]);
   return {
@@ -194,53 +209,110 @@ export async function loadModelCatalog(oauthToken: string): Promise<ModelCatalog
   };
 }
 
-async function discoverClaudeModels(oauthToken: string): Promise<ClaudeModelOption[]> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MODEL_DISCOVERY_TIMEOUT_MS);
+// Claude 모델은 공개 REST API가 setup-token OAuth를 받지 않으므로(401), Agent SDK의
+// supportedModels()로 읽는다. 이 호출은 구독 OAuth로 동작하며 모델별 thinking/effort
+// 지원 여부까지 돌려준다.
+async function discoverClaudeModels(probe: CatalogProbe): Promise<ClaudeModelOption[]> {
+  const abortController = new AbortController();
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    CLAUDE_CODE_OAUTH_TOKEN: probe.oauthToken,
+    ANTHROPIC_API_KEY: undefined,
+    ANTHROPIC_AUTH_TOKEN: undefined,
+    ...(probe.mcpToolTimeoutMs
+      ? {
+          MCP_TIMEOUT: String(probe.mcpToolTimeoutMs),
+          MCP_TOOL_TIMEOUT: String(probe.mcpToolTimeoutMs)
+        }
+      : {})
+  };
+  const sdkQuery = query({
+    prompt: "모델 카탈로그 조회용 요청입니다.",
+    options: {
+      cwd: probe.cwd,
+      abortController,
+      maxTurns: 1,
+      permissionMode: "default",
+      allowedTools: [],
+      settingSources: [],
+      env,
+      ...(probe.claudeCodeExecutable
+        ? { pathToClaudeCodeExecutable: probe.claudeCodeExecutable }
+        : {})
+    }
+  });
   try {
-    const response = await fetch("https://api.anthropic.com/v1/models", {
-      headers: {
-        "anthropic-version": "2023-06-01",
-        authorization: `Bearer ${oauthToken}`
-      },
-      signal: controller.signal
-    });
-    if (!response.ok) throw new Error(`Claude model discovery failed: ${response.status}`);
-    const payload = await response.json() as { data?: UnknownClaudeModel[] };
-    return (payload.data ?? [])
-      .filter((model) => typeof model.id === "string" && typeof model.display_name === "string")
-      .map((model) => ({
-        id: model.id,
-        label: model.display_name,
-        aliases: aliasesForClaudeModel(model.id, model.display_name),
-        thinkingOptions: claudeThinkingOptions(model.capabilities),
-        source: "api" as const
-      }));
+    const models = await Promise.race([
+      sdkQuery.supportedModels(),
+      new Promise<ModelInfo[]>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("supportedModels timeout")),
+          CLAUDE_DISCOVERY_TIMEOUT_MS
+        ).unref()
+      )
+    ]);
+    const mapped: ClaudeModelOption[] = [];
+    const seen = new Set<string>();
+    for (const info of models) {
+      // "default"는 추천 별칭이라 명시적 모델 선택 UI에서는 제외한다.
+      if (!info?.value || info.value === "default") continue;
+      const option = claudeOptionFromModelInfo(info);
+      if (seen.has(option.id)) continue;
+      seen.add(option.id);
+      mapped.push(option);
+    }
+    return mapped;
   } finally {
-    clearTimeout(timeout);
+    abortController.abort();
+    sdkQuery.close();
   }
 }
 
-interface UnknownClaudeModel {
-  id: string;
-  display_name: string;
-  capabilities?: {
-    thinking?: {
-      supported?: boolean;
-      types?: {
-        adaptive?: { supported?: boolean };
-        enabled?: { supported?: boolean };
-      };
+// 카탈로그 항목 하나를 표시용 옵션으로 변환한다. fallback 목록에 동일 모델이 있으면(별칭
+// 매칭) 기존 id/별칭/라벨을 재사용해 저장된 세션의 모델값 해석을 유지하고, thinking 옵션은
+// 항상 현재 capability에서 새로 만든다. 모르는 모델은 카탈로그 value/displayName으로 만든다.
+function claudeOptionFromModelInfo(info: ModelInfo): ClaudeModelOption {
+  const liveThinking = claudeThinkingOptionsFromInfo(info);
+  const known = FALLBACK_CLAUDE_MODELS.find(
+    (option) => option.id === info.value || option.aliases.includes(info.value)
+  );
+  if (known) {
+    return {
+      id: known.id,
+      label: known.label,
+      aliases: known.aliases,
+      thinkingOptions: liveThinking,
+      source: "api"
     };
-    effort?: {
-      supported?: boolean;
-      low?: { supported?: boolean };
-      medium?: { supported?: boolean };
-      high?: { supported?: boolean };
-      xhigh?: { supported?: boolean };
-      max?: { supported?: boolean };
-    };
-  } | null;
+  }
+  const displayName = info.displayName || info.value;
+  return {
+    id: info.value,
+    label: displayName,
+    aliases: aliasesForClaudeModel(info.value, displayName),
+    thinkingOptions: liveThinking,
+    source: "api"
+  };
+}
+
+function claudeThinkingOptionsFromInfo(info: ModelInfo): ThinkingOption[] {
+  const levels: ClaudeThinkingLevel[] = [];
+  if (info.supportsAdaptiveThinking) levels.push("adaptive");
+  if (info.supportsEffort && info.supportedEffortLevels) {
+    for (const level of info.supportedEffortLevels) {
+      if (
+        level === "low"
+        || level === "medium"
+        || level === "high"
+        || level === "xhigh"
+        || level === "max"
+      ) {
+        levels.push(level);
+      }
+    }
+  }
+  levels.push("off");
+  return thinkingOptions(levels);
 }
 
 function aliasesForClaudeModel(id: string, displayName: string): string[] {
@@ -261,26 +333,30 @@ function aliasesForClaudeModel(id: string, displayName: string): string[] {
   return [...values];
 }
 
-function claudeThinkingOptions(capabilities: UnknownClaudeModel["capabilities"]): ThinkingOption[] {
-  if (!capabilities?.thinking?.supported) return thinkingOptions(["off"]);
-  const levels: ClaudeThinkingLevel[] = [];
-  if (capabilities.thinking.types?.adaptive?.supported) levels.push("adaptive");
-  if (capabilities.effort?.supported) {
-    for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
-      if (capabilities.effort[level]?.supported) levels.push(level);
+// Codex SDK가 번들한 네이티브 바이너리 경로를 찾는다. PATH의 `codex`에 의존하지 않는다.
+// 플랫폼 패키지의 vendor 디렉터리에서 bin/codex(신규) 또는 codex/codex(레거시)를 탐색한다.
+function resolveCodexBinaryPath(): string {
+  const requireFromHere = createRequire(import.meta.url);
+  const platformPackage = `@openai/codex-${process.platform}-${process.arch}`;
+  const packageJsonPath = requireFromHere.resolve(`${platformPackage}/package.json`);
+  const vendorRoot = join(dirname(packageJsonPath), "vendor");
+  const binaryName = process.platform === "win32" ? "codex.exe" : "codex";
+  for (const triple of readdirSync(vendorRoot)) {
+    for (const candidate of [
+      join(vendorRoot, triple, "bin", binaryName),
+      join(vendorRoot, triple, "codex", binaryName)
+    ]) {
+      if (existsSync(candidate)) return candidate;
     }
   }
-  if (capabilities.thinking.types?.enabled?.supported && levels.length === 0) {
-    levels.push("high");
-  }
-  levels.push("off");
-  return thinkingOptions(levels.length ? levels : ["adaptive", "off"]);
+  throw new Error(`Codex 바이너리를 ${vendorRoot}에서 찾지 못했습니다.`);
 }
 
 async function discoverCodexModels(): Promise<CodexModelOption[]> {
-  const { stdout } = await execFileAsync("codex", ["debug", "models"], {
-    timeout: MODEL_DISCOVERY_TIMEOUT_MS,
-    maxBuffer: 8 * 1024 * 1024
+  const binary = resolveCodexBinaryPath();
+  const { stdout } = await execFileAsync(binary, ["debug", "models"], {
+    timeout: CODEX_DISCOVERY_TIMEOUT_MS,
+    maxBuffer: 16 * 1024 * 1024
   });
   const payload = JSON.parse(stdout) as { models?: UnknownCodexModel[] };
   return (payload.models ?? [])

@@ -15,6 +15,8 @@ import {
   CLAUDE_THINKING,
   CODEX_MODEL,
   CODEX_REASONING_EFFORT,
+  isOverloadedError,
+  isRateLimitError,
   loadProjectInstructions,
   MessageQueue,
   requireCodexSubscriptionAuth,
@@ -119,6 +121,30 @@ describe("Codex model policy", () => {
   it("forces GPT-5.5 with high reasoning", () => {
     expect(CODEX_MODEL).toBe("gpt-5.5");
     expect(CODEX_REASONING_EFFORT).toBe("high");
+  });
+});
+
+describe("failure classification", () => {
+  it("treats session/usage limits as rate-limit errors (token failover)", () => {
+    expect(isRateLimitError(new Error("You've hit your session limit · resets 2pm"))).toBe(true);
+    expect(isRateLimitError(new Error("HTTP 429 rate_limit_error"))).toBe(true);
+    expect(isRateLimitError(new Error("quota exceeded"))).toBe(true);
+  });
+
+  it("treats Overloaded and 5xx as transient errors (backoff retry, not failover)", () => {
+    expect(isOverloadedError(new Error("Claude Code returned an error result: API Error: Overloaded"))).toBe(true);
+    expect(isOverloadedError(new Error("API Error: 529 overloaded_error"))).toBe(true);
+    expect(isOverloadedError(new Error("503 Service Unavailable"))).toBe(true);
+    expect(isOverloadedError(new Error("502 Bad Gateway"))).toBe(true);
+  });
+
+  it("keeps the two classes disjoint for the dispatch branches", () => {
+    const overloaded = new Error("API Error: Overloaded");
+    expect(isOverloadedError(overloaded)).toBe(true);
+    expect(isRateLimitError(overloaded)).toBe(false);
+    const limit = new Error("You've hit your session limit · resets 2pm");
+    expect(isRateLimitError(limit)).toBe(true);
+    expect(isOverloadedError(limit)).toBe(false);
   });
 });
 

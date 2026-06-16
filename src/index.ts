@@ -1,5 +1,6 @@
 import { loadConfig } from "./config.js";
 import { createBot } from "./bot.js";
+import { FALLBACK_MODEL_CATALOG, loadModelCatalog } from "./model-catalog.js";
 import { StateStore } from "./store.js";
 import { safeErrorMessage } from "./telegram-transport.js";
 
@@ -8,6 +9,25 @@ async function main(): Promise<void> {
   const store = new StateStore(config.databasePath);
   store.syncProjects(config.projects);
   const interrupted = store.interruptIncompleteSessions();
+
+  // 제공사 카탈로그(Claude=SDK supportedModels, Codex=번들 바이너리 debug models)를 읽어
+  // 모델·사고(thinking)·추론(reasoning) 선택지를 동적으로 채운다. 실패하면 정적 fallback 유지.
+  const firstProject = config.projects[0];
+  if (firstProject) {
+    config.modelCatalog = await loadModelCatalog({
+      cwd: firstProject.cwd,
+      oauthToken: config.claudeCodeOauthToken,
+      claudeCodeExecutable: config.claudeCodeExecutable,
+      mcpToolTimeoutMs: config.mcpToolTimeoutMs
+    }).catch(() => FALLBACK_MODEL_CATALOG);
+    const claudeDynamic = config.modelCatalog.claudeModels.some((m) => m.source === "api");
+    const codexDynamic = config.modelCatalog.codexModels.some((m) => m.source === "cli");
+    console.log(
+      `Model catalog → Claude: ${claudeDynamic ? "동적" : "기본값"}, `
+      + `Codex: ${codexDynamic ? "동적" : "기본값"}`
+    );
+  }
+
   const { bot } = createBot(config, store);
 
   await bot.api.setMyCommands([
