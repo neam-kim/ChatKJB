@@ -304,8 +304,7 @@ describe("goal prompts", () => {
   });
 
   it("caps automatic goal rounds to prevent runaway loops", () => {
-    expect(MAX_GOAL_ROUNDS).toBeGreaterThan(0);
-    expect(MAX_GOAL_ROUNDS).toBeLessThanOrEqual(20);
+    expect(MAX_GOAL_ROUNDS).toBe(25);
   });
 });
 

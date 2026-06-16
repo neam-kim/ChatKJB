@@ -71,7 +71,7 @@ const OVERLOAD_RETRY_CAP_MS = 60_000;
 // 한도 초기화 직후의 미세한 시계 오차로 또 거부당하는 것을 막는다.
 const LIMIT_RESUME_BUFFER_MS = 10_000;
 // /goal: 한 목표를 향해 자동으로 이어 도는 최대 턴 수(폭주·무한 반복 방지).
-export const MAX_GOAL_ROUNDS = 10;
+export const MAX_GOAL_ROUNDS = 25;
 // 목표 충족 여부를 판정하는 빠르고 저렴한 모델. 매 턴 한 번만 읽기 전용으로 호출한다.
 const GOAL_EVAL_MODEL = "claude-haiku-4-5";
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
@@ -1786,6 +1786,40 @@ export class SessionManager {
   }
 
   /**
+   * 모든 토큰 한도로 목표 충족 여부를 아직 평가하지 못했을 때, 회복 시각에 다시 평가·진행하도록
+   * 예약한다. 작업 턴의 scheduleLimitResume과 같은 limitWaiters를 쓰므로, 회복 전에 사용자가
+   * 새 지시를 보내거나 /stop을 누르면 예약이 취소된다. 데몬 재시작 시에는 interrupted로 복구된다.
+   */
+  private scheduleGoalRecheck(
+    session: SessionRecord,
+    request: RunRequest,
+    sdkSessionId: string | null,
+    resumeAt: number
+  ): void {
+    const delayMs = Math.max(0, resumeAt - Date.now()) + LIMIT_RESUME_BUFFER_MS;
+    const when = new Date(resumeAt + LIMIT_RESUME_BUFFER_MS).toLocaleString("ko-KR", {
+      timeZone: "Asia/Seoul"
+    });
+    this.store.updateSession(session.id, { status: "waiting_limit" });
+    void this.transport.sendText(
+      session.chatId,
+      session.topicId,
+      `${this.tokenPool.size > 1 ? "모든 계정 토큰이" : "토큰이"} 한도에 도달해 목표 달성 여부를 `
+      + `아직 확인하지 못했습니다. ${when}에 회복되면 자동으로 다시 평가하고 목표 진행을 이어 갑니다.`
+    ).catch(() => undefined);
+    void this.safeRename(session, `[WAIT] ${session.title}`);
+    this.cancelLimitWaiter(session.id);
+    const timer = setTimeout(() => {
+      this.limitWaiters.delete(session.id);
+      if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
+      if (this.active.has(session.id)) return;
+      void this.maybeContinueGoal(session, request, sdkSessionId);
+    }, delayMs);
+    timer.unref();
+    this.limitWaiters.set(session.id, timer);
+  }
+
+  /**
    * 한 턴이 정상 종료된 직후 호출한다. 활성 목표가 있으면 빠른 모델로 충족 여부를 판정하고,
    * 미충족이면(상한 안에서) 같은 목표를 향한 다음 턴을 자동으로 큐에 넣는다. 이 후속 턴도
    * 일반 execute 경로를 타므로 토큰 자동 전환·waiting_limit 대기가 그대로 적용된다.
@@ -1798,10 +1832,26 @@ export class SessionManager {
     const condition = this.store.getSession(session.id)?.goalCondition;
     if (!condition || this.deleting.has(session.id)) return;
 
+    // 모든 토큰이 한도면 충족 여부 평가 자체가 불가능하다. 멈추지 말고 가장 먼저 회복되는
+    // 시각에 다시 평가하도록 예약한다(작업 턴의 waiting_limit과 같은 방식).
+    const recoversAt = this.tokenPool.recoversAt();
+    if (recoversAt !== null) {
+      this.scheduleGoalRecheck(session, request, sdkSessionId, recoversAt);
+      return;
+    }
+
     let verdict: { met: boolean; reason: string };
     try {
       verdict = await this.evaluateGoal(session, condition);
     } catch (error) {
+      // 평가 도중 모든 토큰이 한도에 닿았으면 회복 시각에 다시 평가한다.
+      if (isRateLimitError(error)) {
+        const at = this.tokenPool.recoversAt();
+        if (at !== null) {
+          this.scheduleGoalRecheck(session, request, sdkSessionId, at);
+          return;
+        }
+      }
       await this.transport.sendText(
         session.chatId,
         session.topicId,
