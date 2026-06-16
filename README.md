@@ -60,6 +60,8 @@ Codex가 /plan 구현 단계 수행
 - `/compact`로 긴 Claude 대화 압축
 - `/memory`로 장기적으로 유효한 사용자 선호와 프로젝트 지식 저장
 - `/model`, `/thinking`, `/lean`, `/mode`로 세션별 실행 방식 조정
+- Claude 모델 목록은 시작 시 Anthropic Models API에서 읽고, 모델별 thinking/effort 지원 단계만 버튼으로 표시
+- Codex 모델 목록은 `codex debug models` 카탈로그에서 읽고, 모델별 reasoning 지원 단계만 버튼으로 표시
 - Telegram 파일 수신: 사진, 문서, 오디오, 음성, 동영상, GIF, 스티커 등
 - `/upload`로 Claude가 만든 파일을 Telegram으로 전송
 - `/usage`로 Claude 구독 한도 사용량 확인
@@ -161,6 +163,14 @@ codex
 ```
 
 로그인 화면에서 `Sign in with ChatGPT`를 선택합니다. 이 프로그램은 Codex 실행 전에 `~/.codex/auth.json`의 `auth_mode=chatgpt`를 확인합니다. API 키 인증이면 실행을 거부합니다. Codex 자식 프로세스에서도 `OPENAI_API_KEY`, `CODEX_API_KEY`, API base URL 환경 변수를 제거합니다.
+
+Codex 모델 목록은 실행 시점에 다음 명령이 반환하는 카탈로그를 읽어 구성합니다.
+
+```bash
+codex debug models
+```
+
+따라서 Codex CLI가 새 모델이나 새 reasoning 단계를 제공하면, 코드에 모델명을 추가하지 않아도 다음 실행부터 Telegram 선택 버튼에 반영됩니다. 이 명령이 실패하면 안전한 기본 후보로 내려갑니다.
 
 ### 5. `.env` 만들기
 
@@ -309,7 +319,7 @@ Node 버전을 바꾸거나 프로젝트 폴더를 옮겼다면 `npm run launchd
 
 1. 프로젝트 선택
 2. Claude 모델 선택
-3. thinking 수준 선택
+3. 선택한 Claude 모델이 지원하는 thinking/effort 수준 선택
 4. 작업 내용 입력
 
 예를 들어 이렇게 요청할 수 있습니다.
@@ -396,11 +406,13 @@ README를 처음 설치하는 사람도 이해할 수 있게 다시 써줘.
 - 사용자 승인 없이 바로 구현하면 위험한 작업
 - 완료 여부를 증거로 확인해야 하는 작업
 
-## 모델, thinking, lean 모드
+## 모델, thinking, reasoning, lean 모드
 
 ### Claude 모델
 
 새 작업을 시작할 때 Claude 모델을 고릅니다. 작업 토픽 안에서 나중에 바꿀 수도 있습니다.
+
+프로그램은 시작할 때 Anthropic Models API를 호출해 현재 계정에서 확인 가능한 Claude 모델 목록과 각 모델의 기능 정보를 읽습니다. 모델 API가 실패하면 `Opus`, `Sonnet`, `Fable` 계열의 안전한 기본 목록을 사용합니다.
 
 ```text
 /model
@@ -409,22 +421,57 @@ README를 처음 설치하는 사람도 이해할 수 있게 다시 써줘.
 /model fable
 ```
 
+`/model`을 인자 없이 입력하면 현재 모델과 선택 가능한 모델 버튼이 표시됩니다. 버튼은 고정된 3개 목록이 아니라 시작 시점에 로딩된 모델 카탈로그를 기준으로 만들어집니다. 모델을 바꾸면 기존 thinking 값이 새 모델에서 지원되는지 확인하고, 지원되지 않으면 가장 가까운 기본값으로 자동 보정합니다.
+
 변경은 다음 실행부터 적용됩니다. 이미 실행 중인 작업에는 적용되지 않습니다.
 
-### Thinking 수준
+### Claude thinking/effort 수준
 
-Thinking은 Claude가 답하기 전에 얼마나 깊게 검토할지 정하는 설정입니다.
+Thinking은 Claude가 답하기 전에 얼마나 깊게 검토할지 정하는 설정입니다. 최신 Claude 모델은 adaptive thinking과 별도의 effort 수준을 지원할 수 있으므로, 이 프로그램은 선택한 모델이 지원하는 단계만 보여 줍니다.
 
 ```text
 /thinking
 /thinking adaptive
+/thinking low
+/thinking medium
 /thinking high
+/thinking xhigh
+/thinking max
 /thinking off
 ```
 
-- `adaptive`: 작업 난이도에 맞춰 자동 조절
-- `high`: 복잡한 작업에서 더 깊게 검토
-- `off`: 빠른 응답이 필요할 때 사용
+- `adaptive`: Claude가 작업 난이도에 맞춰 자동 조절
+- `low`: 빠른 응답을 우선하는 낮은 effort
+- `medium`: 속도와 검토 깊이의 균형
+- `high`: 복잡한 작업을 위한 높은 effort
+- `xhigh`: 더 깊은 검토가 필요한 작업용
+- `max`: 해당 모델이 지원하는 최대 effort
+- `off`: 확장 thinking을 끄고 빠르게 처리
+
+모든 모델이 모든 단계를 지원하는 것은 아닙니다. 예를 들어 어떤 모델은 `max`를 지원하지 않을 수 있습니다. 그런 경우 버튼에 나타나지 않고, 직접 입력해도 거부됩니다.
+
+### Codex 모델과 reasoning 수준
+
+`/plan`을 시작하면 Claude가 계획을 작성하기 전에 Codex 모델을 고릅니다. Codex 모델 목록은 `codex debug models`의 실제 카탈로그에서 읽어 오며, 각 모델이 지원하는 reasoning 단계도 함께 가져옵니다.
+
+흐름은 다음과 같습니다.
+
+1. 작업 토픽에서 `/plan 작업 내용`을 입력합니다.
+2. Telegram에 현재 Codex CLI가 제공하는 모델 버튼이 표시됩니다.
+3. 모델을 고르면 그 모델이 지원하는 reasoning 단계 버튼이 표시됩니다.
+4. reasoning 단계를 고르면 Claude 계획, 사용자 승인, Codex 실행, Claude 검토 파이프라인이 시작됩니다.
+
+Codex reasoning은 다음 계열을 사용할 수 있습니다. 실제 버튼은 선택한 모델의 카탈로그에 따라 달라집니다.
+
+```text
+minimal
+low
+medium
+high
+xhigh
+```
+
+이 구조 때문에 새 Codex 모델이 추가되거나 reasoning 단계가 바뀌어도, Codex CLI 카탈로그가 갱신되어 있으면 코드 수정 없이 선택 목록이 바뀝니다.
 
 ### Lean 모드
 
@@ -498,8 +545,8 @@ Lean 모드는 [Ponytail](https://github.com/DietrichGebert/ponytail)의 최소 
 | `/compact` | 긴 Claude 대화를 압축합니다. | `/compact 인증 변경 중심` |
 | `/memory` | 장기적으로 유효한 사용자 선호와 프로젝트 지식을 저장합니다. | `/memory 배포 절차 중심` |
 | `/mode` | 권한 모드를 확인하거나 변경합니다. | `/mode auto` |
-| `/model` | Claude 모델을 확인하거나 변경합니다. | `/model sonnet` |
-| `/thinking` | thinking 수준을 확인하거나 변경합니다. | `/thinking high` |
+| `/model` | 현재 카탈로그의 Claude 모델을 확인하거나 변경합니다. | `/model sonnet` |
+| `/thinking` | 현재 Claude 모델이 지원하는 thinking/effort 수준을 확인하거나 변경합니다. | `/thinking high` |
 | `/lean` | 최소 구현 원칙 적용 여부를 확인하거나 변경합니다. | `/lean off` |
 | `/diff` | 현재 프로젝트의 Git 변경 통계를 보여 줍니다. | `/diff` |
 | `/upload 경로` | 지정한 파일을 Telegram으로 전송합니다. | `/upload output/report.pdf` |
@@ -723,6 +770,7 @@ npm run build
 | `src/index.ts` | 프로그램 시작점입니다. 설정을 읽고 봇과 세션 매니저를 연결합니다. |
 | `src/bot.ts` | Telegram 명령, 버튼, 파일 수신, 사용자 입력 흐름을 처리합니다. |
 | `src/session-manager.ts` | Claude/Codex 실행, 큐, 중단, 진행 상태, `/plan` 흐름을 관리합니다. |
+| `src/model-catalog.ts` | Claude/Codex 모델 카탈로그를 동적으로 읽고 fallback 목록을 제공합니다. |
 | `src/config.ts` | `.env`와 `projects.json`을 읽고 검증합니다. |
 | `src/store.ts` | SQLite에 세션, 승인, 프로젝트, `/plan` 증거를 저장합니다. |
 | `src/usage.ts` | Claude 사용량 스냅샷을 읽기 쉬운 문구로 바꿉니다. |

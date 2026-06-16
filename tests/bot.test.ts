@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createBot, formatSessionStatus, modelKeyboard } from "../src/bot.js";
 import type { AppConfig } from "../src/config.js";
+import { FALLBACK_MODEL_CATALOG } from "../src/model-catalog.js";
 import { StateStore } from "../src/store.js";
 import type { SessionRecord } from "../src/types.js";
 
@@ -41,6 +42,7 @@ function botSetup() {
     chatId: -1001,
     claudeCodeOauthToken: "test-oauth-token",
     claudeCodeOauthTokens: ["test-oauth-token"],
+    modelCatalog: FALLBACK_MODEL_CATALOG,
     databasePath: join(directory, "state.sqlite"),
     projectsPath: join(directory, "projects.json"),
     projects: [project],

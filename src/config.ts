@@ -9,6 +9,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
+import { loadModelCatalog } from "./model-catalog.js";
 import type { ProjectConfig } from "./types.js";
 
 export const CLAUDE_OAUTH_TOKEN_PATTERN = /^sk-ant-oat01-[A-Za-z0-9_-]+$/;
@@ -225,6 +226,7 @@ export async function loadConfig() {
       ].filter((token): token is string => Boolean(token))
     )
   ];
+  const modelCatalog = await loadModelCatalog(env.CLAUDE_CODE_OAUTH_TOKEN);
 
   return {
     telegramBotToken: env.TELEGRAM_BOT_TOKEN,
@@ -232,6 +234,7 @@ export async function loadConfig() {
     chatId: env.TELEGRAM_CHAT_ID,
     claudeCodeOauthToken: env.CLAUDE_CODE_OAUTH_TOKEN,
     claudeCodeOauthTokens,
+    modelCatalog,
     databasePath: absolutePath(env.DATABASE_PATH),
     projectsPath,
     projects,

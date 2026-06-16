@@ -9,6 +9,7 @@ import {
   query,
   renameSession,
   type HookCallback,
+  type EffortLevel,
   type Options,
   type Query,
   type ThinkingConfig,
@@ -34,6 +35,19 @@ import { StateStore } from "./store.js";
 import { StreamRenderer } from "./stream-renderer.js";
 import { safeErrorMessage } from "./telegram-transport.js";
 import { TokenPool } from "./token-pool.js";
+import {
+  codexModelLabel,
+  codexReasoningLabel,
+  DEFAULT_CLAUDE_MODEL,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING,
+  DEFAULT_THINKING_LEVEL,
+  type CodexReasoningEffort,
+  type ModelCatalog,
+  modelLabel,
+  normalizeThinkingForModel,
+  thinkingLabel
+} from "./model-catalog.js";
 import type {
   MessageTransport,
   PlanEvidenceKind,
@@ -49,120 +63,37 @@ import {
 
 const execFileAsync = promisify(execFile);
 const MAX_PLAN_EXECUTION_ATTEMPTS = 3;
-export interface CodexModelOption {
-  id: string;
-  label: string;
-}
-export const CODEX_MODELS: CodexModelOption[] = [
-  { id: "gpt-5.5", label: "GPT-5.5" }
-];
-export const DEFAULT_CODEX_MODEL = "gpt-5.5";
-// 하위 호환: 상태 표시 등에서 참조하는 기본 모델 별칭.
-export const CODEX_MODEL = DEFAULT_CODEX_MODEL;
-
-export function resolveCodexModel(input: string): string | undefined {
-  const value = input.trim().toLowerCase();
-  if (!value) return undefined;
-  return CODEX_MODELS.find((option) => option.id.toLowerCase() === value)?.id;
-}
-
-export function codexModelLabel(id: string | null | undefined): string {
-  if (!id) return codexModelLabel(DEFAULT_CODEX_MODEL);
-  return CODEX_MODELS.find((option) => option.id === id)?.label ?? id;
-}
-
-export type CodexReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
-export interface CodexReasoningOption {
-  id: CodexReasoningEffort;
-  label: string;
-}
-export const CODEX_REASONING_OPTIONS: CodexReasoningOption[] = [
-  { id: "minimal", label: "최소 (Minimal)" },
-  { id: "low", label: "낮음 (Low)" },
-  { id: "medium", label: "보통 (Medium)" },
-  { id: "high", label: "높음 (High)" },
-  { id: "xhigh", label: "매우 높음 (xHigh)" }
-];
-export const DEFAULT_CODEX_REASONING: CodexReasoningEffort = "high";
-// 하위 호환: 상태 표시 등에서 참조하는 기본 추론 강도 별칭.
-export const CODEX_REASONING_EFFORT: CodexReasoningEffort = DEFAULT_CODEX_REASONING;
-
-export function resolveCodexReasoning(input: string): CodexReasoningEffort | undefined {
-  const value = input.trim().toLowerCase();
-  return CODEX_REASONING_OPTIONS.find((option) => option.id === value)?.id;
-}
-
-export function codexReasoningLabel(id: string | null | undefined): string {
-  return CODEX_REASONING_OPTIONS.find((option) => option.id === id)?.label
-    ?? "높음 (High)";
-}
-
-export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
-export interface ClaudeModelOption {
-  id: string;
-  label: string;
-  aliases: string[];
-}
-export const CLAUDE_MODELS: ClaudeModelOption[] = [
-  {
-    id: "claude-opus-4-8",
-    label: "Opus 4.8",
-    aliases: ["opus", "opus-4-8"]
-  },
-  {
-    id: "claude-sonnet-4-6",
-    label: "Sonnet 4.6",
-    aliases: ["sonnet", "sonnet-4-6"]
-  },
-  {
-    id: "claude-fable-5",
-    label: "Fable 5",
-    aliases: ["fable", "fable-5"]
-  }
-];
-
-export function resolveModel(input: string): string | undefined {
-  const value = input.trim().toLowerCase();
-  if (!value) return undefined;
-  return CLAUDE_MODELS.find((option) =>
-    option.aliases.includes(value) || option.id.toLowerCase() === value
-  )?.id;
-}
-
-export function modelLabel(id: string): string {
-  return CLAUDE_MODELS.find((option) => option.id === id)?.label ?? id;
-}
-
+export const CODEX_MODEL = DEFAULT_CODEX_MODEL;
+export const CODEX_REASONING_EFFORT = DEFAULT_CODEX_REASONING;
 export const CLAUDE_THINKING = { type: "adaptive" } as const;
-
-export type ThinkingLevel = "adaptive" | "high" | "off";
-export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "adaptive";
-export interface ThinkingOption {
-  id: ThinkingLevel;
-  label: string;
-}
-export const THINKING_OPTIONS: ThinkingOption[] = [
-  { id: "adaptive", label: "자동 (Adaptive)" },
-  { id: "high", label: "깊게 (High)" },
-  { id: "off", label: "끄기 (Off)" }
-];
 
 export function resolveThinkingConfig(level: string | null | undefined): ThinkingConfig {
   switch (level) {
     case "off":
       return { type: "disabled" };
-    case "high":
-      return { type: "enabled", budgetTokens: 31999 };
     case "adaptive":
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+    case "max":
     default:
       return { type: "adaptive" };
   }
 }
 
-export function thinkingLabel(level: string | null | undefined): string {
-  return THINKING_OPTIONS.find((option) => option.id === level)?.label
-    ?? "자동 (Adaptive)";
+export function resolveClaudeEffort(level: string | null | undefined): EffortLevel | undefined {
+  switch (level) {
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+    case "max":
+      return level;
+    default:
+      return undefined;
+  }
 }
 
 export function buildLeanInstructions(enabled: boolean): string {
@@ -208,6 +139,7 @@ interface SessionManagerOptions {
   longRunningMcpServers: ReadonlySet<string>;
   turnIdleTimeoutMs: number;
   claudeMemoryDir: string;
+  modelCatalog: ModelCatalog;
   deleteClaudeSession?: typeof deleteClaudeSession;
 }
 
@@ -892,11 +824,19 @@ export class SessionManager {
         };
       };
 
+      const claudeModel = session.model ?? DEFAULT_CLAUDE_MODEL;
+      const thinking = normalizeThinkingForModel(
+        this.options.modelCatalog,
+        claudeModel,
+        session.thinking
+      );
+      const effort = resolveClaudeEffort(thinking);
       const queryOptions: Options = {
         cwd: session.cwd,
         abortController,
-        model: session.model ?? DEFAULT_CLAUDE_MODEL,
-        thinking: resolveThinkingConfig(session.thinking),
+        model: claudeModel,
+        thinking: resolveThinkingConfig(thinking),
+        ...(effort ? { effort } : {}),
         permissionMode: session.permissionMode,
         allowedTools: ["Read", "Glob", "Grep", "WebSearch"],
         settingSources: [],
@@ -1237,7 +1177,7 @@ export class SessionManager {
       const codexModel = request.codexModel ?? DEFAULT_CODEX_MODEL;
       const codexReasoning = request.codexReasoning ?? DEFAULT_CODEX_REASONING;
       renderer.note(
-        `Codex 계획 실행 시작 (${codexModelLabel(codexModel)} · ${codexReasoningLabel(codexReasoning)})`
+        `Codex 계획 실행 시작 (${codexModelLabel(this.options.modelCatalog, codexModel)} · ${codexReasoningLabel(codexReasoning)})`
       );
       run.codexStarts.set("plan-codex", Date.now());
       const codex = new Codex({ env: buildCodexEnvironment() });
@@ -1481,13 +1421,21 @@ export class SessionManager {
     allowQuestions = false
   ): Promise<string> {
     const instructions = loadProjectInstructions(session.cwd);
+    const claudeModel = session.model ?? DEFAULT_CLAUDE_MODEL;
+    const thinking = normalizeThinkingForModel(
+      this.options.modelCatalog,
+      claudeModel,
+      session.thinking
+    );
+    const effort = resolveClaudeEffort(thinking);
     const sdkQuery = query({
       prompt,
       options: {
         cwd: session.cwd,
         abortController: controller,
-        model: session.model ?? DEFAULT_CLAUDE_MODEL,
-        thinking: resolveThinkingConfig(session.thinking),
+        model: claudeModel,
+        thinking: resolveThinkingConfig(thinking),
+        ...(effort ? { effort } : {}),
         // plan 모드는 모델이 도구를 쓰려 하면 turn을 즉시 종료해 AskUserQuestion의 답을
         // 기다리지 못한다. 대화가 필요한 계획 단계에서는 default 모드로 돌려 질문이 실제로
         // 사용자 응답을 기다리게 한다. 편집은 read-only allowedTools로 여전히 차단된다.

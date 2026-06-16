@@ -6,23 +6,27 @@ import { Bot, InlineKeyboard } from "grammy";
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { addProject, removeProject, resolveProject, type AppConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
-import { PermissionBroker } from "./permission-broker.js";
 import {
-  buildMemoryPrompt,
-  CLAUDE_MODELS,
-  CODEX_MODEL,
-  CODEX_MODELS,
-  CODEX_REASONING_EFFORT,
-  CODEX_REASONING_OPTIONS,
   codexModelLabel,
+  codexReasoningLabel,
+  codexReasoningOptionsForModel,
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CODEX_MODEL,
   DEFAULT_THINKING_LEVEL,
+  FALLBACK_MODEL_CATALOG,
+  type ModelCatalog,
   modelLabel,
+  normalizeThinkingForModel,
   resolveModel,
-  SessionManager,
-  THINKING_OPTIONS,
-  thinkingLabel
+  thinkingLabel,
+  thinkingOptionsForModel
+} from "./model-catalog.js";
+import { PermissionBroker } from "./permission-broker.js";
+import {
+  buildMemoryPrompt,
+  CODEX_MODEL,
+  CODEX_REASONING_EFFORT,
+  SessionManager
 } from "./session-manager.js";
 import { StateStore } from "./store.js";
 import { safeErrorMessage, TelegramTransport } from "./telegram-transport.js";
@@ -82,7 +86,11 @@ function formatDuration(milliseconds: number): string {
       : `${remainder}초`;
 }
 
-export function formatSessionStatus(session: SessionRecord, active: boolean): string {
+export function formatSessionStatus(
+  session: SessionRecord,
+  active: boolean,
+  catalog: ModelCatalog = FALLBACK_MODEL_CATALOG
+): string {
   const state = session.status === "waiting_approval"
     ? "승인 대기 중"
     : session.status === "verification_failed"
@@ -97,7 +105,7 @@ export function formatSessionStatus(session: SessionRecord, active: boolean): st
     `작업: ${state}`,
     `저장 상태: ${session.status}`,
     `프로젝트: ${session.projectName}`,
-    `모델: ${modelLabel(session.model ?? DEFAULT_CLAUDE_MODEL)}`,
+    `모델: ${modelLabel(catalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`,
     `thinking: ${thinkingLabel(session.thinking ?? DEFAULT_THINKING_LEVEL)}`,
     `lean: ${session.leanMode ? "on" : "off"}`,
     `Codex: ${CODEX_MODEL} · reasoning ${CODEX_REASONING_EFFORT}`,
@@ -128,56 +136,59 @@ function projectKeyboard(projects: ProjectConfig[]): InlineKeyboard {
   return keyboard;
 }
 
-export function modelKeyboard(): InlineKeyboard {
+export function modelKeyboard(catalog: ModelCatalog = FALLBACK_MODEL_CATALOG): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  for (const [index, option] of CLAUDE_MODELS.entries()) {
+  for (const [index, option] of catalog.claudeModels.entries()) {
     keyboard.text(option.label, `model:${option.id}`);
-    if (index < CLAUDE_MODELS.length - 1) keyboard.row();
+    if (index < catalog.claudeModels.length - 1) keyboard.row();
   }
   return keyboard;
 }
 
-function newModelKeyboard(): InlineKeyboard {
+function newModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  for (const [index, option] of CLAUDE_MODELS.entries()) {
+  for (const [index, option] of catalog.claudeModels.entries()) {
     keyboard.text(option.label, `newm:${option.id}`);
-    if (index < CLAUDE_MODELS.length - 1) keyboard.row();
+    if (index < catalog.claudeModels.length - 1) keyboard.row();
   }
   return keyboard;
 }
 
-function newThinkingKeyboard(): InlineKeyboard {
+function newThinkingKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  for (const [index, option] of THINKING_OPTIONS.entries()) {
+  const options = thinkingOptionsForModel(catalog, modelId);
+  for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `newt:${option.id}`);
-    if (index < THINKING_OPTIONS.length - 1) keyboard.row();
+    if (index < options.length - 1) keyboard.row();
   }
   return keyboard;
 }
 
-function thinkingKeyboard(): InlineKeyboard {
+function thinkingKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  for (const [index, option] of THINKING_OPTIONS.entries()) {
+  const options = thinkingOptionsForModel(catalog, modelId);
+  for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `think:${option.id}`);
-    if (index < THINKING_OPTIONS.length - 1) keyboard.row();
+    if (index < options.length - 1) keyboard.row();
   }
   return keyboard;
 }
 
-function codexModelKeyboard(): InlineKeyboard {
+function codexModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  for (const [index, option] of CODEX_MODELS.entries()) {
+  for (const [index, option] of catalog.codexModels.entries()) {
     keyboard.text(option.label, `planm:${option.id}`);
-    if (index < CODEX_MODELS.length - 1) keyboard.row();
+    if (index < catalog.codexModels.length - 1) keyboard.row();
   }
   return keyboard;
 }
 
-function codexReasoningKeyboard(): InlineKeyboard {
+function codexReasoningKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  for (const [index, option] of CODEX_REASONING_OPTIONS.entries()) {
+  const options = codexReasoningOptionsForModel(catalog, modelId);
+  for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `plant:${option.id}`);
-    if (index < CODEX_REASONING_OPTIONS.length - 1) keyboard.row();
+    if (index < options.length - 1) keyboard.row();
   }
   return keyboard;
 }
@@ -216,6 +227,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     longRunningMcpServers: config.longRunningMcpServers,
     turnIdleTimeoutMs: config.turnIdleTimeoutMs,
     claudeMemoryDir: config.claudeMemoryDir,
+    modelCatalog: config.modelCatalog,
     ...(config.claudeCodeExecutable
       ? { claudeCodeExecutable: config.claudeCodeExecutable }
       : {})
@@ -359,7 +371,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       );
       await ctx.reply(
         `${project.name} 프로젝트. 모델을 선택하세요.`,
-        { reply_markup: newModelKeyboard() }
+        { reply_markup: newModelKeyboard(config.modelCatalog) }
       );
       return;
     }
@@ -448,7 +460,7 @@ export function createBot(config: AppConfig, store: StateStore) {
         ? `\nCodex: 실행 중 ${formatDuration(inspection.codexElapsedMs)}`
         : "";
       await ctx.reply(
-        `${formatSessionStatus(session, sessions.isActive(session.id))}`
+        `${formatSessionStatus(session, sessions.isActive(session.id), config.modelCatalog)}`
         + `${formatPlanProgress(store, session.id)}${codex}`
       );
       return;
@@ -510,7 +522,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     });
     await ctx.reply(
       "Codex 모델을 선택하세요. (이후 추론 강도를 고른 뒤 파이프라인이 시작됩니다)",
-      { reply_markup: codexModelKeyboard() }
+      { reply_markup: codexModelKeyboard(config.modelCatalog) }
     );
   });
 
@@ -670,17 +682,16 @@ export function createBot(config: AppConfig, store: StateStore) {
     const input = ctx.match.trim();
     if (!input) {
       await ctx.reply(
-        `현재 모델: ${modelLabel(session.model ?? DEFAULT_CLAUDE_MODEL)}\n`
-        + "사용 가능 별칭: opus, sonnet, fable",
-        { reply_markup: modelKeyboard() }
+        `현재 모델: ${modelLabel(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL)}\n`
+        + "아래 버튼은 현재 실행 환경에서 확인한 Claude 모델 목록입니다.",
+        { reply_markup: modelKeyboard(config.modelCatalog) }
       );
       return;
     }
-    const model = resolveModel(input);
+    const model = resolveModel(config.modelCatalog, input);
     if (!model) {
       await ctx.reply(
-        "지원하지 않는 모델입니다.\n사용 가능: opus, sonnet, fable "
-        + "(또는 등록된 전체 모델 ID)"
+        "지원하지 않는 모델입니다. /model 버튼에 표시되는 모델 ID나 별칭을 사용하세요."
       );
       return;
     }
@@ -688,8 +699,12 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
       return;
     }
-    store.updateSession(session.id, { model });
-    await ctx.reply(`다음 실행부터 ${modelLabel(model)} 모델을 사용합니다.`);
+    const thinking = normalizeThinkingForModel(config.modelCatalog, model, session.thinking);
+    store.updateSession(session.id, { model, thinking });
+    await ctx.reply(
+      `다음 실행부터 ${modelLabel(config.modelCatalog, model)} 모델을 사용합니다.\n`
+      + `thinking: ${thinkingLabel(thinking)}`
+    );
   });
 
   bot.command("thinking", async (ctx) => {
@@ -703,11 +718,14 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (!input) {
       await ctx.reply(
         `현재 thinking: ${thinkingLabel(session.thinking ?? DEFAULT_THINKING_LEVEL)}`,
-        { reply_markup: thinkingKeyboard() }
+        { reply_markup: thinkingKeyboard(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL) }
       );
       return;
     }
-    const option = THINKING_OPTIONS.find((item) => item.id === input);
+    const option = thinkingOptionsForModel(
+      config.modelCatalog,
+      session.model ?? DEFAULT_CLAUDE_MODEL
+    ).find((item) => item.id === input);
     if (!option) {
       await ctx.reply("지원하지 않는 thinking 수준입니다.\n사용 가능: adaptive, high, off");
       return;
@@ -798,12 +816,12 @@ export function createBot(config: AppConfig, store: StateStore) {
       { project }
     );
     await ctx.answerCallbackQuery({ text: `${project.name} 선택` });
-    await ctx.reply("모델을 선택하세요.", { reply_markup: newModelKeyboard() });
+    await ctx.reply("모델을 선택하세요.", { reply_markup: newModelKeyboard(config.modelCatalog) });
   });
 
   bot.callbackQuery(/^newm:/, async (ctx) => {
     const modelId = ctx.callbackQuery.data.slice("newm:".length);
-    const option = CLAUDE_MODELS.find((item) => item.id === modelId);
+    const option = config.modelCatalog.claudeModels.find((item) => item.id === modelId);
     if (!option) {
       await ctx.answerCallbackQuery({ text: "지원하지 않는 모델입니다.", show_alert: true });
       return;
@@ -817,26 +835,28 @@ export function createBot(config: AppConfig, store: StateStore) {
     pendingStarts.set(key, { ...pending, model: option.id });
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
     await ctx.reply(`모델: ${option.label}. thinking 수준을 선택하세요.`, {
-      reply_markup: newThinkingKeyboard()
+      reply_markup: newThinkingKeyboard(config.modelCatalog, option.id)
     });
   });
 
   bot.callbackQuery(/^newt:/, async (ctx) => {
     const thinkingId = ctx.callbackQuery.data.slice("newt:".length);
-    const option = THINKING_OPTIONS.find((item) => item.id === thinkingId);
-    if (!option) {
-      await ctx.answerCallbackQuery({ text: "지원하지 않는 thinking 수준입니다.", show_alert: true });
-      return;
-    }
     const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
     const pending = pendingStarts.get(key);
     if (!pending) {
       await ctx.answerCallbackQuery({ text: "먼저 /new로 프로젝트를 선택하세요.", show_alert: true });
       return;
     }
+    const selectedModel = pending.model ?? DEFAULT_CLAUDE_MODEL;
+    const option = thinkingOptionsForModel(config.modelCatalog, selectedModel)
+      .find((item) => item.id === thinkingId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 thinking 수준입니다.", show_alert: true });
+      return;
+    }
     pendingStarts.set(key, { ...pending, thinking: option.id });
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    const modelText = modelLabel(pending.model ?? DEFAULT_CLAUDE_MODEL);
+    const modelText = modelLabel(config.modelCatalog, selectedModel);
     await ctx.reply(
       `모델: ${modelText} / thinking: ${option.label}\n실행할 작업을 입력하세요.`
     );
@@ -850,7 +870,7 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.callbackQuery(/^model:/, async (ctx) => {
     const modelId = ctx.callbackQuery.data.slice("model:".length);
-    const option = CLAUDE_MODELS.find((item) => item.id === modelId);
+    const option = config.modelCatalog.claudeModels.find((item) => item.id === modelId);
     if (!option) {
       await ctx.answerCallbackQuery({ text: "지원하지 않는 모델입니다.", show_alert: true });
       return;
@@ -870,24 +890,31 @@ export function createBot(config: AppConfig, store: StateStore) {
       });
       return;
     }
-    store.updateSession(session.id, { model: option.id });
+    const thinking = normalizeThinkingForModel(config.modelCatalog, option.id, session.thinking);
+    store.updateSession(session.id, { model: option.id, thinking });
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    await ctx.reply(`다음 실행부터 ${option.label} 모델을 사용합니다.`);
+    await ctx.reply(
+      `다음 실행부터 ${option.label} 모델을 사용합니다.\n`
+      + `thinking: ${thinkingLabel(thinking)}`
+    );
   });
 
   bot.callbackQuery(/^think:/, async (ctx) => {
     const thinkingId = ctx.callbackQuery.data.slice("think:".length);
-    const option = THINKING_OPTIONS.find((item) => item.id === thinkingId);
-    if (!option) {
-      await ctx.answerCallbackQuery({ text: "지원하지 않는 thinking 수준입니다.", show_alert: true });
-      return;
-    }
     const topicId = ctx.callbackQuery.message?.message_thread_id;
     const session = topicId
       ? store.getSessionByTopic(config.chatId, topicId)
       : undefined;
     if (!session) {
       await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    const option = thinkingOptionsForModel(
+      config.modelCatalog,
+      session.model ?? DEFAULT_CLAUDE_MODEL
+    ).find((item) => item.id === thinkingId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 thinking 수준입니다.", show_alert: true });
       return;
     }
     if (sessions.isActive(session.id)) {
@@ -904,7 +931,7 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.callbackQuery(/^planm:/, async (ctx) => {
     const modelId = ctx.callbackQuery.data.slice("planm:".length);
-    const option = CODEX_MODELS.find((item) => item.id === modelId);
+    const option = config.modelCatalog.codexModels.find((item) => item.id === modelId);
     if (!option) {
       await ctx.answerCallbackQuery({ text: "지원하지 않는 Codex 모델입니다.", show_alert: true });
       return;
@@ -921,17 +948,12 @@ export function createBot(config: AppConfig, store: StateStore) {
     pendingPlans.set(key, { ...pending, codexModel: option.id });
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
     await ctx.reply(`Codex 모델: ${option.label}. 추론 강도를 선택하세요.`, {
-      reply_markup: codexReasoningKeyboard()
+      reply_markup: codexReasoningKeyboard(config.modelCatalog, option.id)
     });
   });
 
   bot.callbackQuery(/^plant:/, async (ctx) => {
     const reasoningId = ctx.callbackQuery.data.slice("plant:".length);
-    const option = CODEX_REASONING_OPTIONS.find((item) => item.id === reasoningId);
-    if (!option) {
-      await ctx.answerCallbackQuery({ text: "지원하지 않는 추론 강도입니다.", show_alert: true });
-      return;
-    }
     const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
     const pending = pendingPlans.get(key);
     if (!pending) {
@@ -941,13 +963,20 @@ export function createBot(config: AppConfig, store: StateStore) {
       });
       return;
     }
+    const selectedCodexModel = pending.codexModel ?? DEFAULT_CODEX_MODEL;
+    const option = codexReasoningOptionsForModel(config.modelCatalog, selectedCodexModel)
+      .find((item) => item.id === reasoningId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 추론 강도입니다.", show_alert: true });
+      return;
+    }
     const session = store.getSession(pending.sessionId);
     if (!session) {
       pendingPlans.delete(key);
       await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
       return;
     }
-    const codexModel = pending.codexModel ?? DEFAULT_CODEX_MODEL;
+    const codexModel = selectedCodexModel;
     pendingPlans.delete(key);
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
     if (
@@ -960,7 +989,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     await ctx.reply(
-      `Claude가 계획 작성, Codex ${codexModelLabel(codexModel)} · ${option.label}로 실행, `
+      `Claude가 계획 작성, Codex ${codexModelLabel(config.modelCatalog, codexModel)} · ${option.label}로 실행, `
       + "완료 기준별 증거 수집, Claude 승인 검토 파이프라인을 예약했습니다. "
       + "Claude 구독 OAuth와 ChatGPT 구독 로그인을 사용하며 API 키 인증은 허용하지 않습니다."
     );

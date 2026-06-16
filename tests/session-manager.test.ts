@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PermissionBroker } from "../src/permission-broker.js";
+import { FALLBACK_MODEL_CATALOG, resolveModel } from "../src/model-catalog.js";
 import {
   buildClaudeEnvironment,
   buildCodexEnvironment,
@@ -17,7 +18,6 @@ import {
   loadProjectInstructions,
   MessageQueue,
   requireCodexSubscriptionAuth,
-  resolveModel,
   resultSummary,
   SessionManager,
   StreamingTextCollector
@@ -92,11 +92,11 @@ describe("Claude model policy", () => {
   });
 
   it("resolves supported model aliases and rejects unknown models", () => {
-    expect(resolveModel("sonnet")).toBe("claude-sonnet-4-6");
-    expect(resolveModel("fable")).toBe("claude-fable-5");
-    expect(resolveModel("opus")).toBe("claude-opus-4-8");
-    expect(resolveModel(" CLAUDE-SONNET-4-6 ")).toBe("claude-sonnet-4-6");
-    expect(resolveModel("없는모델")).toBeUndefined();
+    expect(resolveModel(FALLBACK_MODEL_CATALOG, "sonnet")).toBe("claude-sonnet-4-6");
+    expect(resolveModel(FALLBACK_MODEL_CATALOG, "fable")).toBe("claude-fable-5");
+    expect(resolveModel(FALLBACK_MODEL_CATALOG, "opus")).toBe("claude-opus-4-8");
+    expect(resolveModel(FALLBACK_MODEL_CATALOG, " CLAUDE-SONNET-4-6 ")).toBe("claude-sonnet-4-6");
+    expect(resolveModel(FALLBACK_MODEL_CATALOG, "없는모델")).toBeUndefined();
   });
 });
 
@@ -277,6 +277,7 @@ describe("session deletion", () => {
       longRunningMcpServers: new Set(["codex", "obsidian"]),
       turnIdleTimeoutMs: 600_000,
       claudeMemoryDir: join(directory, ".claude", "memory"),
+      modelCatalog: FALLBACK_MODEL_CATALOG,
       deleteClaudeSession: async (id, options) => {
         deleted.push({ id, ...(options?.dir ? { dir: options.dir } : {}) });
       }
