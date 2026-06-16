@@ -1,802 +1,844 @@
 # Telegram Claude Orchestrator
 
-Mac에 켜 두고 Telegram으로 조작하는 개인용 AI 작업 도우미입니다.
+## 이 프로젝트는 무엇인가요?
 
-Telegram에 “이 프로젝트 README를 고쳐줘”, “방금 만든 기능 테스트해줘”, “이 PDF를 읽고 핵심만 정리해줘”처럼 평소 말하듯 요청하면, Mac에서 실행 중인 Claude Agent SDK가 지정된 프로젝트 폴더를 읽고 필요한 작업을 수행합니다. 작업이 오래 걸리면 Telegram으로 진행 상황을 알려 주고, 위험하거나 판단이 필요한 파일 수정·명령 실행은 버튼으로 승인받습니다.
+이 프로젝트는 Telegram 단체 채팅방에서 Claude AI에게 일을 맡길 수 있게 해 주는 개인용 봇입니다.
 
-이 저장소는 여러 사람이 함께 쓰는 공개 챗봇이 아니라, 한 명의 사용자가 자신의 Mac, 자신의 Telegram 비공개 그룹, 자신의 Claude/ChatGPT 구독을 연결해 쓰는 도구입니다.
+쉽게 말하면, 이 봇은 “Telegram 채팅방으로 Claude AI에게 작업을 시키는 리모컨”입니다. 예를 들어 Telegram 그룹에서 “내 프로젝트의 README를 더 쉽게 고쳐줘”, “방금 만든 기능을 확인해줘”, “이 파일을 읽고 요약해줘”라고 말하면, Mac에서 켜져 있는 이 프로그램이 Claude에게 그 일을 전달합니다.
 
-## 한 문장으로 이해하기
+중요한 점은 이 봇이 공개 서비스가 아니라는 것입니다. 내 Mac, 내 Telegram 그룹, 내 Claude 구독을 연결해 나 혼자 쓰는 도구입니다.
 
-이 프로그램은 “Telegram을 리모컨으로 쓰는 Claude 작업 관리자”입니다.
+## 시작 전에 필요한 것
 
-- Mac에는 이 프로그램이 계속 실행됩니다.
-- 사용자는 Telegram 그룹에서 명령을 보냅니다.
-- Telegram의 토픽 하나가 Claude 작업 대화 하나가 됩니다.
-- Claude는 사용자가 등록한 프로젝트 폴더 안에서 파일을 읽고, 고치고, 테스트를 실행합니다.
-- 큰 작업은 `/plan`으로 계획, 승인, Codex 실행, Claude 검토를 분리해서 처리합니다.
-- 실행 기록, 세션 상태, 승인 기록, `/plan` 증거는 로컬 SQLite 데이터베이스에 저장됩니다.
+1. Mac 한 대가 필요합니다. Claude가 실제 파일을 읽고 작업하는 장소입니다.
+2. Mac은 봇을 쓰는 동안 켜져 있어야 합니다. 잠자기 상태가 되면 봇도 멈춘 것처럼 보일 수 있습니다.
+3. Telegram 계정이 필요합니다.
+4. Telegram에서 개인용 봇을 만들 수 있어야 합니다. BotFather라는 공식 봇을 사용합니다.
+5. Telegram 비공개 그룹이 필요합니다. 이 그룹 안에서 봇에게 명령합니다.
+6. Claude Pro, Max, Team, Enterprise 같은 Claude 구독이 필요합니다.
+7. Claude CLI가 필요합니다. CLI는 “터미널에서 Claude를 실행하는 작은 앱”이라고 생각하면 됩니다.
+8. `/plan` 기능까지 쓰려면 ChatGPT 구독으로 로그인된 Codex CLI가 필요합니다.
+9. 인터넷 연결이 필요합니다.
+10. 설치할 때만 Mac의 터미널 앱을 사용합니다. 터미널은 “Mac에 글자로 명령을 입력하는 앱”입니다.
 
-## 누가 쓰면 좋은가요?
+## 전체 설치 흐름
 
-이 도구는 다음 상황을 위해 만들었습니다.
+1. Homebrew를 설치합니다.
+2. nvm으로 Node.js를 설치합니다.
+3. 이 프로젝트를 Mac에 내려받습니다.
+4. 필요한 부품을 설치합니다.
+5. Telegram에서 봇과 그룹을 만듭니다.
+6. 내 Telegram 사용자 ID와 그룹 ID를 확인합니다.
+7. Claude 토큰을 만듭니다.
+8. `.env` 파일에 비밀 설정을 적습니다.
+9. `projects.json` 파일에 Claude가 작업할 폴더를 등록합니다.
+10. 봇을 실행하고 Telegram에서 확인합니다.
 
-- Mac에 있는 여러 프로젝트를 밖에서도 Telegram으로 관리하고 싶을 때
-- Claude에게 코드 수정, 문서 정리, 파일 분석, 테스트 실행을 맡기고 싶을 때
-- 작업 중간 진행 상황을 계속 받고 싶을 때
-- AI가 파일을 바꾸거나 명령을 실행하기 전에 Telegram에서 승인하고 싶을 때
-- 긴 작업을 “계획 작성 → 내가 승인 → Codex 구현 → Claude 검토” 흐름으로 안전하게 처리하고 싶을 때
-- 작업별 대화가 Telegram 토픽으로 나뉘어 남기를 원할 때
+## 1. Homebrew 설치하기
 
-개발 지식이 많지 않아도 사용할 수 있도록 Telegram 명령 중심으로 설계했습니다. 다만 설치에는 Mac 터미널, Telegram 봇 생성, Claude/ChatGPT 로그인 준비가 필요합니다.
+Homebrew는 Mac에 필요한 프로그램을 쉽게 설치해 주는 도구입니다. App Store처럼 프로그램을 찾아 설치해 주지만, 터미널에서 한 줄 명령으로 사용합니다.
 
-## 전체 그림
-
-```text
-사용자
-  ↓ Telegram 메시지
-비공개 Telegram 슈퍼그룹
-  ↓ Bot API
-Mac에서 실행 중인 오케스트레이터
-  ↓ Claude Agent SDK
-Claude가 프로젝트 폴더에서 작업
-  ↓ 필요 시
-Codex가 /plan 구현 단계 수행
-  ↓
-결과, 질문, 승인 요청, 진행 상황을 Telegram으로 전송
-```
-
-중요한 점은 모든 프로젝트 파일과 작업 기록이 기본적으로 내 Mac 안에 있다는 것입니다. `.env`, `projects.json`, `data/`는 Git에 올리지 않도록 제외되어 있습니다.
-
-## 주요 기능
-
-- Telegram `/new`로 새 작업 토픽 생성
-- 기존 토픽에서 일반 메시지를 보내 Claude 세션 이어가기
-- `/plan`으로 계획, 사용자 승인, Codex 구현, Claude 검토를 분리한 파이프라인 실행
-- `/steer`로 실행 중인 작업에 즉시 방향 전환 지시
-- `/next`로 현재 작업 뒤에 이어서 할 일 예약
-- `/stop`으로 실행 중인 작업 중단
-- `/fork`로 현재 대화를 바탕으로 새 방향의 작업 분기
-- `/compact`로 긴 Claude 대화 압축
-- `/memory`로 장기적으로 유효한 사용자 선호와 프로젝트 지식 저장
-- `/model`, `/thinking`, `/lean`, `/mode`로 세션별 실행 방식 조정
-- Claude 모델 목록은 시작 시 Anthropic Models API에서 읽고, 모델별 thinking/effort 지원 단계만 버튼으로 표시
-- Codex 모델 목록은 `codex debug models` 카탈로그에서 읽고, 모델별 reasoning 지원 단계만 버튼으로 표시
-- Telegram 파일 수신: 사진, 문서, 오디오, 음성, 동영상, GIF, 스티커 등
-- `/upload`로 Claude가 만든 파일을 Telegram으로 전송
-- `/usage`로 Claude 구독 한도 사용량 확인
-- `/status`로 현재 실행 상태 확인
-- `/doctor`로 설정, 인증, Telegram 연결, 저장소 상태 진단
-- 같은 프로젝트 작업은 충돌 방지를 위해 직렬 실행
-- MCP 오류는 같은 입력을 순서대로 최대 3회 재시도
-- Codex MCP 같은 장기 작업은 긴 타임아웃과 주기적 진행 알림 적용
-- Claude OAuth 토큰을 최대 3개까지 등록해 한도 도달 시 다음 토큰으로 자동 전환
-
-## 처음 보는 용어
-
-| 용어 | 뜻 |
-| --- | --- |
-| Telegram 봇 | Telegram 안에서 메시지를 받고 답장하는 계정입니다. BotFather로 만듭니다. |
-| 슈퍼그룹 | Telegram의 고급 그룹 형태입니다. 토픽 기능을 켤 수 있습니다. |
-| 토픽 | Telegram 슈퍼그룹 안의 작은 게시판/대화방입니다. 이 프로그램은 작업 하나를 토픽 하나로 관리합니다. |
-| 프로젝트 | Claude가 작업할 수 있는 Mac의 폴더입니다. 예: 웹사이트 폴더, 노트 폴더, 코드 저장소. |
-| Claude Agent SDK | Claude가 로컬 폴더에서 파일 읽기, 수정, 명령 실행을 할 수 있게 해 주는 도구입니다. |
-| Codex | `/plan`에서 승인된 계획을 실제로 구현하고 검증하는 실행 담당입니다. |
-| SQLite | 별도 서버 없이 파일 하나로 동작하는 로컬 데이터베이스입니다. 세션 상태와 작업 증거를 저장합니다. |
-| `.env` | Telegram 토큰, Claude OAuth 토큰 같은 비밀 설정을 저장하는 파일입니다. 절대 공개하면 안 됩니다. |
-| `projects.json` | Claude에게 작업을 맡길 프로젝트 폴더 목록입니다. 개인 경로가 들어가므로 Git에 올리지 않습니다. |
-
-## 설치 전 준비물
-
-다음이 필요합니다.
-
-- macOS
-- Node.js 22 이상
-- Telegram 계정
-- 본인만 쓰는 비공개 Telegram 슈퍼그룹
-- BotFather로 만든 Telegram 봇
-- Claude Pro, Max, Team 또는 Enterprise 등 Agent SDK를 사용할 수 있는 Claude 구독
-- `/plan`을 쓸 경우 Codex가 포함된 ChatGPT 구독
-- 로컬 터미널에서 `claude setup-token`을 실행할 수 있는 Claude CLI 환경
-- 로컬 터미널에서 `codex`를 실행할 수 있는 Codex CLI 환경
-
-설치가 어렵게 느껴진다면, 큰 흐름은 다음 5단계라고 보면 됩니다.
-
-1. Telegram 봇과 비공개 그룹을 만든다.
-2. 이 저장소를 Mac에 내려받고 의존성을 설치한다.
-3. `.env`에 Telegram과 Claude 인증 정보를 넣는다.
-4. `projects.json`에 Claude가 작업할 폴더를 등록한다.
-5. 프로그램을 실행하고 Telegram에서 `/status`로 확인한다.
-
-## 설치
-
-### 1. 저장소 내려받기
+1. Mac에서 `터미널` 앱을 엽니다.
+2. 아래 한 줄을 그대로 복사해서 붙여넣고 Enter를 누릅니다.
 
 ```bash
-git clone https://github.com/neam-kim/telegram-claude_SDK.git
-cd telegram-claude_SDK
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+3. 중간에 Mac 비밀번호를 물어보면 입력합니다. 입력해도 화면에 글자가 보이지 않는 것이 정상입니다.
+4. 설치가 끝나면 터미널에 Homebrew를 사용하기 위한 안내 문장이 나올 수 있습니다. 안내가 나오면 그대로 복사해서 한 줄씩 실행합니다.
+
+## 2. nvm과 Node.js 설치하기
+
+nvm은 Node.js 버전을 관리해 주는 도구입니다. Node.js는 이 Telegram 봇을 실행하기 위한 기본 실행 프로그램입니다.
+
+1. nvm을 설치합니다.
+
+```bash
+brew install nvm
+```
+
+2. nvm이 사용할 폴더를 만듭니다.
+
+```bash
+mkdir -p ~/.nvm
+```
+
+3. Mac이 nvm을 기억하도록 설정합니다.
+
+```bash
+echo 'export NVM_DIR="$HOME/.nvm"; [ -s "/opt/homebrew/opt/nvm/nvm.sh" ] && . "/opt/homebrew/opt/nvm/nvm.sh"; [ -s "/usr/local/opt/nvm/nvm.sh" ] && . "/usr/local/opt/nvm/nvm.sh"' >> ~/.zshrc
+```
+
+4. 터미널 설정을 다시 읽습니다.
+
+```bash
+source ~/.zshrc
+```
+
+5. Node.js 22 버전을 설치합니다.
+
+```bash
+nvm install 22
+```
+
+6. Node.js 22를 기본으로 사용하게 설정합니다.
+
+```bash
+nvm alias default 22
+```
+
+7. 설치가 되었는지 확인합니다.
+
+```bash
+node -v
+```
+
+## 3. 이 프로젝트 내려받기
+
+1. 터미널에서 프로젝트를 보관할 폴더로 이동합니다. 예를 들어 Downloads 폴더로 이동하려면 아래 명령을 사용합니다.
+
+```bash
+cd ~/Downloads
+```
+
+2. GitHub에서 이 프로젝트를 내려받습니다. `git clone`은 인터넷 저장소를 내 Mac으로 복사한다는 뜻입니다.
+
+```bash
+git clone https://github.com/neam-kim/telegram-clause-SDK-public.git
+```
+
+3. 내려받은 프로젝트 폴더로 들어갑니다.
+
+```bash
+cd telegram-clause-SDK-public
+```
+
+## 4. 필요한 부품 설치하기
+
+npm은 Node.js 프로그램에 필요한 부품을 설치하는 도구입니다. 아래 명령은 이 봇이 필요한 부품을 자동으로 내려받습니다.
+
+```bash
 npm install
 ```
 
-`npm install`은 이 프로그램이 쓰는 부품을 내려받는 단계입니다. 처음 한 번 필요하고, 의존성이 바뀌었을 때 다시 실행합니다.
+## 5. Telegram 봇 만들기
 
-### 2. Telegram 봇 만들기
+Telegram 봇은 Telegram 안에서 메시지를 받고 답장하는 별도 계정입니다. BotFather는 Telegram이 공식으로 제공하는 봇 생성 도우미입니다.
 
-1. Telegram에서 `@BotFather`를 엽니다.
-2. `/newbot`으로 새 봇을 만듭니다.
-3. BotFather가 알려 주는 봇 토큰을 복사합니다.
-4. 본인만 있는 비공개 슈퍼그룹을 만듭니다.
-5. 그룹 설정에서 Topics 기능을 켭니다.
-6. 만든 봇을 그룹 관리자로 추가합니다.
-7. 봇에게 `Manage Topics`, `Delete Messages` 권한을 줍니다.
-8. 본인의 Telegram user ID와 슈퍼그룹 chat ID를 확인합니다.
+1. 스마트폰이나 Mac에서 Telegram을 엽니다.
+2. 검색창에 `@BotFather`를 입력합니다.
+3. 파란 체크 표시가 있는 공식 BotFather를 엽니다.
+4. 채팅창에 `/newbot`을 보냅니다.
+5. BotFather가 봇 이름을 물어보면 보기 좋은 이름을 입력합니다. 예: `My Claude Helper`
+6. BotFather가 사용자 이름을 물어보면 반드시 `bot`으로 끝나는 이름을 입력합니다. 예: `my_claude_helper_bot`
+7. BotFather가 긴 토큰을 보여 줍니다. 이 값은 나중에 `.env` 파일의 `TELEGRAM_BOT_TOKEN`에 넣습니다.
+8. 토큰은 비밀번호처럼 다룹니다. 다른 사람에게 보여 주면 안 됩니다.
 
-이 프로그램은 `.env`에 적힌 사용자 ID와 그룹 ID가 모두 일치하는 메시지만 처리합니다. 다른 사람이 봇에게 메시지를 보내거나, 다른 그룹에서 호출해도 무시합니다.
+스크린샷을 찍는다면 이런 장면이 필요합니다.
 
-### 3. Claude OAuth 토큰 준비
+1. BotFather 검색 화면: 검색창에 `@BotFather`가 입력되어 있고 공식 계정이 보이는 장면
+2. `/newbot`을 보낸 화면: BotFather가 이름을 물어보는 장면
+3. 봇 사용자 이름을 입력한 화면: `...bot`으로 끝나는 이름을 넣는 장면
+4. 토큰이 발급된 화면: 긴 토큰이 보이되, 공유용 문서에서는 일부를 가린 장면
 
-Claude Agent SDK는 일반 API 키 대신 `claude setup-token`으로 만든 OAuth 토큰을 사용합니다.
+## 6. Telegram 그룹 만들고 Topics 켜기
+
+이 봇은 Telegram 그룹의 “Topics” 기능을 사용합니다. Topic은 그룹 안에 생기는 작은 대화방입니다. 작업 하나가 Topic 하나로 관리됩니다.
+
+1. Telegram에서 새 그룹을 만듭니다.
+2. 처음에는 나 혼자만 있어도 됩니다.
+3. 그룹 이름을 정합니다. 예: `Claude 작업방`
+4. 그룹 설정을 엽니다.
+5. `Topics` 또는 `토픽` 기능을 켭니다.
+6. 방금 만든 봇을 그룹에 초대합니다.
+7. 그룹 설정에서 봇을 관리자로 지정합니다.
+8. 봇에게 최소한 다음 권한을 줍니다.
+9. `Manage Topics` 권한을 켭니다. 봇이 작업별 Topic을 만들 수 있게 합니다.
+10. `Delete Messages` 권한을 켭니다. `/delete`로 작업 Topic을 지울 수 있게 합니다.
+11. 가능하면 메시지 읽기와 파일 보내기 관련 권한도 허용합니다.
+
+스크린샷을 찍는다면 이런 장면이 필요합니다.
+
+1. 새 그룹 만들기 화면
+2. 그룹 설정에서 Topics를 켠 화면
+3. 구성원 목록에 봇이 들어간 화면
+4. 봇의 관리자 권한 화면에서 `Manage Topics`가 켜진 장면
+
+## 7. 내 user ID와 그룹 chat ID 확인하기
+
+이 봇은 안전을 위해 정해진 사람과 정해진 그룹의 메시지만 듣습니다. 그래서 내 Telegram user ID와 그룹 chat ID가 필요합니다.
+
+1. Telegram 검색창에 `@userinfobot`을 입력합니다.
+2. `@userinfobot`에게 아무 메시지나 보냅니다.
+3. 답장에 나오는 내 숫자 ID를 복사합니다. 이 값은 `.env`의 `TELEGRAM_ALLOWED_USER_ID`에 넣습니다.
+4. 방금 만든 Telegram 그룹에 `@userinfobot`을 초대합니다.
+5. 그룹 안에서 아무 메시지나 보냅니다.
+6. `@userinfobot`이 그룹 정보를 알려 주면 chat ID를 확인합니다.
+7. 그룹 chat ID는 보통 `-100`으로 시작하는 긴 숫자입니다. 이 값은 `.env`의 `TELEGRAM_CHAT_ID`에 넣습니다.
+8. 확인이 끝나면 `@userinfobot`은 그룹에서 내보내도 됩니다.
+
+스크린샷을 찍는다면 이런 장면이 필요합니다.
+
+1. `@userinfobot` 개인 채팅에서 내 user ID가 보이는 화면
+2. 그룹 안에서 chat ID가 보이는 화면
+3. chat ID가 `-100...` 형태인지 확인하는 장면
+
+## 8. Claude 토큰 만들기
+
+Claude 토큰은 이 봇이 내 Claude 구독으로 Claude를 실행하기 위한 비밀 열쇠입니다. 이 프로젝트는 일반 API 키가 아니라 `claude setup-token`으로 만든 OAuth 토큰을 사용합니다.
+
+1. 터미널에서 프로젝트 폴더에 있는지 확인합니다.
+
+```bash
+pwd
+```
+
+2. Claude 토큰 만들기 명령을 실행합니다.
+
+```bash
+claude setup-token
+```
+
+3. 브라우저가 열리면 Claude 계정으로 로그인합니다.
+4. 터미널에 `sk-ant-oat01-`로 시작하는 긴 토큰이 표시됩니다.
+5. 그 토큰을 복사합니다.
+6. 나중에 `.env` 파일의 `CLAUDE_CODE_OAUTH_TOKEN`에 붙여넣습니다.
+
+이 저장소에는 토큰 저장을 도와주는 명령도 있습니다. 이 명령은 `claude setup-token`을 실행한 뒤 토큰을 `.env`에 저장하는 과정을 도와줍니다.
 
 ```bash
 npm run auth:setup
 ```
 
-이 명령은 다음 순서로 진행됩니다.
+## 9. `.env` 파일 만들기
 
-1. 브라우저에서 Claude 로그인을 엽니다.
-2. 터미널에 `sk-ant-oat01-...` 형태의 토큰이 표시됩니다.
-3. 그 토큰을 복사합니다.
-4. 숨김 입력 프롬프트에 붙여넣습니다.
-5. `.env`의 `CLAUDE_CODE_OAUTH_TOKEN`에 저장합니다.
-6. `.env` 파일 권한을 `0600`으로 맞춥니다.
+`.env` 파일은 비밀 설정을 넣는 파일입니다. Telegram 봇 토큰, 내 user ID, 그룹 chat ID, Claude 토큰이 들어갑니다. 절대 GitHub나 다른 사람에게 공유하지 마세요.
 
-토큰은 비밀번호처럼 다뤄야 합니다. README, 이슈, 채팅, 로그, Git 커밋에 넣지 마세요.
-
-추가 Claude 계정 토큰이 있다면 `.env`에 `CLAUDE_CODE_OAUTH_TOKEN_2`, `CLAUDE_CODE_OAUTH_TOKEN_3`으로 넣을 수 있습니다. 한 토큰이 사용량 한도에 도달하면 다음 새 세션부터 사용 가능한 토큰을 고릅니다. 한도 회복 시각이 있으면 그때까지 해당 토큰을 쉬게 하고, 없으면 기본 1시간 동안 다시 시도하지 않습니다.
-
-### 4. Codex 로그인 준비
-
-`/plan`의 구현 단계는 Codex CLI의 ChatGPT 구독 로그인을 사용합니다. OpenAI API 키 과금으로 우회하지 않습니다.
+1. 프로젝트 폴더에서 예시 파일을 복사합니다.
 
 ```bash
-codex
+cp .env.example .env
 ```
 
-로그인 화면에서 `Sign in with ChatGPT`를 선택합니다. 이 프로그램은 Codex 실행 전에 `~/.codex/auth.json`의 `auth_mode=chatgpt`를 확인합니다. API 키 인증이면 실행을 거부합니다. Codex 자식 프로세스에서도 `OPENAI_API_KEY`, `CODEX_API_KEY`, API base URL 환경 변수를 제거합니다.
-
-Codex 모델 목록은 실행 시점에 다음 명령이 반환하는 카탈로그를 읽어 구성합니다.
+2. `.env` 파일을 엽니다.
 
 ```bash
-codex debug models
+open -a TextEdit .env
 ```
 
-따라서 Codex CLI가 새 모델이나 새 reasoning 단계를 제공하면, 코드에 모델명을 추가하지 않아도 다음 실행부터 Telegram 선택 버튼에 반영됩니다. 이 명령이 실패하면 안전한 기본 후보로 내려갑니다.
-
-### 5. `.env` 만들기
-
-`.env`가 없다면 예시 파일을 복사합니다.
-
-```bash
-test -f .env || cp .env.example .env
-```
-
-`.env`에 Telegram 값과 Claude OAuth 토큰을 넣습니다.
+3. 아래 예시처럼 값을 채웁니다. 예시 값은 가짜입니다.
 
 ```dotenv
-TELEGRAM_BOT_TOKEN=123456:replace-me
+TELEGRAM_BOT_TOKEN=1234567890:AAFakeTelegramBotTokenForExampleOnly
 TELEGRAM_ALLOWED_USER_ID=123456789
 TELEGRAM_CHAT_ID=-1001234567890
-CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-replace-me
-
-# 선택: 추가 Claude 계정 토큰
-# CLAUDE_CODE_OAUTH_TOKEN_2=sk-ant-oat01-replace-me
-# CLAUDE_CODE_OAUTH_TOKEN_3=sk-ant-oat01-replace-me
-```
-
-파일 권한을 다시 확인합니다.
-
-```bash
-chmod 600 .env
-```
-
-권한이 `0600`이 아니면 프로그램이 시작을 거부합니다. 이는 다른 사용자가 토큰을 읽지 못하게 하기 위한 안전장치입니다.
-
-### 6. 작업할 프로젝트 등록
-
-예시 파일을 복사합니다.
-
-```bash
-cp projects.example.json projects.json
-```
-
-`projects.json`에 Claude가 작업할 폴더를 등록합니다.
-
-```json
-[
-  {
-    "name": "website",
-    "aliases": ["web", "site"],
-    "cwd": "/Users/me/work/website",
-    "defaultMode": "auto"
-  }
-]
-```
-
-각 항목의 뜻은 다음과 같습니다.
-
-| 항목 | 필수 | 설명 |
-| --- | --- | --- |
-| `name` | 예 | Telegram에서 보일 프로젝트 이름입니다. |
-| `aliases` | 아니요 | `/new web`처럼 짧게 부를 별칭입니다. |
-| `cwd` | 예 | 실제 프로젝트 폴더의 절대경로입니다. |
-| `defaultMode` | 아니요 | 새 세션의 기본 승인 방식입니다. 권장값은 `auto`입니다. |
-
-`cwd`는 반드시 실제로 존재하고 읽기·쓰기가 가능한 폴더여야 합니다. 상대경로가 아니라 `/Users/...`처럼 시작하는 절대경로를 넣어야 합니다.
-
-프로그램 실행 후 Telegram에서 프로젝트를 추가할 수도 있습니다.
-
-```text
-/addp /Users/me/work/new-project
-```
-
-프로젝트 삭제는 다음처럼 합니다.
-
-```text
-/deltp website
-```
-
-삭제는 `projects.json`의 등록만 제거합니다. 실제 폴더와 파일은 지우지 않습니다. 마지막 프로젝트 하나는 삭제할 수 없습니다.
-
-### 7. 빌드와 실행
-
-```bash
-npm run build
-npm start
-```
-
-Telegram 그룹에서 다음을 입력해 봅니다.
-
-```text
-/status
-```
-
-응답이 오면 봇이 살아 있는 것입니다. 이어서 다음 명령으로 전체 설정을 점검합니다.
-
-```text
-/doctor
-```
-
-개발 중에는 파일 변경을 감지해 다시 실행하는 명령을 쓸 수 있습니다.
-
-```bash
-npm run dev
-```
-
-## Mac 로그인 시 자동 실행
-
-매번 터미널에서 `npm start`를 실행하지 않으려면 LaunchAgent를 설치합니다.
-
-```bash
-npm run launchd:install
-```
-
-이 명령은 현재 Node 실행 파일과 현재 프로젝트 경로를 사용해 `~/Library/LaunchAgents`에 사용자용 자동 실행 설정을 만듭니다. `.env`의 토큰은 plist에 기록하지 않습니다.
-
-프로그램을 재시작해야 할 때는 다음 명령을 씁니다.
-
-```bash
-npm run launchd:restart
-```
-
-중지하려면 다음을 사용합니다.
-
-```bash
-launchctl bootout gui/$(id -u)/com.neam.telegram-claude-orchestrator
-```
-
-주의: `bootout`은 재시작이 아니라 등록 해제에 가까운 중지입니다. 일반적인 재시작은 `npm run launchd:restart`를 사용하세요.
-
-로그는 다음 파일에 남습니다.
-
-```text
-data/stdout.log
-data/stderr.log
-```
-
-Node 버전을 바꾸거나 프로젝트 폴더를 옮겼다면 `npm run launchd:install`을 다시 실행해야 합니다. LaunchAgent가 이전 Node 경로나 이전 프로젝트 경로를 기억하고 있을 수 있기 때문입니다.
-
-## Telegram에서 쓰는 기본 흐름
-
-### 새 작업 시작
-
-그룹의 기본 대화방에서 입력합니다.
-
-```text
-/new
-```
-
-그러면 버튼이 순서대로 나옵니다.
-
-1. 프로젝트 선택
-2. Claude 모델 선택
-3. 선택한 Claude 모델이 지원하는 thinking/effort 수준 선택
-4. 작업 내용 입력
-
-예를 들어 이렇게 요청할 수 있습니다.
-
-```text
-README를 처음 설치하는 사람도 이해할 수 있게 다시 써줘.
-```
-
-작업이 시작되면 새 Telegram 토픽이 만들어지고, 이후 진행 상황과 결과는 그 토픽 안에서 이어집니다.
-
-프로젝트 이름을 알고 있다면 바로 지정할 수 있습니다.
-
-```text
-/new website
-```
-
-### 기존 작업 이어가기
-
-이미 만들어진 작업 토픽 안에서 일반 메시지를 보내면 됩니다.
-
-```text
-방금 수정한 부분에 테스트도 추가해줘.
-```
-
-이 메시지는 기존 Claude 세션을 이어서 실행합니다. 앞서 주고받은 문맥과 작업 내용이 유지됩니다.
-
-### 실행 중인 작업에 방향 전환하기
-
-작업이 아직 실행 중일 때 지금 바로 반영할 지시는 `/steer`를 씁니다.
-
-```text
-/steer 코드 수정 전에 원인 분석을 먼저 정리해줘.
-```
-
-현재 작업이 끝난 뒤 처리할 내용은 `/next`를 씁니다.
-
-```text
-/next 작업이 끝나면 테스트를 실행하고 변경 내용을 요약해줘.
-```
-
-일반 메시지와 구분하는 이유는 간단합니다. 일반 메시지는 보통 “이전 작업이 끝난 뒤 이어서 새 요청”이고, `/steer`는 “지금 실행 중인 작업에 즉시 반영”, `/next`는 “현재 작업 뒤에 예약”이라는 의미를 명확히 하기 위해서입니다.
-
-### 작업 중단
-
-```text
-/stop
-```
-
-실행 중인 Claude 작업에 중단 요청을 보냅니다. 중단한 뒤 같은 토픽에 새 메시지를 보내면 기존 문맥을 바탕으로 다시 이어갈 수 있습니다.
-
-### 다른 방향으로 분기
-
-```text
-/fork
-```
-
-완료된 세션을 바탕으로 새 작업 토픽을 만듭니다. 기존 토픽은 그대로 두고, 같은 문맥에서 다른 접근을 시도할 때 사용합니다.
-
-## `/plan` 파이프라인
-
-일반 메시지는 Claude가 바로 작업합니다. `/plan`은 더 조심스럽게 처리해야 하는 작업을 위한 절차입니다.
-
-```text
-/plan 로그인 방식을 JWT에서 세션 쿠키 방식으로 바꿔줘.
-```
-
-흐름은 다음과 같습니다.
-
-1. Claude가 먼저 코드를 읽고 실행 계획을 씁니다.
-2. Claude가 완료 기준을 `[ACCEPTANCE_CRITERIA]`로 정리합니다.
-3. Telegram에 계획이 표시되고 사용자가 승인하거나 거절합니다.
-4. 승인되면 Codex가 구현과 검증을 수행합니다.
-5. Codex의 명령, 종료 코드, 변경 파일, MCP 호출, 최종 응답, `git status`, `git diff`가 SQLite 증거 원장에 저장됩니다.
-6. Claude가 증거를 보고 각 완료 기준을 `pass`, `fail`, `blocked`로 판정합니다.
-7. 모든 기준이 `pass`이고 최종 판정이 `APPROVE`일 때만 작업을 완료 처리합니다.
-
-검토가 실패하면 같은 Codex 스레드에서 차단 문제를 수정하고 다시 검증합니다. 최대 3회까지만 반복합니다. 3회 뒤에도 승인되지 않으면 `verification_failed`로 끝냅니다.
-
-`/plan`은 다음 같은 작업에 적합합니다.
-
-- 여러 파일을 고치는 기능 추가
-- 회귀 테스트가 필요한 버그 수정
-- 공개 배포 전 검증이 중요한 변경
-- 사용자 승인 없이 바로 구현하면 위험한 작업
-- 완료 여부를 증거로 확인해야 하는 작업
-
-## 모델, thinking, reasoning, lean 모드
-
-### Claude 모델
-
-새 작업을 시작할 때 Claude 모델을 고릅니다. 작업 토픽 안에서 나중에 바꿀 수도 있습니다.
-
-프로그램은 시작할 때 Anthropic Models API를 호출해 현재 계정에서 확인 가능한 Claude 모델 목록과 각 모델의 기능 정보를 읽습니다. 모델 API가 실패하면 `Opus`, `Sonnet`, `Fable` 계열의 안전한 기본 목록을 사용합니다.
-
-```text
-/model
-/model opus
-/model sonnet
-/model fable
-```
-
-`/model`을 인자 없이 입력하면 현재 모델과 선택 가능한 모델 버튼이 표시됩니다. 버튼은 고정된 3개 목록이 아니라 시작 시점에 로딩된 모델 카탈로그를 기준으로 만들어집니다. 모델을 바꾸면 기존 thinking 값이 새 모델에서 지원되는지 확인하고, 지원되지 않으면 가장 가까운 기본값으로 자동 보정합니다.
-
-변경은 다음 실행부터 적용됩니다. 이미 실행 중인 작업에는 적용되지 않습니다.
-
-### Claude thinking/effort 수준
-
-Thinking은 Claude가 답하기 전에 얼마나 깊게 검토할지 정하는 설정입니다. 최신 Claude 모델은 adaptive thinking과 별도의 effort 수준을 지원할 수 있으므로, 이 프로그램은 선택한 모델이 지원하는 단계만 보여 줍니다.
-
-```text
-/thinking
-/thinking adaptive
-/thinking low
-/thinking medium
-/thinking high
-/thinking xhigh
-/thinking max
-/thinking off
-```
-
-- `adaptive`: Claude가 작업 난이도에 맞춰 자동 조절
-- `low`: 빠른 응답을 우선하는 낮은 effort
-- `medium`: 속도와 검토 깊이의 균형
-- `high`: 복잡한 작업을 위한 높은 effort
-- `xhigh`: 더 깊은 검토가 필요한 작업용
-- `max`: 해당 모델이 지원하는 최대 effort
-- `off`: 확장 thinking을 끄고 빠르게 처리
-
-모든 모델이 모든 단계를 지원하는 것은 아닙니다. 예를 들어 어떤 모델은 `max`를 지원하지 않을 수 있습니다. 그런 경우 버튼에 나타나지 않고, 직접 입력해도 거부됩니다.
-
-### Codex 모델과 reasoning 수준
-
-`/plan`을 시작하면 Claude가 계획을 작성하기 전에 Codex 모델을 고릅니다. Codex 모델 목록은 `codex debug models`의 실제 카탈로그에서 읽어 오며, 각 모델이 지원하는 reasoning 단계도 함께 가져옵니다.
-
-흐름은 다음과 같습니다.
-
-1. 작업 토픽에서 `/plan 작업 내용`을 입력합니다.
-2. Telegram에 현재 Codex CLI가 제공하는 모델 버튼이 표시됩니다.
-3. 모델을 고르면 그 모델이 지원하는 reasoning 단계 버튼이 표시됩니다.
-4. reasoning 단계를 고르면 Claude 계획, 사용자 승인, Codex 실행, Claude 검토 파이프라인이 시작됩니다.
-
-Codex reasoning은 다음 계열을 사용할 수 있습니다. 실제 버튼은 선택한 모델의 카탈로그에 따라 달라집니다.
-
-```text
-minimal
-low
-medium
-high
-xhigh
-```
-
-이 구조 때문에 새 Codex 모델이 추가되거나 reasoning 단계가 바뀌어도, Codex CLI 카탈로그가 갱신되어 있으면 코드 수정 없이 선택 목록이 바뀝니다.
-
-### Lean 모드
-
-새 세션은 기본적으로 `lean on`입니다.
-
-```text
-/lean
-/lean on
-/lean off
-```
-
-Lean 모드는 [Ponytail](https://github.com/DietrichGebert/ponytail)의 최소 구현 원칙에서 착안했습니다. Claude와 Codex가 문제를 풀 때 다음 순서를 우선합니다.
-
-1. 불필요한 구현은 하지 않는다.
-2. 표준 라이브러리로 해결할 수 있으면 먼저 쓴다.
-3. 플랫폼 기본 기능을 활용한다.
-4. 이미 있는 의존성을 활용한다.
-5. 그래도 필요할 때만 최소한의 새 코드를 작성한다.
-
-단, 보안, 입력 검증, 데이터 손실 방지, 접근성, 사용자가 명시한 요구사항, 실행 가능한 검증은 줄이지 않습니다.
-
-## 권한 모드
-
-세션 토픽에서 `/mode`로 현재 승인 방식을 확인하거나 변경할 수 있습니다.
-
-```text
-/mode
-/mode auto
-/mode default
-/mode acceptEdits
-/mode plan
-/mode dontAsk
-```
-
-| 모드 | 설명 |
-| --- | --- |
-| `auto` | 기본 권장값입니다. 일반적인 작업은 자동 판단하고 위험하거나 불확실한 작업만 승인 요청합니다. |
-| `default` | 더 보수적으로 파일 수정과 명령 실행 승인을 받습니다. |
-| `acceptEdits` | 일반적인 파일 편집 승인을 줄입니다. |
-| `plan` | 실제 변경보다 계획 수립 중심으로 동작합니다. |
-| `dontAsk` | 추가 질문 없이 허용된 범위에서만 진행합니다. |
-
-실행 중에는 권한 모드를 바꿀 수 없습니다. 작업 완료 또는 `/stop` 이후 변경하세요.
-
-## Telegram 명령어 모음
-
-### 어디서나 사용할 수 있는 명령
-
-| 명령 | 설명 | 예시 |
-| --- | --- | --- |
-| `/start` | 사용 가능한 주요 명령을 간단히 보여 줍니다. | `/start` |
-| `/new` | 프로젝트를 선택해 새 작업을 시작합니다. | `/new` |
-| `/new 이름` | 지정한 프로젝트에서 새 작업을 시작합니다. | `/new website` |
-| `/projects` | 등록된 프로젝트 이름, 별칭, 폴더 경로를 보여 줍니다. | `/projects` |
-| `/addp 경로` | 실행 중인 봇에 프로젝트 폴더를 추가합니다. | `/addp /Users/me/work/app` |
-| `/deltp 이름` | 등록된 프로젝트를 제거합니다. 실제 폴더는 삭제하지 않습니다. | `/deltp website` |
-| `/sessions` | 최근 작업 15개와 토픽 링크를 보여 줍니다. | `/sessions` |
-| `/status` | 봇 프로세스, 현재 작업, 저장된 세션 수를 보여 줍니다. | `/status` |
-| `/usage` | Claude 서버에 현재 사용량을 즉시 조회하고, 실패하면 마지막 저장값을 보여 줍니다. | `/usage` |
-| `/doctor` | 인증, Telegram, 프로젝트, 저장소, 자동 실행, 로그를 점검합니다. | `/doctor` |
-
-### 작업 토픽에서 사용하는 명령
-
-| 명령 | 설명 | 예시 |
-| --- | --- | --- |
-| `/plan 작업` | 계획, 승인, Codex 구현, Claude 검토 파이프라인을 시작합니다. | `/plan 인증 버그 수정` |
-| `/steer 지시` | 실행 중인 작업에 즉시 반영할 지시를 보냅니다. | `/steer 원인 분석 먼저` |
-| `/next 지시` | 현재 작업 뒤에 이어서 할 일을 예약합니다. | `/next 테스트 실행` |
-| `/stop` | 현재 실행 중인 작업을 중단합니다. | `/stop` |
-| `/fork` | 현재 대화를 바탕으로 새 작업 토픽을 만듭니다. | `/fork` |
-| `/compact` | 긴 Claude 대화를 압축합니다. | `/compact 인증 변경 중심` |
-| `/memory` | 장기적으로 유효한 사용자 선호와 프로젝트 지식을 저장합니다. | `/memory 배포 절차 중심` |
-| `/mode` | 권한 모드를 확인하거나 변경합니다. | `/mode auto` |
-| `/model` | 현재 카탈로그의 Claude 모델을 확인하거나 변경합니다. | `/model sonnet` |
-| `/thinking` | 현재 Claude 모델이 지원하는 thinking/effort 수준을 확인하거나 변경합니다. | `/thinking high` |
-| `/lean` | 최소 구현 원칙 적용 여부를 확인하거나 변경합니다. | `/lean off` |
-| `/diff` | 현재 프로젝트의 Git 변경 통계를 보여 줍니다. | `/diff` |
-| `/upload 경로` | 지정한 파일을 Telegram으로 전송합니다. | `/upload output/report.pdf` |
-| `/delete` | 토픽, 로컬 세션 기록, Claude 대화 원본을 함께 삭제합니다. | `/delete` |
-
-`/delete`는 확인 버튼을 한 번 더 누르게 합니다. 삭제 후에는 복구할 수 없습니다.
-
-## 파일 주고받기
-
-### 사용자가 Claude에게 파일 보내기
-
-Telegram 토픽에 파일을 첨부하면 봇이 로컬 inbox에 저장하고 Claude에게 파일 경로를 알려 줍니다.
-
-기본 저장 위치:
-
-```text
-~/.claude/channels/telegram/inbox/
-```
-
-지원하는 Telegram 파일 종류:
-
-| 종류 | 설명 |
-| --- | --- |
-| 사진 | 일반 사진 첨부입니다. Telegram이 압축할 수 있습니다. |
-| 문서 | 원본 파일을 유지합니다. PDF, 코드, 압축 파일 등에 적합합니다. |
-| 오디오 | 음악 또는 오디오 파일입니다. |
-| 음성 메시지 | Telegram 마이크 녹음입니다. |
-| 동영상 | 동영상 파일입니다. |
-| 원형 동영상 | Telegram의 원형 영상 메시지입니다. |
-| 애니메이션/GIF | GIF 또는 짧은 무음 영상입니다. |
-| 스티커 | 스티커 파일입니다. |
-
-예시:
-
-```text
-(PDF 첨부) 이 논문의 핵심 내용을 5줄로 요약해줘.
-```
-
-```text
-(스크린샷 첨부) 이 화면에서 어색한 UI를 찾아서 고쳐줘.
-```
-
-세션이 없는 곳에서 파일을 보내면, 봇은 파일을 저장한 뒤 `/new`로 작업을 시작하라고 안내합니다.
-
-### Claude가 만든 파일 받기
-
-작업 토픽에서 `/upload`를 사용합니다.
-
-```text
-/upload output/result.pdf
-```
-
-상대경로는 해당 세션의 프로젝트 폴더 기준입니다. 절대경로도 사용할 수 있습니다.
-
-## 사용량과 토큰 풀
-
-`/usage`는 먼저 Claude SDK의 사용량 API를 새로 호출해 현재 서버 응답을 확인합니다. OAuth 토큰을 여러 개 등록했다면 토큰 #1, 토큰 #2처럼 각 토큰을 따로 조회해 보여 줍니다. 이 조회가 성공하면 답장에 `원천: Claude 서버 실시간 조회`가 붙습니다. 네트워크 오류, 인증 오류, SDK 응답 지연처럼 모든 토큰의 실시간 조회가 실패한 경우에만 최근 작업 세션에 저장된 마지막 스냅샷을 대신 보여 줍니다.
-
-Claude 서버가 `rate_limits_available=false`를 반환하면 봇은 사용률 숫자를 추정하지 않습니다. 이 상태는 API 키·외부 프로바이더 세션이거나, OAuth 토큰에 사용량 조회 권한이 없을 때 발생할 수 있습니다. 그 경우 `claude setup-token`으로 토큰을 다시 발급해 `.env`를 갱신해야 5시간·주간 한도 사용률이 표시됩니다.
-
-실행 중 상태 메시지와 완료 메시지에도 Claude가 반환한 같은 한도 정보가 포함됩니다.
-
-표시 대상은 SDK가 실제로 반환하는 한도 창입니다.
-
-- 5시간 한도
-- 7일 한도
-- Opus 7일 한도
-- Sonnet 7일 한도
-- OAuth 앱 주간 한도
-- overage가 켜진 경우 추가 사용량
-
-`total_cost_usd`는 실제 청구액이 아니라 클라이언트 추정치일 수 있으므로 사용자 화면과 SQLite에 비용으로 저장하지 않습니다.
-
-Claude OAuth 토큰을 여러 개 넣은 경우, 프로그램은 토큰 풀을 만듭니다.
-
-- 기본 토큰부터 사용합니다.
-- 사용량 스냅샷에서 한도 사용률이 100%에 도달한 토큰은 회복 시각까지 제외합니다.
-- rate-limit 오류가 나면 해당 토큰을 잠시 제외합니다.
-- 사용 가능한 다음 토큰이 있으면 새 세션부터 그 토큰을 사용합니다.
-- 이 상태는 메모리에만 보관되므로 데몬 재시작 후에는 다시 감지합니다.
-
-## 진행 상황 알림
-
-작업 중 봇은 다음을 Telegram으로 알려 줍니다.
-
-- Claude가 작업 중이라는 상태
-- 의미 있는 중간 진행 요약
-- 도구 실행 승인 요청
-- 사용자 선택 질문
-- 긴 작업의 경과 시간
-- Codex 실행 중 상태
-- 완료 결과
-- 긴 결과의 파일 첨부
-
-내부 thinking 원문과 토큰 단위의 미완성 문장은 보내지 않습니다. 스트리밍으로 보낸 내용과 최종 result가 같으면 중복 전송하지 않습니다.
-
-## MCP와 장기 작업
-
-MCP는 Claude가 외부 도구를 쓰기 위한 연결 방식입니다. 이 프로젝트에서는 일반 MCP와 Codex MCP를 다르게 다룹니다.
-
-`.env`에서 조정할 수 있는 값:
-
-```dotenv
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-fakeclaudetokenexample
+CLAUDE_CODE_OAUTH_TOKEN_2=sk-ant-oat01-fakesecondtokenexample
+CLAUDE_CODE_OAUTH_TOKEN_3=sk-ant-oat01-fakethirdtokenexample
+DATABASE_PATH=./data/state.sqlite
+PROJECTS_PATH=./projects.json
+APPROVAL_TIMEOUT_MINUTES=30
+STATUS_DEBOUNCE_MS=2500
 MCP_TOOL_TIMEOUT_SECONDS=60
 MCP_MAX_ATTEMPTS=3
 CODEX_MCP_TIMEOUT_MINUTES=30
 CODEX_MCP_HEARTBEAT_SECONDS=60
 LONG_RUNNING_MCP_SERVERS=codex,obsidian
 TURN_IDLE_TIMEOUT_MINUTES=35
+CLAUDE_MEMORY_DIR=~/.claude/memory
+FILE_INBOX_DIR=~/.claude/channels/telegram/inbox
+CLAUDE_CODE_EXECUTABLE=
 ```
 
-- 일반 MCP는 60초 타임아웃을 기본으로 합니다.
-- timeout, connection closed, transport 오류는 같은 입력으로 최대 3회 순차 재시도합니다.
-- Codex 같은 장기 작업 MCP는 30분까지 기다릴 수 있습니다.
-- 장기 작업 중에는 60초마다 진행 중 알림을 보냅니다.
-- Codex MCP만 세션 시작 시 `alwaysLoad`로 연결합니다.
-- 다른 MCP는 지연 로딩을 유지해 시작 지연과 프롬프트 비대화를 줄입니다.
-
-## 안전 정책
-
-이 도구는 로컬 파일과 명령을 다루므로 안전 정책이 중요합니다.
-
-- 봇은 `.env`에 지정한 Telegram 사용자 한 명과 그룹 하나만 받습니다.
-- `.env`, `projects.json`, `data/`는 Git에 올리지 않습니다.
-- OAuth 토큰은 로그, SQLite, launchd plist에 저장하지 않습니다.
-- 저장 전 계획, 완료 기준, 검토문, 명령 출력에서 토큰·API 키·비밀번호 패턴을 마스킹합니다.
-- Claude 자식 프로세스에서는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`을 제거해 `.env`의 OAuth 토큰이 우선되게 합니다.
-- Codex 자식 프로세스에서는 OpenAI API 키와 API base URL 환경 변수를 제거합니다.
-- 사용자·프로젝트·로컬 Claude 설정의 사전 승인 규칙은 로드하지 않습니다.
-- 루트 `CLAUDE.md`와 `AGENTS.md`는 지침으로만 읽고 도구 권한 부여에는 쓰지 않습니다.
-- `WebFetch`는 URL별 승인을 거칩니다.
-- `Bash`에는 세션 단위 “항상 허용” 버튼을 제공하지 않습니다.
-- SDK가 경로나 명령 범위를 제안할 때만 그 범위의 세션 허용을 적용합니다.
-- `bypassPermissions`는 지원하지 않습니다.
-
-## 문제 해결
-
-### 봇이 아무 응답도 하지 않습니다
-
-1. Telegram에서 `/status`를 입력합니다.
-2. 응답이 없으면 Mac에서 프로그램이 실행 중인지 확인합니다.
-3. `.env`의 `TELEGRAM_ALLOWED_USER_ID`와 `TELEGRAM_CHAT_ID`가 맞는지 확인합니다.
-4. 봇이 해당 그룹의 관리자인지 확인합니다.
-5. `data/stderr.log`를 확인합니다.
-6. `/doctor`가 가능하다면 실행해 전체 상태를 봅니다.
-
-### 새 토픽을 만들지 못합니다
-
-Telegram 그룹에서 봇 권한을 확인합니다.
-
-- `Manage Topics`: 새 작업 토픽 생성에 필요
-- `Delete Messages`: `/delete` 처리에 필요
-
-### `.env permissions must be 0600` 오류가 납니다
-
-`.env` 파일 권한이 너무 열려 있다는 뜻입니다.
+4. 파일을 저장합니다.
+5. 비밀 파일 권한을 안전하게 바꿉니다.
 
 ```bash
 chmod 600 .env
 ```
 
-다시 실행하세요.
+## `.env`의 모든 항목 설명
 
-### Claude 인증 오류가 납니다
+1. `TELEGRAM_BOT_TOKEN`: BotFather가 준 봇 토큰입니다. 봇의 비밀번호라고 생각하면 됩니다.
+2. `TELEGRAM_ALLOWED_USER_ID`: 봇을 사용할 내 Telegram 숫자 ID입니다. 이 사람의 메시지만 처리합니다.
+3. `TELEGRAM_CHAT_ID`: 봇을 사용할 Telegram 그룹의 숫자 ID입니다. 이 그룹의 메시지만 처리합니다.
+4. `CLAUDE_CODE_OAUTH_TOKEN`: `claude setup-token`으로 만든 Claude 토큰입니다.
+5. `CLAUDE_CODE_OAUTH_TOKEN_2`: 선택 항목입니다. 다른 Claude 계정 토큰이 있으면 넣습니다. 첫 번째 토큰이 한도에 닿으면 자동으로 다음 토큰을 사용합니다.
+6. `CLAUDE_CODE_OAUTH_TOKEN_3`: 선택 항목입니다. 세 번째 Claude 계정 토큰입니다.
+7. `DATABASE_PATH`: 봇의 작업 기록을 저장할 파일 위치입니다. 기본값 그대로 두면 됩니다.
+8. `PROJECTS_PATH`: 작업할 프로젝트 목록 파일 위치입니다. 기본값 그대로 두면 됩니다.
+9. `APPROVAL_TIMEOUT_MINUTES`: Claude가 위험한 작업 전에 승인을 요청했을 때, 몇 분 동안 기다릴지 정합니다.
+10. `STATUS_DEBOUNCE_MS`: 진행 상황 메시지를 너무 자주 보내지 않도록 조절하는 값입니다. 기본값 그대로 두면 됩니다.
+11. `MCP_TOOL_TIMEOUT_SECONDS`: Claude가 외부 도구를 호출했을 때 일반적으로 몇 초까지 기다릴지 정합니다.
+12. `MCP_MAX_ATTEMPTS`: 외부 도구 오류가 났을 때 몇 번까지 다시 시도할지 정합니다.
+13. `CODEX_MCP_TIMEOUT_MINUTES`: Codex처럼 오래 걸릴 수 있는 작업을 몇 분까지 기다릴지 정합니다.
+14. `CODEX_MCP_HEARTBEAT_SECONDS`: 오래 걸리는 Codex 작업 중 몇 초마다 “아직 진행 중”이라고 알려 줄지 정합니다.
+15. `LONG_RUNNING_MCP_SERVERS`: 오래 걸릴 수 있는 도구 이름 목록입니다. 기본값 그대로 두면 됩니다.
+16. `TURN_IDLE_TIMEOUT_MINUTES`: 아무 응답도 없이 너무 오래 멈춰 있을 때 작업을 중단하기 위한 안전 시간입니다.
+17. `CLAUDE_MEMORY_DIR`: `/memory` 명령으로 저장되는 장기 메모리 폴더입니다.
+18. `FILE_INBOX_DIR`: Telegram으로 받은 파일을 Mac에 저장할 폴더입니다.
+19. `CLAUDE_CODE_EXECUTABLE`: Claude 실행 파일 위치를 직접 지정해야 할 때만 사용합니다. 보통 비워 둡니다.
 
-토큰이 만료됐거나 잘못 입력됐을 수 있습니다.
+## 10. `projects.json` 만들기
+
+프로젝트는 Claude가 실제로 작업할 폴더입니다. 예를 들어 내 웹사이트 폴더, 글쓰기 폴더, Obsidian vault 폴더, 앱 개발 폴더가 각각 프로젝트가 될 수 있습니다.
+
+1. 예시 파일을 복사합니다.
 
 ```bash
-npm run auth:setup
+cp projects.example.json projects.json
+```
+
+2. `projects.json` 파일을 엽니다.
+
+```bash
+open -a TextEdit projects.json
+```
+
+3. 아래 예시처럼 내 Mac의 실제 폴더 경로를 적습니다.
+
+```json
+[
+  {
+    "name": "my-notes",
+    "aliases": ["notes", "obsidian"],
+    "cwd": "/Users/your-name/Documents/ObsidianVault",
+    "defaultMode": "auto"
+  },
+  {
+    "name": "my-website",
+    "aliases": ["site", "web"],
+    "cwd": "/Users/your-name/Projects/my-website",
+    "defaultMode": "auto"
+  }
+]
+```
+
+4. `name`은 Telegram에서 보일 프로젝트 이름입니다.
+5. `aliases`는 짧은 별명입니다. 예를 들어 `notes`라고 부를 수 있습니다.
+6. `cwd`는 Claude가 작업할 실제 폴더 경로입니다. 반드시 `/Users/...`로 시작하는 전체 경로를 넣습니다.
+7. `defaultMode`는 새 작업의 기본 승인 방식입니다. 처음에는 `auto`를 추천합니다.
+8. 파일을 저장합니다.
+
+## 11. 봇 실행하기
+
+1. 먼저 프로그램을 실행 가능한 상태로 준비합니다.
+
+```bash
 npm run build
 ```
 
-그 뒤 봇을 재시작합니다.
-
-### Codex 인증 오류가 납니다
-
-터미널에서 다음을 실행합니다.
+2. 봇을 시작합니다.
 
 ```bash
-codex
+npm start
 ```
 
-`Sign in with ChatGPT` 로그인이 유지되는지 확인합니다. API 키 인증이면 `/plan` 실행이 거부됩니다.
-
-### 프로젝트를 찾을 수 없다고 나옵니다
-
-```text
-/projects
-```
-
-등록된 이름과 별칭을 확인합니다. `projects.json`의 `cwd`는 실제 존재하는 절대경로여야 합니다.
-
-### 작업이 계속 대기 중입니다
-
-같은 프로젝트에서는 한 번에 하나의 작업만 실행합니다. 파일 충돌을 막기 위한 정책입니다.
+3. Telegram 그룹으로 갑니다.
+4. 그룹 일반 채팅에서 아래 명령을 보냅니다.
 
 ```text
 /status
 ```
 
-먼저 실행 중인 작업을 확인하고, 필요하면 해당 토픽에서 `/stop`을 사용합니다.
+5. “오케스트레이터: 정상 응답” 같은 답장이 오면 연결된 것입니다.
+6. 새 작업을 시작하려면 아래 명령을 보냅니다.
 
-### 파일 전송이 실패합니다
+```text
+/new
+```
 
-Telegram Bot API에는 파일 크기 제한이 있습니다. 큰 파일은 나누거나 다른 전달 방식을 사용하세요. 사진은 Telegram이 압축할 수 있으므로 원본이 필요하면 “파일”로 보내는 것이 좋습니다.
+7. 버튼으로 프로젝트, 모델, thinking 수준을 고릅니다.
+8. 봇이 “실행할 작업을 입력하세요”라고 하면 원하는 일을 평소 말하듯 입력합니다.
 
-### 재시작 후 작업이 중단 상태입니다
+## 기본 사용법
 
-프로세스가 종료될 때 실행 중이던 SDK 호출은 자동 복원하지 않습니다. 세션을 `interrupted`로 표시합니다. 기존 토픽에 후속 메시지를 보내 이전 문맥을 바탕으로 다시 시작할 수 있습니다.
+1. Telegram 그룹에서 `/new`를 보냅니다.
+2. 프로젝트를 선택합니다.
+3. Claude 모델을 선택합니다.
+4. thinking 수준을 선택합니다.
+5. 하고 싶은 일을 문장으로 보냅니다.
+6. 봇이 새 Topic을 만들고 그 안에서 작업을 진행합니다.
+7. 이후 같은 작업의 후속 요청은 그 Topic 안에서 보냅니다.
 
-## 개발자용 정보
+예를 들어 이렇게 사용할 수 있습니다.
 
-자주 쓰는 명령:
+```text
+/new notes
+```
+
+```text
+이번 주 회의 메모를 읽고 해야 할 일을 정리해줘.
+```
+
+## 전체 명령어 설명
+
+## `/new`
+
+새 Claude 작업을 시작합니다.
+
+```text
+/new
+```
+
+프로젝트 이름이나 별명을 바로 붙일 수도 있습니다.
+
+```text
+/new my-notes
+```
+
+## `/status`
+
+봇이 살아 있는지, 현재 실행 중인 작업이 있는지 확인합니다.
+
+```text
+/status
+```
+
+작업 Topic 안에서 쓰면 그 작업의 상태를 보여 줍니다. 그룹 일반 채팅에서 쓰면 전체 상태를 보여 줍니다.
+
+## `/doctor`
+
+설정이 제대로 되었는지 점검합니다. Telegram 연결, Claude 토큰, 프로젝트 경로, 저장소 상태, LaunchAgent 상태 등을 확인합니다.
+
+```text
+/doctor
+```
+
+## `/plan`
+
+큰 작업을 더 안전하게 진행합니다. Claude가 먼저 계획을 만들고, 사용자가 승인하면 Codex가 구현하고, 다시 Claude가 검토합니다.
+
+```text
+/plan 로그인 화면 문구를 더 친절하게 바꾸고 관련 테스트도 확인해줘.
+```
+
+이 명령은 기존 작업 Topic 안에서 사용합니다.
+
+## `/addp`
+
+새 프로젝트 폴더를 등록합니다.
+
+```text
+/addp /Users/your-name/Projects/new-project
+```
+
+경로를 빼고 보내면 봇이 “추가할 프로젝트의 절대경로를 입력하세요”라고 물어봅니다.
+
+## `/deltp`
+
+등록된 프로젝트를 목록에서 제거합니다. 실제 폴더와 파일은 지우지 않습니다.
+
+```text
+/deltp my-website
+```
+
+## `/sessions`
+
+최근 작업 목록을 보여 줍니다.
+
+```text
+/sessions
+```
+
+## `/usage`
+
+Claude 구독 한도 사용량을 확인합니다. 여러 Claude 토큰을 등록했다면 토큰별 상태도 보여 줍니다.
+
+```text
+/usage
+```
+
+## `/projects`
+
+등록된 프로젝트 목록을 보여 줍니다.
+
+```text
+/projects
+```
+
+## `/steer`
+
+현재 실행 중인 작업에 즉시 방향 수정 지시를 보냅니다.
+
+```text
+/steer 방금 말한 방향 말고, 기존 디자인을 최대한 유지해줘.
+```
+
+실행 중인 작업 Topic 안에서 사용합니다.
+
+## `/next`
+
+현재 작업이 끝난 뒤 이어서 할 일을 예약합니다.
+
+```text
+/next 끝나면 변경된 내용을 짧게 요약해줘.
+```
+
+작업이 이미 끝난 상태라면 바로 후속 작업을 시작합니다.
+
+## `/stop`
+
+현재 실행 중인 작업을 중단합니다.
+
+```text
+/stop
+```
+
+## `/fork`
+
+현재 대화 내용을 바탕으로 새 방향의 작업을 시작합니다. 기존 작업은 그대로 두고, 새 가지를 만드는 느낌입니다.
+
+```text
+/fork
+```
+
+명령 후 봇이 새 분기에서 실행할 지시를 물어봅니다.
+
+## `/compact`
+
+긴 대화 내용을 압축해서 이어가기 쉽게 만듭니다. 대화가 너무 길어졌을 때 사용합니다.
+
+```text
+/compact 핵심 결정과 남은 할 일 중심으로 압축해줘.
+```
+
+## `/memory`
+
+앞으로도 계속 기억하면 좋은 사용자 선호나 프로젝트 지식을 Claude 메모리에 저장합니다.
+
+```text
+/memory 이 프로젝트에서는 한국어 답변과 작은 변경 단위를 선호한다는 점을 기억해줘.
+```
+
+## `/mode`
+
+Claude가 파일 수정이나 명령 실행 전에 얼마나 자주 물어볼지 정합니다.
+
+```text
+/mode auto
+```
+
+값을 빼고 보내면 현재 모드와 선택 가능한 모드를 보여 줍니다.
+
+```text
+/mode
+```
+
+## `/model`
+
+현재 작업 Topic에서 다음 실행에 사용할 Claude 모델을 바꿉니다.
+
+```text
+/model
+```
+
+버튼으로 모델을 고를 수 있습니다. 직접 입력하려면 모델 별명을 사용할 수도 있습니다.
+
+```text
+/model sonnet
+```
+
+## `/thinking`
+
+Claude가 답을 내기 전에 얼마나 깊게 생각할지 정합니다.
+
+```text
+/thinking high
+```
+
+값을 빼고 보내면 버튼으로 선택할 수 있습니다.
+
+```text
+/thinking
+```
+
+## `/lean`
+
+최소 구현 원칙을 켜거나 끕니다. 켜면 Claude가 불필요한 구조나 새 도구를 덜 만들고, 필요한 만큼만 바꾸려 합니다.
+
+```text
+/lean on
+```
+
+```text
+/lean off
+```
+
+## `/diff`
+
+현재 프로젝트에서 변경된 파일 요약을 보여 줍니다. Git을 사용하는 프로젝트에서 유용합니다.
+
+```text
+/diff
+```
+
+## `/delete`
+
+현재 작업 Topic과 로컬 세션 기록, Claude 대화 원본을 삭제합니다. 되돌릴 수 없으므로 확인 버튼이 한 번 더 나옵니다.
+
+```text
+/delete
+```
+
+## `/upload`
+
+Mac에 있는 파일을 Telegram으로 보냅니다. 작업 결과 PDF나 이미지 파일을 받을 때 유용합니다.
+
+```text
+/upload output/result.pdf
+```
+
+상대경로를 쓰면 현재 프로젝트 폴더 안에서 찾습니다. 전체 경로를 써도 됩니다.
+
+## 파일 보내기
+
+Telegram Topic 안에 사진, 문서, 음성, 동영상, GIF, 스티커 등을 보내면 봇이 Mac에 저장하고 Claude에게 파일 위치를 알려 줍니다.
+
+1. 새 작업을 시작하려면 `/new`로 프로젝트를 먼저 선택합니다.
+2. “실행할 작업을 입력하세요” 상태에서 파일을 보낼 수 있습니다.
+3. 이미 만들어진 작업 Topic 안에서도 파일을 보낼 수 있습니다.
+4. 파일과 함께 캡션을 쓰면 그 설명도 Claude에게 같이 전달됩니다.
+
+## 모드 설명
+
+## `default`
+
+가장 기본적인 모드입니다. Claude가 위험할 수 있는 일은 더 자주 물어봅니다. 처음 써 보거나 중요한 폴더에서 작업할 때 적합합니다.
+
+## `acceptEdits`
+
+파일 수정은 비교적 자연스럽게 허용하고, 더 위험한 명령은 확인을 요구하는 모드입니다. 문서 수정이나 작은 코드 수정에 편합니다.
+
+## `plan`
+
+Claude가 먼저 계획을 세우고 조심스럽게 진행하는 모드입니다. 큰 작업을 바로 실행하지 않고 생각을 먼저 보고 싶을 때 좋습니다.
+
+## `dontAsk`
+
+가능한 한 묻지 않고 진행하는 모드입니다. 매우 편하지만 위험할 수 있습니다. 신뢰하는 프로젝트에서만 사용하세요.
+
+## `auto`
+
+상황에 맞게 자동으로 판단하는 모드입니다. 이 프로젝트의 기본 추천값입니다.
+
+## Thinking 수준 설명
+
+Thinking은 Claude가 답을 내기 전에 생각에 쓰는 강도입니다. 높을수록 복잡한 문제에 유리할 수 있지만, 더 오래 걸리고 사용량도 더 빨리 쓸 수 있습니다.
+
+## `adaptive`
+
+자동 모드입니다. Claude가 작업 난이도에 맞춰 생각의 깊이를 조절합니다. 대부분의 경우 추천합니다.
+
+## `off`
+
+추가 thinking을 끕니다. 간단한 질문, 짧은 문서 수정, 빠른 확인에 적합합니다.
+
+## `low`
+
+낮은 수준입니다. 간단하지만 약간의 판단이 필요한 작업에 좋습니다.
+
+## `medium`
+
+보통 수준입니다. 일반적인 수정, 요약, 확인 작업에 무난합니다.
+
+## `high`
+
+높은 수준입니다. 복잡한 코드 수정, 설계 판단, 오류 추적에 좋습니다.
+
+## `xhigh`
+
+매우 높은 수준입니다. 어려운 문제를 더 깊게 보게 하고 싶을 때 사용합니다.
+
+## `max`
+
+최대 수준입니다. 가장 복잡한 작업에만 사용하세요. 시간이 오래 걸리고 사용량을 많이 쓸 수 있습니다.
+
+## Mac에서 백그라운드 서비스로 실행하기
+
+터미널 창을 계속 열어 두지 않고 봇을 켜 두려면 macOS의 LaunchAgent를 사용합니다. LaunchAgent는 “Mac 로그인 후 자동으로 앱을 실행해 주는 기능”입니다.
+
+1. 프로젝트 폴더로 이동합니다.
 
 ```bash
-npm test
-npm run typecheck
+cd ~/telegram-clause-SDK-public
+```
+
+2. 프로그램을 빌드합니다.
+
+```bash
 npm run build
 ```
 
-주요 파일:
+3. LaunchAgent를 설치합니다.
 
-| 파일 | 역할 |
-| --- | --- |
-| `src/index.ts` | 프로그램 시작점입니다. 설정을 읽고 봇과 세션 매니저를 연결합니다. |
-| `src/bot.ts` | Telegram 명령, 버튼, 파일 수신, 사용자 입력 흐름을 처리합니다. |
-| `src/session-manager.ts` | Claude/Codex 실행, 큐, 중단, 진행 상태, `/plan` 흐름을 관리합니다. |
-| `src/model-catalog.ts` | Claude/Codex 모델 카탈로그를 동적으로 읽고 fallback 목록을 제공합니다. |
-| `src/config.ts` | `.env`와 `projects.json`을 읽고 검증합니다. |
-| `src/store.ts` | SQLite에 세션, 승인, 프로젝트, `/plan` 증거를 저장합니다. |
-| `src/usage.ts` | Claude 사용량 스냅샷을 읽기 쉬운 문구로 바꿉니다. |
-| `src/token-pool.ts` | 여러 Claude OAuth 토큰 중 사용 가능한 토큰을 선택합니다. |
-| `src/doctor.ts` | 실행 환경 진단 리포트를 만듭니다. |
-| `scripts/setup-oauth-token.sh` | Claude OAuth 토큰을 `.env`에 안전하게 저장합니다. |
-| `scripts/install-launch-agent.mjs` | macOS LaunchAgent를 설치합니다. |
-| `scripts/restart-launch-agent.mjs` | LaunchAgent 등록을 유지한 채 프로세스를 재시작합니다. |
+```bash
+npm run launchd:install
+```
 
-테스트는 `tests/` 아래에 있습니다. 기능을 바꿀 때는 관련 테스트를 함께 갱신하고, 최소한 `npm test`, `npm run typecheck`, `npm run build`를 통과시켜야 합니다.
+4. Telegram 그룹에서 상태를 확인합니다.
 
-## 현재 제한
+```text
+/status
+```
 
-- macOS 자동 실행 방식만 제공합니다.
-- 단일 Telegram 슈퍼그룹과 단일 허용 사용자만 지원합니다.
-- Telegram 앱에서 사용자가 직접 삭제한 토픽은 Bot API 삭제 이벤트를 주지 않습니다. 로컬 세션까지 지우려면 토픽 안에서 `/delete`를 사용하세요.
-- 승인 대기 중 프로세스가 재시작되면 해당 SDK 호출은 복원하지 않습니다.
-- 같은 프로젝트의 작업은 읽기 전용 작업도 포함해 한 번에 하나씩 실행합니다.
-- 실제 Telegram 연결 검증에는 유효한 봇 토큰, user ID, forum supergroup ID가 필요합니다.
-- `setup-token` OAuth는 Agent SDK 추론용입니다. Claude Remote Control 세션 용도가 아닙니다.
-- Claude와 Codex 사용 가능 범위, 모델 이름, 구독 한도 정책은 각 제공사의 정책 변경에 따라 달라질 수 있습니다.
+5. 설정을 바꾼 뒤 다시 시작하려면 아래 명령을 사용합니다.
 
-## 라이선스
+```bash
+npm run launchd:restart
+```
 
-[MIT License](LICENSE)
+6. 실행 로그는 프로젝트 폴더의 `data/stdout.log`와 `data/stderr.log`에 저장됩니다.
+7. 문제가 생기면 Telegram에서 `/doctor`를 먼저 실행해 보세요.
+
+## 자주 묻는 질문
+
+## Claude 사용량 한도에 도달하면 어떻게 되나요?
+
+`.env`에 `CLAUDE_CODE_OAUTH_TOKEN_2`, `CLAUDE_CODE_OAUTH_TOKEN_3`을 등록해 두었다면 봇이 다음 사용 가능한 토큰으로 자동 전환합니다. 한도 회복 시간이 확인되면 그 시간까지 해당 토큰을 쉬게 합니다. 회복 시간을 알 수 없으면 기본적으로 약 1시간 동안 해당 토큰을 다시 쓰지 않습니다.
+
+모든 토큰이 한도에 도달하면 더 이상 자동 전환할 수 없습니다. 그때는 Claude 한도가 회복될 때까지 기다려야 합니다.
+
+## Overloaded 오류는 무엇인가요?
+
+Overloaded는 내 설정 문제가 아니라 Claude 서버가 일시적으로 바쁠 때 나는 오류입니다. 이 봇은 Overloaded, 529, 503, 502 같은 일시적 서버 오류를 만나면 잠시 기다렸다가 자동으로 다시 시도합니다. 최대 5번까지 재시도합니다.
+
+## 여러 프로젝트를 등록할 수 있나요?
+
+네. `projects.json`에 여러 폴더를 등록할 수 있습니다. Telegram에서 `/projects`로 목록을 볼 수 있고, `/new 프로젝트이름`으로 원하는 프로젝트에서 새 작업을 시작할 수 있습니다.
+
+## Mac이 꺼져도 봇이 작동하나요?
+
+아니요. 이 봇은 내 Mac에서 실행됩니다. Mac이 꺼져 있거나 인터넷이 끊기거나 잠자기 상태가 되면 Telegram 메시지를 처리할 수 없습니다.
+
+## Telegram 그룹에 다른 사람이 들어오면 어떻게 되나요?
+
+`.env`의 `TELEGRAM_ALLOWED_USER_ID`에 적힌 사람의 메시지만 처리합니다. 그래도 보안을 위해 이 그룹은 비공개로 유지하고, 봇 토큰과 Claude 토큰은 공유하지 마세요.
+
+## Claude가 내 파일을 마음대로 지우나요?
+
+모드에 따라 다릅니다. `default`, `acceptEdits`, `auto`에서는 위험한 작업에 대해 승인 버튼이 나올 수 있습니다. `dontAsk`는 묻지 않고 진행할 수 있으므로 조심해서 사용하세요.
+
+## `/plan`은 꼭 써야 하나요?
+
+아니요. 일반 작업은 `/new`로 충분합니다. `/plan`은 큰 변경, 중요한 코드 수정, 여러 단계 검증이 필요한 작업에 적합합니다.
+
+## Obsidian 노트도 작업할 수 있나요?
+
+네. Obsidian vault 폴더를 `projects.json`의 `cwd`에 등록하면 됩니다. 이 프로젝트에서 “제 2의 뇌”와 관련된 프롬프트는 Obsidian을 의미합니다.
+
+## 문제 해결
+
+## `/status`에 답이 없어요
+
+1. Mac이 켜져 있는지 확인합니다.
+2. 터미널에서 봇을 실행 중인지 확인합니다.
+3. Telegram 그룹 ID가 `.env`의 `TELEGRAM_CHAT_ID`와 같은지 확인합니다.
+4. 내 user ID가 `.env`의 `TELEGRAM_ALLOWED_USER_ID`와 같은지 확인합니다.
+5. BotFather 토큰이 `.env`의 `TELEGRAM_BOT_TOKEN`에 정확히 들어갔는지 확인합니다.
+6. 봇이 그룹에서 관리자인지 확인합니다.
+
+## “.env permissions must be 0600” 오류가 나요
+
+`.env` 파일 권한이 너무 열려 있다는 뜻입니다. 아래 명령을 실행하세요.
+
+```bash
+chmod 600 .env
+```
+
+## “프로젝트 경로를 읽을 수 없음” 오류가 나요
+
+1. `projects.json`의 `cwd`가 실제로 존재하는 폴더인지 확인합니다.
+2. 경로가 `/Users/...`로 시작하는 전체 경로인지 확인합니다.
+3. 폴더 이름에 오타가 없는지 확인합니다.
+4. 외장 드라이브에 있는 폴더라면 드라이브가 연결되어 있는지 확인합니다.
+
+## “Telegram이 파일 경로를 제공하지 않습니다” 오류가 나요
+
+Telegram Bot API가 너무 큰 파일의 경로를 제공하지 못할 때 생길 수 있습니다. 더 작은 파일로 다시 보내거나, 파일을 Mac에 직접 넣고 Claude에게 경로를 알려 주세요.
+
+## Claude 토큰 형식 오류가 나요
+
+토큰은 `sk-ant-oat01-`로 시작해야 합니다. `claude setup-token`을 다시 실행해서 새 토큰을 만든 뒤 `.env`에 넣으세요.
+
+```bash
+claude setup-token
+```
+
+## `npm start`가 실패해요
+
+1. 먼저 빌드를 했는지 확인합니다.
+
+```bash
+npm run build
+```
+
+2. 필요한 부품이 설치되었는지 확인합니다.
+
+```bash
+npm install
+```
+
+3. 다시 시작합니다.
+
+```bash
+npm start
+```
+
+## `/doctor`에서 Codex 인증 오류가 나요
+
+`/plan` 기능을 쓰려면 Codex CLI가 ChatGPT 구독으로 로그인되어 있어야 합니다. 터미널에서 Codex를 실행하고 ChatGPT로 로그인하세요.
+
+```bash
+codex
+```
+
+## LaunchAgent로 실행했는데 작동하지 않아요
+
+1. 프로젝트 폴더에서 다시 빌드합니다.
+
+```bash
+npm run build
+```
+
+2. LaunchAgent를 다시 시작합니다.
+
+```bash
+npm run launchd:restart
+```
+
+3. Telegram에서 진단을 실행합니다.
+
+```text
+/doctor
+```
+
+4. `data/stderr.log`에 최근 오류가 있는지 확인합니다.
+
+## 보안 주의사항
+
+1. `.env` 파일은 절대 공유하지 마세요.
+2. BotFather 토큰은 비밀번호처럼 다루세요.
+3. Claude OAuth 토큰도 비밀번호처럼 다루세요.
+4. Telegram 그룹은 비공개로 유지하세요.
+5. `dontAsk` 모드는 신뢰하는 프로젝트에서만 사용하세요.
+6. 중요한 폴더에서 큰 작업을 시키기 전에는 백업을 권장합니다.
+
+## 빠른 확인 목록
+
+1. Homebrew 설치 완료
+2. nvm 설치 완료
+3. Node.js 22 설치 완료
+4. 저장소 내려받기 완료
+5. `npm install` 완료
+6. Telegram 봇 생성 완료
+7. Telegram 그룹 생성 및 Topics 활성화 완료
+8. 봇을 그룹 관리자로 추가 완료
+9. user ID와 chat ID 확인 완료
+10. Claude 토큰 생성 완료
+11. `.env` 작성 완료
+12. `projects.json` 작성 완료
+13. `npm run build` 완료
+14. `npm start` 실행 완료
+15. Telegram에서 `/status` 확인 완료
