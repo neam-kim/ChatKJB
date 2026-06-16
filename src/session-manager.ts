@@ -70,6 +70,10 @@ const OVERLOAD_RETRY_CAP_MS = 60_000;
 // 모든 토큰이 한도에 도달했을 때, 가장 먼저 회복되는 시각 이후로 자동 재개를 미루는 여유분.
 // 한도 초기화 직후의 미세한 시계 오차로 또 거부당하는 것을 막는다.
 const LIMIT_RESUME_BUFFER_MS = 10_000;
+// /goal: 한 목표를 향해 자동으로 이어 도는 최대 턴 수(폭주·무한 반복 방지).
+export const MAX_GOAL_ROUNDS = 10;
+// 목표 충족 여부를 판정하는 빠르고 저렴한 모델. 매 턴 한 번만 읽기 전용으로 호출한다.
+const GOAL_EVAL_MODEL = "claude-haiku-4-5";
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
 export const CODEX_MODEL = DEFAULT_CODEX_MODEL;
 export const CODEX_REASONING_EFFORT = DEFAULT_CODEX_REASONING;
@@ -371,6 +375,29 @@ export function buildCompactCommand(focus?: string): string {
   return clean ? `/compact ${clean}` : "/compact";
 }
 
+/** /goal 자동 진행 턴에 전달할 작업 프롬프트. reason은 직전 평가에서 무엇이 남았는지. */
+export function buildGoalPrompt(condition: string, reason?: string): string {
+  const clean = condition.replace(/\s+/g, " ").trim();
+  const base = `[GOAL] 다음 목표가 완전히 충족될 때까지 작업을 진행하세요: ${clean}`;
+  const tail = reason
+    ? `\n직전 턴 평가에서 아직 충족되지 않았습니다: ${reason}\n남은 부분을 끝까지 완료하세요.`
+    : "";
+  return `${base}${tail}`;
+}
+
+/** /goal 충족 여부를 빠른 모델로 판정시키기 위한 읽기 전용 프롬프트. */
+export function buildGoalCheckPrompt(condition: string): string {
+  const clean = condition.replace(/\s+/g, " ").trim();
+  return [
+    "다음 목표가 현재 저장소 상태에서 이미 충족되었는지 읽기 전용으로만 확인해 판정하세요.",
+    "파일을 수정하지 말고, 필요한 파일·명령 결과를 확인한 뒤 마지막 줄에 정확히 아래 한 형식으로만 답하세요.",
+    "GOAL_MET: <한 줄 근거>",
+    "GOAL_UNMET: <무엇이 남았는지 한 줄>",
+    "",
+    `목표: ${clean}`
+  ].join("\n");
+}
+
 export function buildMemoryPrompt(focus?: string): string {
   const clean = focus?.replace(/\s+/g, " ").trim().slice(0, 1000);
   const scope = clean
@@ -594,6 +621,8 @@ export class SessionManager {
   private readonly deleting = new Set<string>();
   // 모든 토큰 한도 도달로 멈춘 세션을 회복 시각에 자동 재개하기 위해 거는 타이머.
   private readonly limitWaiters = new Map<string, NodeJS.Timeout>();
+  // /goal 자동 진행이 한 목표에서 돈 턴 수(MAX_GOAL_ROUNDS 상한 적용).
+  private readonly goalRounds = new Map<string, number>();
   private readonly tokenPool: TokenPool;
   private readonly oauthTokens: string[];
 
@@ -638,6 +667,7 @@ export class SessionManager {
       thinking: thinking ?? null,
       claudeEffort: claudeEffort ?? null,
       codexReasoning: null,
+      goalCondition: null,
       leanMode,
       usageSnapshot: null,
       createdAt: now,
@@ -672,7 +702,41 @@ export class SessionManager {
     return true;
   }
 
+  /**
+   * 목표를 설정한다. 유휴 상태이고 이어 갈 Claude 세션이 있으면 즉시 목표를 향한 턴을
+   * 시작한다("queued"). 실행 중이면 현재 턴이 끝날 때 평가한다("active"). 이어 갈 세션이
+   * 아직 없으면 저장만 한다("stored").
+   */
+  setGoal(sessionId: string, condition: string): "queued" | "active" | "stored" {
+    const session = this.store.getSession(sessionId);
+    if (!session) return "stored";
+    const clean = condition.replace(/\s+/g, " ").trim();
+    this.store.updateSession(sessionId, { goalCondition: clean });
+    this.goalRounds.set(sessionId, 0);
+    if (this.active.has(sessionId)) return "active";
+    if (!session.sdkSessionId) return "stored";
+    this.store.updateSession(sessionId, { status: "queued" });
+    this.enqueue({
+      session: this.store.getSession(sessionId) ?? session,
+      prompt: buildGoalPrompt(clean),
+      resumeSessionId: session.sdkSessionId
+    });
+    return "queued";
+  }
+
+  /** 목표 자동 진행을 끈다. 끌 목표가 있었으면 true. */
+  clearGoal(sessionId: string): boolean {
+    const had = !!this.store.getSession(sessionId)?.goalCondition;
+    this.goalRounds.delete(sessionId);
+    if (this.store.getSession(sessionId)) {
+      this.store.updateSession(sessionId, { goalCondition: null });
+    }
+    return had;
+  }
+
   stop(sessionId: string): boolean {
+    // /stop은 진행 중인 목표 자동 진행도 함께 멈춘다.
+    this.clearGoal(sessionId);
     // 한도 회복을 기다리며 예약된 자동 재개가 있으면 그것도 중단으로 친다.
     if (this.cancelLimitWaiter(sessionId)) {
       if (this.store.getSession(sessionId)?.status === "waiting_limit") {
@@ -1258,6 +1322,10 @@ export class SessionManager {
         session,
         `${finalStatus === "done" ? "[DONE]" : "[ERROR]"} ${session.title}`
       );
+      // 턴이 정상 완료됐으면 활성 목표 충족 여부를 평가하고, 미충족이면 다음 턴을 자동 예약한다.
+      if (finalStatus === "done") {
+        await this.maybeContinueGoal(session, request, sdkSessionId);
+      }
     } catch (error) {
       if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
       if (idleTimedOut) {
@@ -1717,16 +1785,120 @@ export class SessionManager {
     }
   }
 
+  /**
+   * 한 턴이 정상 종료된 직후 호출한다. 활성 목표가 있으면 빠른 모델로 충족 여부를 판정하고,
+   * 미충족이면(상한 안에서) 같은 목표를 향한 다음 턴을 자동으로 큐에 넣는다. 이 후속 턴도
+   * 일반 execute 경로를 타므로 토큰 자동 전환·waiting_limit 대기가 그대로 적용된다.
+   */
+  private async maybeContinueGoal(
+    session: SessionRecord,
+    request: RunRequest,
+    sdkSessionId: string | null
+  ): Promise<void> {
+    const condition = this.store.getSession(session.id)?.goalCondition;
+    if (!condition || this.deleting.has(session.id)) return;
+
+    let verdict: { met: boolean; reason: string };
+    try {
+      verdict = await this.evaluateGoal(session, condition);
+    } catch (error) {
+      await this.transport.sendText(
+        session.chatId,
+        session.topicId,
+        `목표 달성 여부를 평가하지 못해 자동 진행을 멈췄습니다: ${safeErrorMessage(error)}\n`
+        + "새 지시를 보내면 다시 평가하고, /goal clear 로 목표를 해제할 수 있습니다."
+      ).catch(() => undefined);
+      return;
+    }
+
+    if (verdict.met) {
+      this.goalRounds.delete(session.id);
+      this.store.updateSession(session.id, { goalCondition: null });
+      await this.transport.sendText(
+        session.chatId,
+        session.topicId,
+        `목표를 달성했습니다 ✅\n조건: ${condition}\n근거: ${verdict.reason}`
+      ).catch(() => undefined);
+      return;
+    }
+
+    const rounds = this.goalRounds.get(session.id) ?? 0;
+    if (rounds + 1 >= MAX_GOAL_ROUNDS) {
+      this.goalRounds.delete(session.id);
+      this.store.updateSession(session.id, { goalCondition: null });
+      await this.transport.sendText(
+        session.chatId,
+        session.topicId,
+        `목표 자동 진행을 ${MAX_GOAL_ROUNDS}턴 후 중단합니다(아직 미달성).\n조건: ${condition}\n`
+        + `마지막 평가: ${verdict.reason}\n계속하려면 새 지시를 보내거나 /goal 로 다시 설정하세요.`
+      ).catch(() => undefined);
+      return;
+    }
+
+    this.goalRounds.set(session.id, rounds + 1);
+    await this.transport.sendText(
+      session.chatId,
+      session.topicId,
+      `목표 미달성 → 자동으로 다음 턴을 진행합니다 (${rounds + 1}/${MAX_GOAL_ROUNDS}).\n남은 점: ${verdict.reason}`
+    ).catch(() => undefined);
+    const resumeId = sdkSessionId ?? request.resumeSessionId;
+    this.store.updateSession(session.id, { status: "queued" });
+    this.enqueue({
+      session: this.store.getSession(session.id) ?? session,
+      prompt: buildGoalPrompt(condition, verdict.reason),
+      ...(resumeId ? { resumeSessionId: resumeId } : {})
+    });
+  }
+
+  /** 목표 충족 여부를 빠른 모델(Haiku)로 읽기 전용 판정한다. 살아있는 토큰을 새로 고른다. */
+  private async evaluateGoal(
+    session: SessionRecord,
+    condition: string
+  ): Promise<{ met: boolean; reason: string }> {
+    const controller = new AbortController();
+    const run: ActiveRun = {
+      controller,
+      input: new MessageQueue(),
+      pendingTurns: 1,
+      startedAt: Date.now(),
+      codexTimers: new Map(),
+      codexStarts: new Map(),
+      mcpFailures: new Map()
+    };
+    const text = await this.runReadOnlyClaude(
+      session,
+      controller,
+      run,
+      buildGoalCheckPrompt(condition),
+      this.tokenPool.select(),
+      false,
+      GOAL_EVAL_MODEL
+    );
+    const line = text
+      .split("\n")
+      .map((part) => part.trim())
+      .reverse()
+      .find((part) => /^GOAL_(MET|UNMET)/i.test(part)) ?? text.trim();
+    if (/^GOAL_MET/i.test(line)) {
+      return { met: true, reason: line.replace(/^GOAL_MET:?\s*/i, "").trim() || "조건 충족" };
+    }
+    return {
+      met: false,
+      reason: line.replace(/^GOAL_UNMET:?\s*/i, "").trim() || text.trim().slice(0, 200)
+    };
+  }
+
   private async runReadOnlyClaude(
     session: SessionRecord,
     controller: AbortController,
     run: ActiveRun,
     prompt: string,
     oauthToken: string,
-    allowQuestions = false
+    allowQuestions = false,
+    modelOverride?: string
   ): Promise<string> {
     const instructions = loadProjectInstructions(session.cwd);
-    const claudeModel = session.model ?? DEFAULT_CLAUDE_MODEL;
+    const claudeModel = modelOverride ?? session.model ?? DEFAULT_CLAUDE_MODEL;
     const thinking = normalizeThinkingForModel(
       this.options.modelCatalog,
       claudeModel,

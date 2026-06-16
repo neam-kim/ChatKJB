@@ -25,6 +25,7 @@ function session(status: SessionRecord["status"]): SessionRecord {
     thinking: null,
     claudeEffort: null,
     codexReasoning: null,
+    goalCondition: null,
     leanMode: true,
     usageSnapshot: null,
     createdAt: 0,
@@ -163,6 +164,16 @@ function leanCommand(text: string, updateId = 1) {
   };
 }
 
+function goalCommand(text: string, updateId = 1) {
+  return {
+    ...modelCommand(text, updateId),
+    message: {
+      ...modelCommand(text, updateId).message,
+      entities: [{ type: "bot_command" as const, offset: 0, length: 5 }]
+    }
+  };
+}
+
 function usageCommand(updateId = 1) {
   return {
     ...modelCommand("/usage", updateId),
@@ -267,7 +278,12 @@ describe("/thinking command", () => {
 
 describe("/new wizard", () => {
   it("carries the chosen Claude 작업량(power) into the created session", async () => {
-    const { bot, store } = botSetup();
+    const { bot, store, sessions } = botSetup();
+    // 세션 생성은 즉시 백그라운드 실행을 큐에 넣는다. 테스트에서는 실제 Claude 실행이
+    // afterEach의 store.close() 뒤에 비동기로 거부되며 unhandled rejection을 내므로,
+    // 실행만 무력화하고 생성·저장 결과(claudeEffort 등)만 검증한다.
+    vi.spyOn(sessions as unknown as { execute: () => Promise<void> }, "execute")
+      .mockResolvedValue();
 
     await bot.handleUpdate(newCommand());
     await bot.handleUpdate(callbackUpdate("newp:0", 2));
@@ -295,6 +311,39 @@ describe("/new wizard", () => {
     const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
     expect(reply?.text).toContain("작업량(power)을 선택하세요");
     expect(reply?.reply_markup).toBeDefined();
+  });
+});
+
+describe("/goal command", () => {
+  it("reports no active goal without an argument", async () => {
+    const { bot, calls } = botSetup();
+
+    await bot.handleUpdate(goalCommand("/goal"));
+
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
+      .toContain("설정된 목표가 없습니다");
+  });
+
+  it("clears an existing goal", async () => {
+    const { bot, store, calls } = botSetup();
+    store.updateSession("session", { goalCondition: "모든 테스트 통과" });
+
+    await bot.handleUpdate(goalCommand("/goal clear"));
+
+    expect(store.getSession("session")?.goalCondition).toBeNull();
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
+      .toContain("목표를 해제했습니다");
+  });
+
+  it("wires a new goal condition into the session manager", async () => {
+    const { bot, sessions, calls } = botSetup();
+    const setGoal = vi.spyOn(sessions, "setGoal").mockReturnValue("active");
+
+    await bot.handleUpdate(goalCommand("/goal 모든 테스트가 통과한다"));
+
+    expect(setGoal).toHaveBeenCalledWith("session", "모든 테스트가 통과한다");
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
+      .toContain("끝나면 달성 여부를 평가");
   });
 });
 

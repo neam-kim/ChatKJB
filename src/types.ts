@@ -122,6 +122,9 @@ export interface SessionRecord {
   thinking: string | null;
   claudeEffort: string | null;
   codexReasoning: string | null;
+  // 활성 목표 조건. 설정되면 한 턴이 끝날 때마다 충족 여부를 평가하고, 미충족이면
+  // 자동으로 다음 턴을 이어 간다(/goal). null이면 목표 자동 진행 없음.
+  goalCondition: string | null;
   leanMode: boolean;
   usageSnapshot: UsageSnapshot | null;
   createdAt: number;

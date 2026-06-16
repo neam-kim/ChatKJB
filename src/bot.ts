@@ -29,6 +29,7 @@ import { PermissionBroker } from "./permission-broker.js";
 import {
   buildMemoryPrompt,
   CODEX_MODEL,
+  MAX_GOAL_ROUNDS,
   SessionManager
 } from "./session-manager.js";
 import { StateStore } from "./store.js";
@@ -116,6 +117,7 @@ export function formatSessionStatus(
     `Claude 작업량: ${claudeEffortLabel(session.claudeEffort ?? DEFAULT_CLAUDE_EFFORT)}`,
     `lean: ${session.leanMode ? "on" : "off"}`,
     `Codex: ${codexModelLabel(catalog, CODEX_MODEL)} · reasoning ${codexReasoningLabel(session.codexReasoning ?? DEFAULT_CODEX_REASONING)}`,
+    ...(session.goalCondition ? [`목표(자동 진행): ${session.goalCondition}`] : []),
     `마지막 상태 변경: ${formatTimestamp(session.updatedAt)}`
   ].join("\n");
 }
@@ -396,7 +398,7 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /power, /effort, /lean, /diff, /upload, /delete 사용"
+      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /power, /effort, /lean, /diff, /upload, /delete 사용"
     );
   });
 
@@ -903,6 +905,45 @@ export function createBot(config: AppConfig, store: StateStore) {
         ? "다음 실행부터 최소 구현 원칙을 적용합니다."
         : "다음 실행부터 최소 구현 원칙을 적용하지 않습니다."
     );
+  });
+
+  bot.command("goal", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const arg = ctx.match.trim();
+    if (!arg) {
+      await ctx.reply(
+        session.goalCondition
+          ? `현재 목표: ${session.goalCondition}\n해제하려면 /goal clear`
+          : "설정된 목표가 없습니다.\n예: /goal 모든 테스트가 통과하고 lint가 깨끗하다\n조건이 충족될 때까지 자동으로 턴을 이어 갑니다."
+      );
+      return;
+    }
+    if (arg.toLowerCase() === "clear") {
+      const had = sessions.clearGoal(session.id);
+      await ctx.reply(had ? "목표를 해제했습니다. 자동 진행을 멈춥니다." : "해제할 목표가 없습니다.");
+      return;
+    }
+    const result = sessions.setGoal(session.id, arg);
+    if (result === "queued") {
+      await ctx.reply(
+        `목표를 설정하고 작업을 시작합니다.\n조건: ${arg}\n`
+        + `충족될 때까지 자동으로 턴을 이어 가며 최대 ${MAX_GOAL_ROUNDS}턴까지 진행합니다. `
+        + "매 턴이 끝나면 Haiku로 달성 여부를 평가합니다. /goal clear 또는 /stop 으로 중단."
+      );
+    } else if (result === "active") {
+      await ctx.reply(
+        `목표를 설정했습니다. 현재 실행 중인 작업이 끝나면 달성 여부를 평가하고 미달성이면 자동으로 이어 갑니다.\n조건: ${arg}`
+      );
+    } else {
+      await ctx.reply(
+        `목표를 저장했습니다. 이 토픽에서 작업을 한 번 실행(메시지 전송)하면 그 이후부터 목표를 향해 자동 진행합니다.\n조건: ${arg}`
+      );
+    }
   });
 
   bot.command("diff", async (ctx) => {

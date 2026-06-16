@@ -73,6 +73,7 @@ function setup() {
     thinking: null,
     claudeEffort: null,
     codexReasoning: null,
+    goalCondition: null,
     leanMode: true,
     usageSnapshot: null,
     createdAt: now,

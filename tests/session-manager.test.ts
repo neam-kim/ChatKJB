@@ -8,10 +8,13 @@ import {
   buildClaudeEnvironment,
   buildCodexEnvironment,
   buildCompactCommand,
+  buildGoalCheckPrompt,
+  buildGoalPrompt,
   buildLeanInstructions,
   buildMemoryPrompt,
   buildUserMessage,
   CLAUDE_MODEL,
+  MAX_GOAL_ROUNDS,
   CLAUDE_THINKING,
   CODEX_MODEL,
   CODEX_REASONING_EFFORT,
@@ -282,6 +285,87 @@ describe("project instructions", () => {
   });
 });
 
+describe("goal prompts", () => {
+  it("builds a goal turn prompt and folds in the prior unmet reason", () => {
+    expect(buildGoalPrompt("모든 테스트가 통과한다")).toContain(
+      "[GOAL] 다음 목표가 완전히 충족될 때까지"
+    );
+    expect(buildGoalPrompt("모든 테스트가 통과한다")).toContain("모든 테스트가 통과한다");
+    const withReason = buildGoalPrompt("모든 테스트가 통과한다", "auth 테스트 2건 실패");
+    expect(withReason).toContain("아직 충족되지 않았습니다: auth 테스트 2건 실패");
+  });
+
+  it("builds a read-only check prompt that forces the GOAL_MET/GOAL_UNMET format", () => {
+    const prompt = buildGoalCheckPrompt("lint가 깨끗하다");
+    expect(prompt).toContain("읽기 전용");
+    expect(prompt).toContain("GOAL_MET:");
+    expect(prompt).toContain("GOAL_UNMET:");
+    expect(prompt).toContain("lint가 깨끗하다");
+  });
+
+  it("caps automatic goal rounds to prevent runaway loops", () => {
+    expect(MAX_GOAL_ROUNDS).toBeGreaterThan(0);
+    expect(MAX_GOAL_ROUNDS).toBeLessThanOrEqual(20);
+  });
+});
+
+describe("goal state", () => {
+  it("stores a goal without launching a run when there is no resumable session", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-goal-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const now = Date.now();
+    const session: SessionRecord = {
+      id: "goal-session",
+      sdkSessionId: null,
+      chatId: -1001,
+      topicId: 42,
+      projectName: "test",
+      cwd: directory,
+      title: "goal session",
+      status: "done",
+      permissionMode: "default",
+      model: null,
+      thinking: null,
+      claudeEffort: null,
+      codexReasoning: null,
+      goalCondition: null,
+      leanMode: true,
+      usageSnapshot: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    store.createSession(session);
+    const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const manager = new SessionManager(store, fakeTransport, permissions, {
+      debounceMs: 1,
+      claudeCodeOauthToken: "test-token",
+      mcpToolTimeoutMs: 1000,
+      mcpMaxAttempts: 1,
+      codexMcpTimeoutMs: 1000,
+      codexMcpHeartbeatMs: 1000,
+      longRunningMcpServers: new Set(["codex"]),
+      turnIdleTimeoutMs: 600_000,
+      claudeMemoryDir: join(directory, ".claude", "memory"),
+      modelCatalog: FALLBACK_MODEL_CATALOG
+    });
+
+    try {
+      // sdkSessionId가 없으므로 resume할 수 없어 실행을 시작하지 않고 저장만 한다.
+      expect(manager.setGoal(session.id, "  모든 테스트   통과  ")).toBe("stored");
+      expect(store.getSession(session.id)?.goalCondition).toBe("모든 테스트 통과");
+      expect(store.getSession(session.id)?.status).toBe("done");
+
+      expect(manager.clearGoal(session.id)).toBe(true);
+      expect(store.getSession(session.id)?.goalCondition).toBeNull();
+      expect(manager.clearGoal(session.id)).toBe(false);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("session deletion", () => {
   it("removes the orchestrator record and the local Claude transcript", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-claude-delete-"));
@@ -302,6 +386,7 @@ describe("session deletion", () => {
       thinking: null,
       claudeEffort: null,
       codexReasoning: null,
+      goalCondition: null,
       leanMode: true,
       usageSnapshot: null,
       createdAt: now,

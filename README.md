@@ -40,7 +40,7 @@ Telegram Forum Topic 하나를 Claude Agent SDK 세션 하나에 연결하는 Ma
 | 하고 싶은 것 | 명령어 |
 | --- | --- |
 | 새 작업 시작 / 이어 말하기 | `/new`, (작업이 끝난 뒤 그냥 메시지를 보내면 같은 대화 계속) |
-| 진행 중 작업 다루기 | `/steer`(방향 바꾸기), `/next`(끝난 뒤 할 일 예약), `/stop`(중단), `/fork`(현재 대화 복제) |
+| 진행 중 작업 다루기 | `/steer`(방향 바꾸기), `/next`(끝난 뒤 할 일 예약), `/goal`(조건 충족까지 자동 반복), `/stop`(중단), `/fork`(현재 대화 복제) |
 | 상태·사용량 확인 | `/status`(작업 상태), `/usage`(남은 한도), `/sessions`(최근 작업들), `/projects`(등록 폴더), `/diff`(바뀐 코드 요약) |
 | AI 똑똑함·성향 조절 | `/model`(두뇌 종류), `/thinking`(깊이 사고 on/off), `/power`(클로드 작업량), `/effort`(코덱스 작업량), `/lean`(최소 구현), `/mode`(승인 엄격도) |
 | 큰 작업·정리 | `/plan`(계획→구현→검토 자동 파이프라인), `/compact`(대화 요약 압축), `/memory`(배운 점을 장기 기억에 저장) |
@@ -52,7 +52,7 @@ Telegram Forum Topic 하나를 Claude Agent SDK 세션 하나에 연결하는 Ma
 
 - `/new` 프로젝트 → 모델 → thinking → 작업량(power)을 차례로 고른 뒤 새 토픽과 Claude 세션 생성
 - 토픽의 일반 메시지를 기존 Claude 세션으로 `resume`
-- `/addp`, `/deltp`, `/steer`, `/next`, `/fork`, `/stop`, `/compact`, `/memory`, `/mode`, `/model`, `/thinking`, `/power`, `/effort`, `/lean`, `/status`, `/sessions`, `/usage`, `/projects`, `/diff`, `/delete`
+- `/addp`, `/deltp`, `/steer`, `/next`, `/goal`, `/fork`, `/stop`, `/compact`, `/memory`, `/mode`, `/model`, `/thinking`, `/power`, `/effort`, `/lean`, `/status`, `/sessions`, `/usage`, `/projects`, `/diff`, `/delete`
 - 실행 중 메시지 스티어링과 현재 작업 뒤 후속 작업 예약
 - 일반 MCP 60초 타임아웃 및 최대 3회 순차 재시도
 - Codex MCP 30분 타임아웃 및 60초 주기 장기 실행 상태 알림
@@ -184,6 +184,8 @@ OAuth 토큰을 여러 개 등록하면 한도에 대응해 자동 전환한다.
 Telegram의 `/status`는 명령에 응답하는 것으로 오케스트레이터 프로세스가 살아 있음을 확인하고, 세션 토픽 안에서는 해당 작업이 실제로 현재 프로세스에서 실행 중인지 표시한다. 실행 중 진행 메시지는 새 도구 호출이 없어도 30초마다 경과시간을 갱신한다.
 
 Telegram의 `/plan 요청`은 Claude가 실행 계획과 `[ACCEPTANCE_CRITERIA]` 완료 기준을 작성하고 사용자의 승인을 받은 뒤 Codex가 구현하는 파이프라인이다. Codex가 실행한 명령, 종료 코드, 파일 변경, MCP 호출, 최종 응답과 git 상태·diff를 SQLite 증거 원장에 기록한다. 저장 전 계획, 검증 기준, 검토문, 명령 출력의 토큰·API 키·비밀번호 패턴을 자동 마스킹한다. 마지막 Claude 검토는 각 기준을 `pass`, `fail`, `blocked`로 판정하며 모든 기준이 `pass`이고 최종 판정이 `APPROVE`일 때만 세션을 `done`으로 바꾼다. 검토에 실패하면 같은 Codex 스레드에서 차단 문제를 수정하고 재검증하되 최대 3회로 제한한다. 3회 뒤에도 승인되지 않으면 `verification_failed`로 종료해 완료 오판과 무한 반복을 막는다.
+
+Telegram의 `/goal 조건`은 조건이 충족될 때까지 작업을 자동으로 이어 가게 한다(클로드 코드 본가의 `/goal`과 같은 개념). 한 턴이 정상 종료될 때마다 빠른 모델(Haiku)로 "조건이 이미 충족됐는지"를 읽기 전용으로 판정하고, 미충족이면 사용자가 다시 시키지 않아도 같은 목표를 향한 다음 턴을 자동으로 예약한다. 충족되면 목표를 해제하고 알리며, 폭주 방지를 위해 최대 10턴까지만 자동 진행한다. `/goal`만 입력하면 현재 목표를, `/goal clear`는 목표를 해제한다. 유휴 상태에서 목표를 걸면 즉시 작업을 시작하고, 실행 중에 걸면 현재 턴이 끝난 뒤부터 평가한다. `/stop`이나 `/goal clear`로 언제든 멈출 수 있다. 자동 진행 턴도 일반 실행과 같은 경로를 타므로 **토큰 한도 자동 전환과 `waiting_limit` 대기·자동 재개가 그대로 적용**된다 — 한 토큰이 한도에 닿으면 남은 토큰으로 이어 가고, 모두 한도면 회복 시각까지 기다렸다가 목표 진행을 재개한다. 목표가 걸린 세션은 `/status`에 `목표(자동 진행)` 줄로 표시된다. (목표 진행은 사용량을 빠르게 소모할 수 있으니 `/usage`로 한도를 함께 확인하는 것이 좋다.)
 
 새 세션은 기본적으로 `lean on`이다. [Ponytail](https://github.com/DietrichGebert/ponytail)의 최소 구현 원칙에서 착안해, 불필요한 구현 생략 → 표준 라이브러리 → 플랫폼 기본 기능 → 기존 의존성 → 최소 코드 순서로 해법을 고른다. 이 정책은 Claude 일반 작업, `/plan` 계획 작성, Codex 구현에 함께 적용되며 보안, 입력 검증, 데이터 손실 방지, 접근성, 명시 요구사항과 실행 가능한 검증은 축소하지 않는다. 토픽에서 `/lean off`로 다음 실행부터 끄고 `/lean on`으로 다시 켤 수 있으며 실행 중에는 변경할 수 없다.
 

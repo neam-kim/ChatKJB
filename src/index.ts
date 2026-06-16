@@ -42,6 +42,7 @@ async function main(): Promise<void> {
     { command: "projects", description: "등록 프로젝트 목록" },
     { command: "steer", description: "실행 중 작업에 즉시 지시" },
     { command: "next", description: "현재 작업 뒤 후속 작업 예약" },
+    { command: "goal", description: "목표 조건 달성까지 자동으로 턴 이어가기" },
     { command: "stop", description: "현재 토픽 작업 중단" },
     { command: "fork", description: "현재 세션 분기" },
     { command: "compact", description: "현재 세션 컨텍스트 압축" },
