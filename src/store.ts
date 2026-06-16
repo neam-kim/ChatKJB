@@ -346,7 +346,7 @@ export class StateStore {
     const result = this.db.prepare(`
       UPDATE sessions
       SET status = 'interrupted', updated_at = ?
-      WHERE status IN ('queued', 'running', 'waiting_approval')
+      WHERE status IN ('queued', 'running', 'waiting_approval', 'waiting_limit')
     `).run(Date.now());
     this.db.prepare(`
       UPDATE pending_approvals

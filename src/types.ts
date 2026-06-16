@@ -5,6 +5,7 @@ export type SessionStatus =
   | "queued"
   | "running"
   | "waiting_approval"
+  | "waiting_limit"
   | "done"
   | "verification_failed"
   | "aborted"

@@ -61,6 +61,24 @@ export class TokenPool {
     return this.slots.findIndex((slot) => slot.token === token);
   }
 
+  /**
+   * 살아있는 토큰이 하나도 없을 때, 가장 먼저 회복되는(=exhaustedUntil이 가장 이른) 시각을
+   * epoch ms로 돌려준다. 사용 가능한 토큰이 하나라도 있으면(대기할 필요가 없으면) null.
+   * 자동 재개를 그 시각에 맞춰 예약하는 데 쓴다.
+   */
+  recoversAt(now: number = Date.now()): number | null {
+    const hasAvailable = this.slots.some(
+      (slot) => slot.exhaustedUntil === null || slot.exhaustedUntil <= now
+    );
+    if (hasAvailable) return null;
+    let soonest: number | null = null;
+    for (const slot of this.slots) {
+      if (slot.exhaustedUntil === null) continue;
+      soonest = soonest === null ? slot.exhaustedUntil : Math.min(soonest, slot.exhaustedUntil);
+    }
+    return soonest;
+  }
+
   isExhausted(token: string, now: number = Date.now()): boolean {
     const slot = this.slots.find((item) => item.token === token);
     return slot?.exhaustedUntil !== null

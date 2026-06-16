@@ -80,6 +80,25 @@ describe("TokenPool", () => {
     expect(pool.select(now)).toBe(A);
   });
 
+  it("reports no recovery wait while any token is still healthy", () => {
+    const pool = new TokenPool([A, B]);
+    const now = 1_000_000;
+    pool.noteRateLimited(A, now, now + 5_000);
+    // B는 아직 살아있으므로 기다릴 필요가 없다.
+    expect(pool.recoversAt(now)).toBeNull();
+  });
+
+  it("reports the soonest reset time when every token is exhausted", () => {
+    const pool = new TokenPool([A, B]);
+    const now = 1_000_000;
+    pool.noteRateLimited(A, now, now + 8_000);
+    pool.noteRateLimited(B, now, now + 3_000);
+    // 둘 다 소진이면 더 빨리 회복되는 B의 시각을 돌려준다.
+    expect(pool.recoversAt(now)).toBe(now + 3_000);
+    // 그 시각이 지나면 다시 살아있는 토큰이 생겨 대기가 필요 없다.
+    expect(pool.recoversAt(now + 3_001)).toBeNull();
+  });
+
   it("does not fail over below the exhaustion threshold", () => {
     const pool = new TokenPool([A, B]);
     const now = 1_000_000;

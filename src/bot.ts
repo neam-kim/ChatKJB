@@ -97,6 +97,8 @@ export function formatSessionStatus(
 ): string {
   const state = session.status === "waiting_approval"
     ? "승인 대기 중"
+    : session.status === "waiting_limit"
+      ? "한도 회복 대기 중 (회복 시 자동 재개)"
     : session.status === "verification_failed"
       ? "완료 검증 실패"
     : active

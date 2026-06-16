@@ -67,6 +67,9 @@ const MAX_PLAN_EXECUTION_ATTEMPTS = 3;
 const MAX_OVERLOAD_RETRIES = 5;
 const OVERLOAD_RETRY_BASE_MS = 5_000;
 const OVERLOAD_RETRY_CAP_MS = 60_000;
+// 모든 토큰이 한도에 도달했을 때, 가장 먼저 회복되는 시각 이후로 자동 재개를 미루는 여유분.
+// 한도 초기화 직후의 미세한 시계 오차로 또 거부당하는 것을 막는다.
+const LIMIT_RESUME_BUFFER_MS = 10_000;
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
 export const CODEX_MODEL = DEFAULT_CODEX_MODEL;
 export const CODEX_REASONING_EFFORT = DEFAULT_CODEX_REASONING;
@@ -589,6 +592,8 @@ export class SessionManager {
   private readonly queuedCounts = new Map<string, number>();
   private readonly sessionTasks = new Map<string, Promise<void>>();
   private readonly deleting = new Set<string>();
+  // 모든 토큰 한도 도달로 멈춘 세션을 회복 시각에 자동 재개하기 위해 거는 타이머.
+  private readonly limitWaiters = new Map<string, NodeJS.Timeout>();
   private readonly tokenPool: TokenPool;
   private readonly oauthTokens: string[];
 
@@ -668,6 +673,13 @@ export class SessionManager {
   }
 
   stop(sessionId: string): boolean {
+    // 한도 회복을 기다리며 예약된 자동 재개가 있으면 그것도 중단으로 친다.
+    if (this.cancelLimitWaiter(sessionId)) {
+      if (this.store.getSession(sessionId)?.status === "waiting_limit") {
+        this.store.updateSession(sessionId, { status: "aborted" });
+      }
+      return true;
+    }
     const run = this.active.get(sessionId);
     if (!run) return false;
     run.input.close();
@@ -840,7 +852,65 @@ export class SessionManager {
     return false;
   }
 
+  /** 예약된 한도-회복 자동 재개 타이머를 취소한다. 실제로 취소했으면 true. */
+  private cancelLimitWaiter(sessionId: string): boolean {
+    const timer = this.limitWaiters.get(sessionId);
+    if (!timer) return false;
+    clearTimeout(timer);
+    this.limitWaiters.delete(sessionId);
+    return true;
+  }
+
+  /**
+   * 모든 토큰이 한도에 도달해 더 실행할 수 없을 때, 가장 먼저 회복되는 시각에 맞춰
+   * 같은 작업을 자동으로 다시 큐에 넣는다. 그 전에 사용자가 새 지시를 보내면(enqueue)
+   * 타이머가 취소되어 즉시 재개되고, 데몬이 재시작되면 타이머는 사라지되 세션은
+   * interrupted로 복구된다.
+   */
+  private scheduleLimitResume(
+    session: SessionRecord,
+    request: RunRequest,
+    sdkSessionId: string | null,
+    resumeAt: number
+  ): void {
+    const delayMs = Math.max(0, resumeAt - Date.now()) + LIMIT_RESUME_BUFFER_MS;
+    const when = new Date(resumeAt + LIMIT_RESUME_BUFFER_MS).toLocaleString("ko-KR", {
+      timeZone: "Asia/Seoul"
+    });
+    const lead = this.tokenPool.size > 1
+      ? "모든 계정 토큰이 한도에 도달했습니다."
+      : "토큰이 한도에 도달했습니다.";
+    this.store.updateSession(session.id, { status: "waiting_limit" });
+    void this.transport.sendText(
+      session.chatId,
+      session.topicId,
+      `${lead} ${when}에 한도가 회복되면 자동으로 이어서 실행합니다. `
+      + "(그 전에 새 지시를 보내면 즉시 재개를 시도합니다.)"
+    ).catch(() => undefined);
+    void this.safeRename(session, `[WAIT] ${session.title}`);
+
+    const resumeId = sdkSessionId ?? request.resumeSessionId;
+    const resumeRequest: RunRequest = {
+      ...request,
+      ...(resumeId ? { resumeSessionId: resumeId } : {}),
+      // 회복 후에는 다시 토큰 전환을 시도할 수 있도록 전환 카운터를 초기화한다.
+      autoSwitchCount: 0
+    };
+    this.cancelLimitWaiter(session.id);
+    const timer = setTimeout(() => {
+      this.limitWaiters.delete(session.id);
+      if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
+      if (this.active.has(session.id)) return;
+      this.enqueue(resumeRequest);
+    }, delayMs);
+    timer.unref();
+    this.limitWaiters.set(session.id, timer);
+  }
+
   private enqueue(request: RunRequest): void {
+    // 예약된 한도-회복 자동 재개가 있으면 취소한다. 사용자가 먼저 새 지시를 보냈거나
+    // 자동 재개 타이머가 직접 enqueue를 호출한 경우 모두, 중복 실행을 막는다.
+    this.cancelLimitWaiter(request.session.id);
     const cwd = request.session.cwd;
     const count = this.queuedCounts.get(cwd) ?? 0;
     this.queuedCounts.set(cwd, count + 1);
@@ -1231,8 +1301,15 @@ export class SessionManager {
           });
           return;
         }
-        if (this.tokenPool.size > 1) {
-          renderer.note("모든 계정 토큰이 한도에 도달해 자동 전환할 수 없습니다.");
+        // 전환할 살아있는 토큰이 없다. 에러로 끝내는 대신, 가장 먼저 회복되는 한도
+        // 시각에 맞춰 같은 작업을 자동으로 이어서 실행하도록 예약한다.
+        const resumeAt = this.tokenPool.recoversAt();
+        if (resumeAt !== null) {
+          if (this.tokenPool.size > 1) {
+            renderer.note("모든 계정 토큰이 한도에 도달했습니다. 회복 시각에 자동 재개를 예약합니다.");
+          }
+          this.scheduleLimitResume(session, request, sdkSessionId, resumeAt);
+          return;
         }
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", String(error));
