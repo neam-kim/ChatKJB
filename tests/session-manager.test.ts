@@ -20,6 +20,7 @@ import {
   requireCodexSubscriptionAuth,
   resultSummary,
   SessionManager,
+  snapshotFromRateLimitError,
   StreamingTextCollector
 } from "../src/session-manager.js";
 import { StateStore } from "../src/store.js";
@@ -50,6 +51,20 @@ describe("Claude child environment", () => {
       CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-oauth",
       ANTHROPIC_API_KEY: undefined,
       ANTHROPIC_AUTH_TOKEN: undefined
+    });
+  });
+});
+
+describe("usage lookup fallback", () => {
+  it("turns a Claude session-limit reset error into a 100% five-hour snapshot", () => {
+    const snapshot = snapshotFromRateLimitError(
+      new Error("You've hit your session limit · resets 2pm (Asia/Seoul)"),
+      Date.parse("2026-06-16T02:20:00.000Z")
+    );
+
+    expect(snapshot?.fiveHour).toEqual({
+      utilization: 100,
+      resetsAt: "2026-06-16T05:00:00.000Z"
     });
   });
 });

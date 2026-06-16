@@ -421,6 +421,67 @@ async function readUsageSnapshot(
   }
 }
 
+export interface UsageLookupResult {
+  snapshot: UsageSnapshot | null;
+  error: string | null;
+}
+
+export interface TokenUsageLookupResult extends UsageLookupResult {
+  tokenIndex: number;
+}
+
+function hasUsageWindows(snapshot: UsageSnapshot): boolean {
+  return Boolean(
+    snapshot.fiveHour
+    || snapshot.sevenDay
+    || snapshot.sevenDayOpus
+    || snapshot.sevenDaySonnet
+    || snapshot.agentSdkWeekly
+    || snapshot.extraUsage
+  );
+}
+
+function nextKstReset(hour: number, minute: number, now = Date.now()): string {
+  const date = new Date(now);
+  const kstFormatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const [yearText, monthText, dayText] = kstFormatter.format(date).split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const reset = Date.UTC(year, month - 1, day, hour - 9, minute);
+  const next = reset > now ? reset : reset + 24 * 60 * 60 * 1000;
+  return new Date(next).toISOString();
+}
+
+export function snapshotFromRateLimitError(error: unknown, capturedAt = Date.now()): UsageSnapshot | null {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!isRateLimitError(message)) return null;
+  const resetMatch = message.match(/resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  let resetsAt: string | null = null;
+  if (resetMatch) {
+    let hour = Number(resetMatch[1]);
+    const minute = resetMatch[2] ? Number(resetMatch[2]) : 0;
+    const meridiem = resetMatch[3]?.toLowerCase();
+    if (meridiem === "pm" && hour < 12) hour += 12;
+    if (meridiem === "am" && hour === 12) hour = 0;
+    resetsAt = nextKstReset(hour, minute, capturedAt);
+  }
+  return {
+    capturedAt,
+    subscriptionType: null,
+    rateLimitsAvailable: true,
+    fiveHour: {
+      utilization: 100,
+      resetsAt
+    }
+  };
+}
+
 // 한도/요금 한계로 턴이 실패했는지 휴리스틱으로 판별한다. utilization 100% 이벤트가
 // 오기 전에 곧장 에러로 끝나는 경우를 잡아 다음 세션을 다른 토큰으로 유도하기 위함이다.
 export function isRateLimitError(error: unknown): boolean {
@@ -506,6 +567,7 @@ export class SessionManager {
   private readonly sessionTasks = new Map<string, Promise<void>>();
   private readonly deleting = new Set<string>();
   private readonly tokenPool: TokenPool;
+  private readonly oauthTokens: string[];
 
   constructor(
     private readonly store: StateStore,
@@ -513,10 +575,11 @@ export class SessionManager {
     private readonly permissions: PermissionBroker,
     private readonly options: SessionManagerOptions
   ) {
-    this.tokenPool = new TokenPool([
+    this.oauthTokens = [
       options.claudeCodeOauthToken,
       ...(options.additionalOauthTokens ?? [])
-    ]);
+    ];
+    this.tokenPool = new TokenPool(this.oauthTokens);
   }
 
   createSession(
@@ -588,6 +651,87 @@ export class SessionManager {
     // 종료 후 MCP 호출이 남아 가로막는 문제를 막는다. finally의 close()는 멱등 백업.
     run.query?.close();
     return true;
+  }
+
+  async fetchCurrentUsageSnapshots(cwd: string): Promise<TokenUsageLookupResult[]> {
+    const results: TokenUsageLookupResult[] = [];
+    for (const [index, oauthToken] of this.oauthTokens.entries()) {
+      const result = await this.fetchUsageSnapshotForToken(cwd, oauthToken);
+      results.push({ tokenIndex: index + 1, ...result });
+    }
+    return results;
+  }
+
+  async fetchCurrentUsageSnapshot(cwd: string): Promise<UsageLookupResult> {
+    return this.fetchUsageSnapshotForToken(cwd, this.tokenPool.select());
+  }
+
+  private async fetchUsageSnapshotForToken(
+    cwd: string,
+    oauthToken: string
+  ): Promise<UsageLookupResult> {
+    const abortController = new AbortController();
+    let provisionalSnapshot: UsageSnapshot | null = null;
+    const sdkQuery = query({
+      prompt: "사용량 확인용 요청입니다. 도구를 쓰지 말고 OK만 답하세요.",
+      options: {
+        cwd,
+        abortController,
+        model: DEFAULT_CLAUDE_MODEL,
+        thinking: { type: "disabled" },
+        maxTurns: 1,
+        maxBudgetUsd: 0.01,
+        permissionMode: "default",
+        allowedTools: [],
+        settingSources: [],
+        env: buildClaudeEnvironment(
+          oauthToken,
+          process.env,
+          this.options.mcpToolTimeoutMs
+        ),
+        ...(this.options.claudeCodeExecutable
+          ? { pathToClaudeCodeExecutable: this.options.claudeCodeExecutable }
+          : {})
+      }
+    });
+
+    try {
+      for await (const message of sdkQuery) {
+        if (message.type === "system" && message.subtype === "init") {
+          const snapshot = await readUsageSnapshot(sdkQuery, 10_000);
+          if (snapshot && hasUsageWindows(snapshot)) {
+            this.tokenPool.observe(oauthToken, snapshot);
+            return { snapshot, error: null };
+          }
+          provisionalSnapshot = snapshot;
+        }
+        if (message.type !== "result") continue;
+        const snapshot = await readUsageSnapshot(sdkQuery, 10_000);
+        this.tokenPool.observe(oauthToken, snapshot);
+        return { snapshot: snapshot ?? provisionalSnapshot, error: null };
+      }
+      return {
+        snapshot: provisionalSnapshot,
+        error: provisionalSnapshot ? null : "사용량 조회 세션이 결과 없이 종료되었습니다."
+      };
+    } catch (error) {
+      const limitSnapshot = snapshotFromRateLimitError(error);
+      if (limitSnapshot) {
+        this.tokenPool.noteRateLimited(
+          oauthToken,
+          Date.now(),
+          limitSnapshot.fiveHour?.resetsAt ? Date.parse(limitSnapshot.fiveHour.resetsAt) : undefined
+        );
+        return { snapshot: limitSnapshot, error: null };
+      }
+      if (isRateLimitError(error)) {
+        this.tokenPool.noteRateLimited(oauthToken);
+      }
+      return { snapshot: null, error: safeErrorMessage(error) };
+    } finally {
+      abortController.abort();
+      sdkQuery.close();
+    }
   }
 
   isActive(sessionId: string): boolean {

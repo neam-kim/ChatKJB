@@ -212,6 +212,11 @@ function parseMode(text: string): PermissionMode | undefined {
     : undefined;
 }
 
+function usageRateLimitWarning(): string {
+  return "참고: Claude 서버가 현재 OAuth 토큰에 대해 한도 창(rate_limits)을 반환하지 않았습니다. "
+    + "`claude setup-token`을 다시 실행해 사용량 조회 권한이 포함된 토큰으로 갱신해야 정확한 한도 수치가 표시됩니다.";
+}
+
 export function createBot(config: AppConfig, store: StateStore) {
   const bot = new Bot(config.telegramBotToken);
   const transport = new TelegramTransport(bot.api);
@@ -527,13 +532,51 @@ export function createBot(config: AppConfig, store: StateStore) {
   });
 
   bot.command("usage", async (ctx) => {
+    const liveResults = await sessions.fetchCurrentUsageSnapshots(
+      config.projects[0]?.cwd ?? process.cwd()
+    );
+    const liveWithSnapshots = liveResults.filter((result) => result.snapshot);
+    if (liveWithSnapshots.length > 0) {
+      const multiple = liveResults.length > 1;
+      const sections = liveWithSnapshots.map((result) => {
+        const snapshot = result.snapshot!;
+        const measuredAt = new Date(snapshot.capturedAt).toLocaleString("ko-KR", {
+          timeZone: "Asia/Seoul"
+        });
+        const heading = multiple ? `토큰 #${result.tokenIndex}\n` : "";
+        const scopeWarning = snapshot.rateLimitsAvailable ? "" : `\n${usageRateLimitWarning()}`;
+        return `${heading}${formatUsageSnapshot(snapshot)}\n측정: ${measuredAt}${scopeWarning}`;
+      });
+      const failed = liveResults
+        .filter((result) => !result.snapshot)
+        .map((result) => `토큰 #${result.tokenIndex}: 조회 실패${result.error ? ` (${result.error})` : ""}`);
+      const failedText = failed.length > 0 ? `\n\n${failed.join("\n")}` : "";
+      await ctx.reply(
+        `${sections.join("\n\n")}\n원천: Claude 서버 실시간 조회${failedText}`
+      );
+      return;
+    }
+
     const latest = store.listSessions(50).find((session) => session.usageSnapshot);
     if (!latest?.usageSnapshot) {
-      await ctx.reply("아직 저장된 한도 사용량이 없습니다. 작업을 한 번 실행한 뒤 다시 확인하세요.");
+      await ctx.reply(
+        "실시간 사용량 조회에 실패했고, 저장된 한도 사용량도 없습니다."
+        + (liveResults.length > 0
+          ? `\n${liveResults.map((result) =>
+              `토큰 #${result.tokenIndex}: ${result.error ?? "사용량 없음"}`
+            ).join("\n")}`
+          : "")
+      );
       return;
     }
     await ctx.reply(
-      `${formatUsageSnapshot(latest.usageSnapshot)}\n측정: ${new Date(latest.usageSnapshot.capturedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`
+      `실시간 사용량 조회에 실패해 마지막 저장값을 표시합니다.`
+      + (liveResults.length > 0
+        ? `\n${liveResults.map((result) =>
+            `토큰 #${result.tokenIndex}: ${result.error ?? "사용량 없음"}`
+          ).join("\n")}`
+        : "")
+      + `\n\n${formatUsageSnapshot(latest.usageSnapshot)}\n측정: ${new Date(latest.usageSnapshot.capturedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`
     );
   });
 

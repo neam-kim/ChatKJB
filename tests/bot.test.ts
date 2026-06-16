@@ -117,6 +117,16 @@ function leanCommand(text: string, updateId = 1) {
   };
 }
 
+function usageCommand(updateId = 1) {
+  return {
+    ...modelCommand("/usage", updateId),
+    message: {
+      ...modelCommand("/usage", updateId).message,
+      entities: [{ type: "bot_command" as const, offset: 0, length: 6 }]
+    }
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const item of cleanup.splice(0)) {
@@ -201,5 +211,63 @@ describe("/model command", () => {
     const reply = calls.find((call) => call.method === "sendMessage")?.payload;
     expect(reply?.text).toContain("현재 모델: Opus 4.8");
     expect(reply?.reply_markup).toEqual(modelKeyboard());
+  });
+});
+
+describe("/usage command", () => {
+  it("fetches a live Claude usage snapshot before using cached data", async () => {
+    const { bot, sessions, calls } = botSetup();
+    vi.spyOn(sessions, "fetchCurrentUsageSnapshots").mockResolvedValue([
+      {
+        tokenIndex: 1,
+        snapshot: {
+          capturedAt: Date.parse("2026-06-16T02:20:00.000Z"),
+          subscriptionType: "pro",
+          rateLimitsAvailable: true,
+          fiveHour: { utilization: 42, resetsAt: null }
+        },
+        error: null
+      },
+      {
+        tokenIndex: 2,
+        snapshot: {
+          capturedAt: Date.parse("2026-06-16T02:21:00.000Z"),
+          subscriptionType: "pro",
+          rateLimitsAvailable: true,
+          fiveHour: { utilization: 10, resetsAt: null }
+        },
+        error: null
+      }
+    ]);
+
+    await bot.handleUpdate(usageCommand());
+
+    const reply = calls.find((call) => call.method === "sendMessage")?.payload.text;
+    expect(reply).toContain("토큰 #1");
+    expect(reply).toContain("5시간 한도: 42% 사용");
+    expect(reply).toContain("토큰 #2");
+    expect(reply).toContain("5시간 한도: 10% 사용");
+    expect(reply).toContain("원천: Claude 서버 실시간 조회");
+  });
+
+  it("explains when the live OAuth session lacks rate-limit data", async () => {
+    const { bot, sessions, calls } = botSetup();
+    vi.spyOn(sessions, "fetchCurrentUsageSnapshots").mockResolvedValue([
+      {
+        tokenIndex: 1,
+        snapshot: {
+          capturedAt: Date.parse("2026-06-16T02:20:00.000Z"),
+          subscriptionType: null,
+          rateLimitsAvailable: false
+        },
+        error: null
+      }
+    ]);
+
+    await bot.handleUpdate(usageCommand());
+
+    const reply = calls.find((call) => call.method === "sendMessage")?.payload.text;
+    expect(reply).toContain("Claude 서버가 현재 OAuth 토큰에 대해 한도 창");
+    expect(reply).toContain("claude setup-token");
   });
 });
