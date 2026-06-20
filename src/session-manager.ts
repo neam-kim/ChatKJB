@@ -2169,7 +2169,7 @@ export class SessionManager {
   }
 
   private gooseBinary(): string {
-    return this.options.gooseExecutable ?? "/opt/homebrew/bin/goose";
+    return this.options.gooseExecutable ?? "goose";
   }
 
   // goose를 한 번 실행한다. signal로 중단하면 SIGTERM 후 잠시 뒤 SIGKILL.

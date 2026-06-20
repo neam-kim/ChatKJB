@@ -97,8 +97,8 @@ function resolveAgyExecutable(explicit: string | undefined): string {
 // 명시 env가 없으면 /opt/homebrew/bin/goose를 우선 확인한다.
 function resolveGooseExecutable(explicit: string | undefined): string {
   if (explicit && explicit.trim()) return absolutePath(explicit);
-  const brew = "/opt/homebrew/bin/goose";
-  return existsSync(brew) ? brew : "goose";
+  const candidates = ["/opt/homebrew/bin/goose", `${homedir()}/.local/bin/goose`];
+  return candidates.find(existsSync) ?? "goose";
 }
 
 function validateEnvironmentFile(): void {
