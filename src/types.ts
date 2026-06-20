@@ -73,7 +73,7 @@ export interface PlanEvidenceRecord {
   createdAt: number;
 }
 
-export type ProviderKind = "claude" | "codex" | "agy";
+export type ProviderKind = "claude" | "codex" | "agy" | "local-llm";
 
 export interface ProjectConfig {
   name: string;

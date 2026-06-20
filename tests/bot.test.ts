@@ -66,7 +66,12 @@ function botSetup() {
     longRunningMcpServers: new Set(["codex"]),
     turnIdleTimeoutMs: 120_000,
     claudeCodeExecutable: undefined,
-    agyExecutable: "agy"
+    agyExecutable: "agy",
+    gooseExecutable: "/opt/homebrew/bin/goose",
+    localLlmMcpServers: new Set(["notion", "google-calendar"]),
+    localLlmModel: "qwen3.6:35b-a3b",
+    localLlmProvider: "ollama",
+    ollamaHost: "http://localhost:11434"
   } satisfies AppConfig;
   const instance = createBot(config, store);
   instance.bot.botInfo = {

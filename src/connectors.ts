@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
@@ -346,6 +346,287 @@ export function toGeminiMcpConfig(
  * 기존 파일의 사용자 정의 서버와 다른 최상위 키는 보존하고, 관리 대상 서버를 덮어쓴다.
  * 내용이 바뀐 경우에만 파일을 쓰며, 변경 여부를 반환한다.
  */
+// ---- goose(로컬 LLM) 동기화 --------------------------------------------------
+
+function defaultGooseConfigPath(): string {
+  return join(homedir(), ".config", "goose", "config.yaml");
+}
+
+// NOTION_TOKEN 등 비밀 값을 config 파일에 평문으로 쓰지 않고
+// goose env_keys(키 이름만, 값은 실행 환경 주입)로 분리한다.
+const SECRET_ENV_KEYS = new Set(["NOTION_TOKEN"]);
+
+function splitEnv(env: Record<string, string> = {}): {
+  envs: Record<string, string>;
+  env_keys: string[];
+} {
+  const envs: Record<string, string> = {};
+  const env_keys: string[] = [];
+  for (const [k, v] of Object.entries(env)) {
+    if (SECRET_ENV_KEYS.has(k)) env_keys.push(k);
+    else envs[k] = v;
+  }
+  return { envs, env_keys };
+}
+
+interface GooseExtension {
+  enabled: boolean;
+  type: "stdio";
+  name: string;
+  cmd: string;
+  args: string[];
+  envs: Record<string, string>;
+  env_keys: string[];
+  timeout: number;
+  bundled: null;
+  available_tools: string[];
+}
+
+/** SDK McpStdioServerConfig를 goose extensions 항목으로 변환한다. */
+function toGooseExtension(name: string, server: McpServerConfig): GooseExtension | null {
+  const s = server as Record<string, unknown>;
+  if (s.type !== "stdio" || typeof s.command !== "string") return null;
+  const raw = (s.env ?? {}) as Record<string, string>;
+  const { envs, env_keys } = splitEnv(raw);
+  return {
+    enabled: true,
+    type: "stdio",
+    name,
+    cmd: s.command,
+    args: Array.isArray(s.args) ? (s.args as string[]) : [],
+    envs,
+    env_keys,
+    timeout: 300,
+    bundled: null,
+    available_tools: []
+  };
+}
+
+// ---- 최소 YAML 파서·직렬화기 (goose config.yaml 전용) -------------------------
+// goose config.yaml은 최상위 스칼라 키와 extensions 블록만 담는다.
+// 외부 YAML 라이브러리 없이 그 범위만 처리한다.
+
+/** goose config.yaml 텍스트에서 extensions 블록과 기타 최상위 키를 분리해 읽는다. */
+function parseGooseConfig(yaml: string): {
+  other: string;              // extensions 블록을 제외한 원본 텍스트
+  extensions: Record<string, GooseExtension>;
+} {
+  const lines = yaml.split("\n");
+  const extLines: string[] = [];
+  const otherLines: string[] = [];
+  let inExtensions = false;
+
+  for (const line of lines) {
+    if (/^extensions\s*:/.test(line)) {
+      inExtensions = true;
+      // extensions: 헤더 자체는 버린다(재직렬화 시 새로 씀)
+      continue;
+    }
+    if (inExtensions) {
+      // 들여쓰기가 없는 새 최상위 키가 나오면 extensions 끝
+      if (/^\S/.test(line) && line.trim() && !line.startsWith("#")) {
+        inExtensions = false;
+        otherLines.push(line);
+      } else {
+        extLines.push(line);
+      }
+    } else {
+      otherLines.push(line);
+    }
+  }
+
+  const extensions = parseGooseExtensionsYaml(extLines.join("\n"));
+  return { other: otherLines.join("\n"), extensions };
+}
+
+/** extensions 블록 YAML(들여쓰기 포함)을 GooseExtension 맵으로 파싱한다. */
+function parseGooseExtensionsYaml(block: string): Record<string, GooseExtension> {
+  const result: Record<string, GooseExtension> = {};
+  // 이름 헤더: 두 칸 들여쓰기 + 키:
+  const nameRe = /^ {2}(\S[^:]*)\s*:\s*$/;
+  const kvRe = /^ {4}(\w+)\s*:\s*(.*)/;
+  const listItemRe = /^ {6}- (.*)/;
+
+  let current: Partial<GooseExtension> & { name?: string; envs?: Record<string, string>; env_keys?: string[]; args?: string[] } | null = null;
+  let currentField: string | null = null;
+
+  const flush = () => {
+    if (current?.name && current.cmd) {
+      result[current.name] = {
+        enabled: current.enabled ?? true,
+        type: "stdio",
+        name: current.name,
+        cmd: current.cmd,
+        args: current.args ?? [],
+        envs: current.envs ?? {},
+        env_keys: current.env_keys ?? [],
+        timeout: current.timeout ?? 300,
+        bundled: null,
+        available_tools: []
+      };
+    }
+    current = null;
+    currentField = null;
+  };
+
+  for (const line of block.split("\n")) {
+    const nm = nameRe.exec(line);
+    if (nm) {
+      flush();
+      current = { name: nm[1]!.trim(), envs: {}, env_keys: [], args: [] };
+      continue;
+    }
+    if (!current) continue;
+    const kv = kvRe.exec(line);
+    if (kv) {
+      const key = kv[1]!;
+      const val = kv[2]!.trim();
+      currentField = key;
+      if (key === "cmd") current.cmd = unquoteYamlString(val);
+      else if (key === "enabled") current.enabled = val !== "false";
+      else if (key === "timeout") current.timeout = parseInt(val, 10) || 300;
+      else if (key === "envs" || key === "env_keys" || key === "args") {
+        // 빈 맵/배열 {}나 []는 그대로 유지하고, 다음 줄에서 항목을 받는다
+        if (val === "{}") current.envs = {};
+        else if (val === "[]") {
+          if (key === "env_keys") current.env_keys = [];
+          else current.args = [];
+        }
+      }
+      continue;
+    }
+    // envs 하위 키-값: "      KEY: VALUE"
+    const envsKv = /^ {6}(\S+)\s*:\s*(.*)/.exec(line);
+    if (envsKv && currentField === "envs") {
+      current.envs![envsKv[1]!] = unquoteYamlString(envsKv[2]!.trim());
+      continue;
+    }
+    // 리스트 항목: env_keys, args
+    const li = listItemRe.exec(line);
+    if (li) {
+      const item = unquoteYamlString(li[1]!.trim());
+      if (currentField === "env_keys") current.env_keys!.push(item);
+      else if (currentField === "args") current.args!.push(item);
+    }
+  }
+  flush();
+  return result;
+}
+
+function unquoteYamlString(s: string): string {
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+
+function quoteYamlString(s: string): string {
+  // 특수 문자가 있으면 큰따옴표로 감싼다
+  if (/[:#\[\]{},\n]/.test(s) || s.trim() !== s || s === "") return `"${s.replace(/"/g, '\\"')}"`;
+  return s;
+}
+
+/** GooseExtension 맵을 YAML extensions 블록으로 직렬화한다. */
+function serializeGooseExtensions(extensions: Record<string, GooseExtension>): string {
+  if (Object.keys(extensions).length === 0) return "";
+  const lines = ["extensions:"];
+  for (const [name, ext] of Object.entries(extensions)) {
+    lines.push(`  ${name}:`);
+    lines.push(`    enabled: ${ext.enabled}`);
+    lines.push(`    type: ${ext.type}`);
+    lines.push(`    name: ${quoteYamlString(ext.name)}`);
+    lines.push(`    cmd: ${quoteYamlString(ext.cmd)}`);
+    if (ext.args.length === 0) {
+      lines.push("    args: []");
+    } else {
+      lines.push("    args:");
+      for (const a of ext.args) lines.push(`      - ${quoteYamlString(a)}`);
+    }
+    const envsEntries = Object.entries(ext.envs);
+    if (envsEntries.length === 0) {
+      lines.push("    envs: {}");
+    } else {
+      lines.push("    envs:");
+      for (const [k, v] of envsEntries) lines.push(`      ${k}: ${quoteYamlString(v)}`);
+    }
+    if (ext.env_keys.length === 0) {
+      lines.push("    env_keys: []");
+    } else {
+      lines.push("    env_keys:");
+      for (const k of ext.env_keys) lines.push(`      - ${k}`);
+    }
+    lines.push(`    timeout: ${ext.timeout}`);
+    lines.push("    bundled: null");
+    lines.push("    available_tools: []");
+  }
+  return lines.join("\n");
+}
+
+/** 병합 커넥터에서 allowlist에 든 서버만 추려 반환한다. */
+export function selectLocalLlmConnectors(
+  merged: Record<string, McpServerConfig>,
+  allow: ReadonlySet<string>
+): Record<string, McpServerConfig> {
+  return Object.fromEntries(
+    Object.entries(merged).filter(([name]) => allow.has(name.toLowerCase()))
+  );
+}
+
+/**
+ * allowlist로 거른 커넥터를 goose config.yaml의 extensions 블록에 동기화한다.
+ * 관리 대상 서버만 덮어쓰고 사용자 정의 서버·기타 키는 보존한다.
+ * 변경 시에만 파일을 쓰며 0o600 권한을 강제한다.
+ */
+export function syncGooseMcpConfig(
+  merged: Record<string, McpServerConfig>,
+  allow: ReadonlySet<string>,
+  gooseConfigPath = defaultGooseConfigPath()
+): { changed: boolean; count: number } {
+  const selected = selectLocalLlmConnectors(merged, allow);
+  const desired: Record<string, GooseExtension> = {};
+  for (const [name, server] of Object.entries(selected)) {
+    const ext = toGooseExtension(name, server);
+    if (ext) desired[name] = ext;
+  }
+  const count = Object.keys(desired).length;
+  if (count === 0) return { changed: false, count: 0 };
+
+  let existing = { other: "", extensions: {} as Record<string, GooseExtension> };
+  try {
+    const text = readFileSync(gooseConfigPath, "utf8");
+    existing = parseGooseConfig(text);
+  } catch {
+    existing = { other: "", extensions: {} };
+  }
+
+  const nextExtensions = { ...existing.extensions, ...desired };
+  const extYaml = serializeGooseExtensions(nextExtensions);
+  const otherTrimmed = existing.other.trimEnd();
+  const nextText = otherTrimmed
+    ? `${otherTrimmed}\n${extYaml}\n`
+    : `${extYaml}\n`;
+
+  let prevText = "";
+  try {
+    prevText = readFileSync(gooseConfigPath, "utf8");
+  } catch {
+    prevText = "";
+  }
+  if (nextText === prevText) {
+    // 권한만 확인·보정
+    try {
+      if ((statSync(gooseConfigPath).mode & 0o777) !== 0o600) {
+        writeFileSync(gooseConfigPath, prevText, { mode: 0o600 });
+      }
+    } catch { /* ignore */ }
+    return { changed: false, count };
+  }
+
+  mkdirSync(dirname(gooseConfigPath), { recursive: true });
+  writeFileSync(gooseConfigPath, nextText, { mode: 0o600 });
+  return { changed: true, count };
+}
+
 export function syncAgyMcpConfig(
   merged: Record<string, McpServerConfig>,
   geminiMcpConfigPath = defaultGeminiMcpConfigPath()

@@ -430,7 +430,11 @@ describe("goal state", () => {
       longRunningMcpServers: new Set(["codex"]),
       turnIdleTimeoutMs: 600_000,
       claudeMemoryDir: join(directory, ".claude", "memory"),
-      modelCatalog: FALLBACK_MODEL_CATALOG
+      modelCatalog: FALLBACK_MODEL_CATALOG,
+      localLlmMcpServers: new Set(["notion", "google-calendar"]),
+      localLlmModel: "qwen3.6:35b-a3b",
+      localLlmProvider: "ollama",
+      ollamaHost: "http://localhost:11434"
     });
 
     try {
@@ -503,6 +507,10 @@ describe("goal state", () => {
       turnIdleTimeoutMs: 600_000,
       claudeMemoryDir: join(directory, ".claude", "memory"),
       modelCatalog: FALLBACK_MODEL_CATALOG,
+      localLlmMcpServers: new Set(["notion", "google-calendar"]),
+      localLlmModel: "qwen3.6:35b-a3b",
+      localLlmProvider: "ollama",
+      ollamaHost: "http://localhost:11434",
       // 백그라운드 실제 실행을 막기 위해 곧장 삭제로 드레인하므로 Claude 트랜스크립트 삭제는 무시한다.
       deleteClaudeSession: async () => {}
     });
@@ -577,6 +585,10 @@ describe("session deletion", () => {
       turnIdleTimeoutMs: 600_000,
       claudeMemoryDir: join(directory, ".claude", "memory"),
       modelCatalog: FALLBACK_MODEL_CATALOG,
+      localLlmMcpServers: new Set(["notion", "google-calendar"]),
+      localLlmModel: "qwen3.6:35b-a3b",
+      localLlmProvider: "ollama",
+      ollamaHost: "http://localhost:11434",
       deleteClaudeSession: async (id, options) => {
         deleted.push({ id, ...(options?.dir ? { dir: options.dir } : {}) });
       }
