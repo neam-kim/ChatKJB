@@ -181,6 +181,9 @@ function defaultsKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): Key
 // 기본값 패널의 모델 선택용 인라인 키보드(제공자별). setm:<provider>:<id>
 function defaultsModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): InlineKeyboard {
   const keyboard = new InlineKeyboard();
+  if (defaults.provider === "local-llm") {
+    return new InlineKeyboard().text("qwen3.6:35b-a3b (.env LOCAL_LLM_MODEL로 변경)", "noop:local-llm");
+  }
   const options = defaults.provider === "codex"
     ? catalog.codexModels.map((option) => ({ id: option.id, label: option.label }))
     : defaults.provider === "agy"
@@ -1543,6 +1546,10 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.hears(/^🧠 모델/, async (ctx) => {
     const defaults = store.getSessionDefaults();
+    if (defaults.provider === "local-llm") {
+      await ctx.reply("로컬LLM 모델은 .env의 LOCAL_LLM_MODEL로 설정합니다. 현재 모델: qwen3.6:35b-a3b");
+      return;
+    }
     await ctx.reply(
       `${providerDisplayLabel(defaults.provider)} 모델을 선택하세요.`,
       { reply_markup: defaultsModelKeyboard(defaults, config.modelCatalog) }
