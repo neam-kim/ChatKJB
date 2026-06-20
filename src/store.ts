@@ -26,7 +26,7 @@ import type {
 } from "./types.js";
 
 function normalizeProvider(value: string | null | undefined): ProviderKind {
-  return value === "codex" || value === "agy" ? value : "claude";
+  return value === "codex" || value === "agy" || value === "local-llm" ? value : "claude";
 }
 
 const SESSION_DEFAULT_SEED: SessionDefaults = {
