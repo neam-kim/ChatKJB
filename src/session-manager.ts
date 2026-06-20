@@ -23,7 +23,12 @@ import {
   mcpCallKey,
   mcpServerName
 } from "./mcp-policy.js";
-import { loadClaudeConnectors, loadMergedConnectors, syncAgyMcpConfig } from "./connectors.js";
+import {
+  loadClaudeConnectors,
+  loadMergedConnectors,
+  syncAgyMcpConfig,
+  syncGooseMcpConfig
+} from "./connectors.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { StateStore } from "./store.js";
 import { StreamRenderer } from "./stream-renderer.js";
@@ -124,6 +129,22 @@ export function buildPublicProgressInstructions(): string {
   ].join("\n");
 }
 
+// Claude는 claude_code 프리셋이 날짜를 자동 주입하지만 Codex·agy는 시스템 프롬프트가
+// 없어 날짜를 모른다. 첫 턴 memoryNote와 함께 주입해 "오늘/내일" 등 상대 날짜 해석을 보완한다.
+function buildKstDateNote(): string {
+  const nowKst = new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    dateStyle: "full",
+    timeStyle: "short",
+    hour12: false
+  }).format(new Date());
+  return (
+    `현재 시각은 ${nowKst} (KST, UTC+9)이다. "오늘/내일/다음 주" 등 상대 날짜는 `
+    + `이 기준으로 해석한다. Google Calendar 이벤트를 만들거나 조회할 때 시간대는 `
+    + `항상 Asia/Seoul로 지정하고, start/end의 timeZone 필드에 "Asia/Seoul"을 명시한다.`
+  );
+}
+
 export class ProgressiveParagraphCollector {
   private emittedLength = 0;
 
@@ -183,6 +204,14 @@ interface SessionManagerOptions {
   claudeCodeExecutable?: string;
   // agy(Antigravity CLI) 바이너리 경로. 데몬 PATH에 ~/.local/bin이 없을 수 있어 명시 경로를 받는다.
   agyExecutable?: string;
+  // goose 바이너리 경로(/opt/homebrew/bin/goose).
+  gooseExecutable?: string;
+  // 로컬 LLM(goose)에게 노출할 MCP 서버 이름 집합.
+  localLlmMcpServers: ReadonlySet<string>;
+  // Ollama 모델 태그와 provider 설정.
+  localLlmModel: string;
+  localLlmProvider: string;
+  ollamaHost: string;
   mcpToolTimeoutMs: number;
   mcpMaxAttempts: number;
   codexMcpTimeoutMs: number;
@@ -751,6 +780,7 @@ export class SessionManager {
     // 맥락에서 요약을 받아 시작하므로 재개 핸들 없이도 진행한다.
     const canResume = session.provider === "codex"
       || session.provider === "agy"
+      || session.provider === "local-llm"
       || !!session.sdkSessionId
       || !!session.handoffSummary;
     if (!canResume) return false;
@@ -781,6 +811,7 @@ export class SessionManager {
   private resumeHandle(session: SessionRecord): string | null {
     if (session.provider === "codex") return session.codexThreadId;
     if (session.provider === "agy") return session.agyConversationId;
+    if (session.provider === "local-llm") return "stateless";
     return session.sdkSessionId;
   }
 
@@ -981,6 +1012,12 @@ export class SessionManager {
       this.store.updateSession(sessionId, {
         provider: "agy",
         agyConversationId: null,
+        ...(summary ? { handoffSummary: summary } : {})
+      });
+    } else if (target === "local-llm") {
+      // 대상=local-llm(goose): 무상태 실행이라 재개 핸들 불필요.
+      this.store.updateSession(sessionId, {
+        provider: "local-llm",
         ...(summary ? { handoffSummary: summary } : {})
       });
     } else {
@@ -1213,6 +1250,10 @@ export class SessionManager {
     }
     if (provider === "agy") {
       await this.executeAgy(request);
+      return;
+    }
+    if (provider === "local-llm") {
+      await this.executeLocalLlm(request);
       return;
     }
     await this.execute(request);
@@ -1745,7 +1786,7 @@ export class SessionManager {
       while (!pending.done) {
         const content = pending.value.message.content;
         const turnPrompt = typeof content === "string" ? content : request.prompt;
-        const memoryPrefix = firstTurn ? `${memoryNote}\n\n${progressNote}\n\n` : "";
+        const memoryPrefix = firstTurn ? `${buildKstDateNote()}\n\n${memoryNote}\n\n${progressNote}\n\n` : "";
         const leanPrefix = session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "";
         run.codexStarts.set("codex", Date.now());
         if (turnTimeout) clearTimeout(turnTimeout);
@@ -1992,7 +2033,7 @@ export class SessionManager {
       while (!pending.done) {
         const content = pending.value.message.content;
         const turnPrompt = typeof content === "string" ? content : request.prompt;
-        const memoryPrefix = firstTurn ? `${memoryNote}\n\n${progressNote}\n\n` : "";
+        const memoryPrefix = firstTurn ? `${buildKstDateNote()}\n\n${memoryNote}\n\n${progressNote}\n\n` : "";
         const leanPrefix = session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "";
         const finalPrompt = `${memoryPrefix}${leanPrefix}${turnPrompt}`;
 
@@ -2117,6 +2158,222 @@ export class SessionManager {
       } else {
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", `agy 실행 실패: ${safeErrorMessage(error)}`);
+        await this.safeRename(session, `[ERROR] ${session.title}`);
+      }
+    } finally {
+      if (turnTimeout) clearTimeout(turnTimeout);
+      renderer.dispose();
+      input.close();
+      this.active.delete(session.id);
+    }
+  }
+
+  private gooseBinary(): string {
+    return this.options.gooseExecutable ?? "/opt/homebrew/bin/goose";
+  }
+
+  // goose를 한 번 실행한다. signal로 중단하면 SIGTERM 후 잠시 뒤 SIGKILL.
+  private runGoose(
+    args: string[],
+    cwd: string,
+    extraEnv: Record<string, string>,
+    signal?: AbortSignal,
+    onProgress?: (stdoutSoFar: string) => void
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    return new Promise((resolve, reject) => {
+      const env = {
+        ...process.env,
+        GOOSE_PROVIDER: this.options.localLlmProvider,
+        GOOSE_MODEL: this.options.localLlmModel,
+        OLLAMA_HOST: this.options.ollamaHost,
+        GOOSE_TELEMETRY_ENABLED: "false",
+        ...extraEnv
+      };
+      const child = spawn(this.gooseBinary(), args, { cwd, stdio: ["ignore", "pipe", "pipe"], env });
+      let stdout = "";
+      let stderr = "";
+      const stdoutDecoder = new StringDecoder("utf8");
+      const stderrDecoder = new StringDecoder("utf8");
+      let killTimer: NodeJS.Timeout | undefined;
+      const onAbort = () => {
+        child.kill("SIGTERM");
+        killTimer = setTimeout(() => child.kill("SIGKILL"), 3000);
+        killTimer.unref();
+      };
+      const cleanup = () => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        if (killTimer) clearTimeout(killTimer);
+      };
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += stdoutDecoder.write(chunk);
+        if (onProgress) onProgress(stdout);
+      });
+      child.stderr.on("data", (chunk: Buffer) => { stderr += stderrDecoder.write(chunk); });
+      child.on("error", (error) => { cleanup(); reject(error); });
+      child.on("close", (code) => {
+        stdout += stdoutDecoder.end();
+        stderr += stderrDecoder.end();
+        cleanup();
+        resolve({ stdout, stderr, code });
+      });
+    });
+  }
+
+  private async executeLocalLlm(request: RunRequest): Promise<void> {
+    if (this.deleting.has(request.session.id)) return;
+    let session = this.store.getSession(request.session.id);
+    if (!session) return;
+    request = this.applyHandoffSummary(request, session);
+    session = this.store.getSession(request.session.id) ?? session;
+
+    const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
+    const controller = new AbortController();
+    const input = new MessageQueue();
+    input.push(buildUserMessage(request.prompt));
+    const run: ActiveRun = {
+      controller,
+      input,
+      pendingTurns: 1,
+      startedAt: Date.now(),
+      codexTimers: new Map(),
+      codexStarts: new Map(),
+      mcpFailures: new Map()
+    };
+    this.active.set(session.id, run);
+
+    let timedOut = false;
+    let turnTimeout: NodeJS.Timeout | undefined;
+    let lastResponse = "";
+
+    try {
+      await this.safeRename(session, `[RUNNING] ${session.title}`);
+      await renderer.start(false);
+      this.store.updateSession(session.id, { status: "running" });
+
+      // allowlist로 거른 커넥터를 goose config.yaml에 동기화한다.
+      let gooseConnectorCount = 0;
+      // claude.json에서 NOTION_TOKEN 등 비밀 값을 읽어 goose 프로세스 env로 주입할 준비.
+      const secretEnv: Record<string, string> = {};
+      try {
+        const merged = loadMergedConnectors();
+        const sync = syncGooseMcpConfig(merged, this.options.localLlmMcpServers);
+        gooseConnectorCount = sync.count;
+        // NOTION_TOKEN이 병합 커넥터 env에 있으면 goose 프로세스 env로 전달(config에는 쓰지 않음).
+        for (const server of Object.values(merged)) {
+          const s = server as Record<string, unknown>;
+          const env = s.env as Record<string, string> | undefined;
+          if (env?.NOTION_TOKEN) secretEnv.NOTION_TOKEN = env.NOTION_TOKEN;
+        }
+      } catch (error) {
+        console.error(
+          `local-llm MCP 동기화 실패 (session=${session.id}):`,
+          safeErrorMessage(error)
+        );
+      }
+      renderer.note(
+        `로컬 LLM 실행 (${this.options.localLlmProvider}/${this.options.localLlmModel})`
+        + ` · 커넥터 ${gooseConnectorCount}개 동기화(~/.config/goose/config.yaml)`
+      );
+
+      // 시스템 프롬프트 없으므로 첫 턴에 메모리 위치·KST 현재 시각을 주입한다.
+      const memoryNote =
+        `장기기억은 ${this.options.claudeMemoryDir} 에 있다. 작업과 관련 있으면 `
+        + `${this.options.claudeMemoryDir}/MEMORY.md와 관련 파일을 먼저 읽고 활용하라. `
+        + `메모리 기록은 사용자가 /memory로 명시 승인할 때만 한다.`;
+      const progressNote = buildPublicProgressInstructions();
+
+      const iterator = input[Symbol.asyncIterator]();
+      let pending = await iterator.next();
+      let firstTurn = true;
+      while (!pending.done) {
+        const content = pending.value.message.content;
+        const turnPrompt = typeof content === "string" ? content : request.prompt;
+
+        // 매 턴 KST 현재 시각을 주입한다(장기 세션에서 자정 경계를 안전하게 처리).
+        const nowKst = new Intl.DateTimeFormat("ko-KR", {
+          timeZone: "Asia/Seoul", dateStyle: "full", timeStyle: "short", hour12: false
+        }).format(new Date());
+        const dateNote =
+          `현재 시각은 ${nowKst} (KST, UTC+9)이다. `
+          + `"오늘/내일/다음 주" 등 상대 날짜는 이 기준으로 해석한다. `
+          + `Google Calendar 이벤트를 만들거나 조회할 때 시간대는 항상 Asia/Seoul로 지정하고, `
+          + `start/end의 timeZone 필드에 "Asia/Seoul"을 명시한다.`;
+
+        const memoryPrefix = firstTurn ? `${memoryNote}\n\n${progressNote}\n\n` : "";
+        const leanPrefix = session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "";
+        const finalPrompt = `${memoryPrefix}${dateNote}\n\n${leanPrefix}${turnPrompt}`;
+
+        if (turnTimeout) clearTimeout(turnTimeout);
+        turnTimeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, this.options.codexMcpTimeoutMs);
+
+        const agyLogPath = join(tmpdir(), `telegram-goose-${session.id}-${randomUUID()}.log`);
+        const args = [
+          "run",
+          "--text", finalPrompt,
+          "--log-file", agyLogPath
+        ];
+
+        let result!: { stdout: string; stderr: string; code: number | null };
+        const progress = new ProgressiveParagraphCollector();
+        let progressDelivery = Promise.resolve();
+        try {
+          result = await this.runGoose(args, session.cwd, secretEnv, controller.signal, (soFar) => {
+            const visible = soFar.trim();
+            for (const paragraph of progress.accept(visible)) {
+              progressDelivery = progressDelivery.then(() => renderer.text(paragraph));
+            }
+          });
+        } finally {
+          if (turnTimeout) clearTimeout(turnTimeout);
+          turnTimeout = undefined;
+        }
+
+        let attemptResponse = this.stripAgyWarning(result.stdout).trim();
+        if (!attemptResponse && result.stderr) {
+          attemptResponse = result.stderr.trim();
+        }
+        for (const paragraph of progress.finish(attemptResponse)) {
+          progressDelivery = progressDelivery.then(() => renderer.text(paragraph));
+        }
+        await progressDelivery;
+        lastResponse = attemptResponse || lastResponse;
+        firstTurn = false;
+
+        run.pendingTurns = Math.max(0, run.pendingTurns - 1);
+        if (run.pendingTurns === 0) break;
+        renderer.note(`예약 메시지 ${run.pendingTurns}개 처리 대기`);
+        pending = await iterator.next();
+      }
+
+      this.store.updateSession(session.id, { status: "done" });
+      await renderer.finish("done", lastResponse ? "" : "로컬 LLM이 텍스트 응답 없이 작업을 마쳤습니다.");
+      await this.safeRename(session, `[DONE] ${session.title}`);
+      await this.maybeContinueGoal(session, request, null);
+    } catch (error) {
+      if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
+      console.error(
+        `local-llm run failed (session=${session.id}):`,
+        safeErrorMessage(error, this.oauthTokens)
+      );
+      if (timedOut) {
+        const minutes = Math.round(this.options.codexMcpTimeoutMs / 60_000);
+        this.store.updateSession(session.id, { status: "error" });
+        await renderer.finish("error", `로컬 LLM 턴이 ${minutes}분 제한을 초과해 중단되었습니다.`);
+        await this.safeRename(session, `[STALL] ${session.title}`);
+      } else if (controller.signal.aborted) {
+        this.store.updateSession(session.id, { status: "aborted" });
+        await renderer.finish("aborted", "사용자가 작업을 중단했습니다.");
+        await this.safeRename(session, `[STOP] ${session.title}`);
+      } else {
+        this.store.updateSession(session.id, { status: "error" });
+        await renderer.finish("error", `로컬 LLM 실행 실패: ${safeErrorMessage(error)}`);
         await this.safeRename(session, `[ERROR] ${session.title}`);
       }
     } finally {
