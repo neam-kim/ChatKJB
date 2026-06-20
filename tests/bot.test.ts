@@ -350,6 +350,25 @@ describe("/new defaults fast path", () => {
   });
 });
 
+describe("agy proceed callback", () => {
+  it("resumes the agy session with an explicit approval prompt", async () => {
+    const { bot, store, sessions, calls } = botSetup();
+    store.updateSession("session", {
+      provider: "agy",
+      agyConversationId: "agy-conversation"
+    });
+    const resume = vi.spyOn(sessions, "resume").mockReturnValue(true);
+
+    await bot.handleUpdate(callbackUpdate("agygo:session"));
+
+    expect(resume).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "session", provider: "agy" }),
+      "승인합니다. 제시한 계획대로 계속 진행하십시오."
+    );
+    expect(calls.some((call) => call.method === "editMessageReplyMarkup")).toBe(true);
+  });
+});
+
 describe("/goal command", () => {
   it("reports no active goal without an argument", async () => {
     const { bot, calls } = botSetup();

@@ -157,4 +157,54 @@ describe("StreamRenderer text deduplication", () => {
     expect(edited.some((text) => text.includes("부분 답변이 자라는 중"))).toBe(true);
     renderer.dispose();
   });
+
+  it("labels the running message with the active provider", async () => {
+    const sent: string[] = [];
+    const transport: MessageTransport = {
+      async sendText(_chatId, _topicId, text) {
+        sent.push(text);
+        return sent.length;
+      },
+      async editText() {},
+      async createTopic() { return 1; },
+      async renameTopic() {},
+      async deleteTopic() {},
+      async sendDocument() {},
+      async sendChatAction() {},
+      async sendFile() {}
+    };
+    const now = Date.now();
+    const session: SessionRecord = {
+      id: "session",
+      sdkSessionId: null,
+      chatId: -1001,
+      topicId: 42,
+      projectName: "test",
+      cwd: "/tmp",
+      title: "test",
+      status: "running",
+      permissionMode: "auto",
+      model: null,
+      thinking: null,
+      claudeEffort: null,
+      provider: "codex",
+      codexModel: null,
+      codexReasoning: null,
+      codexThreadId: null,
+      agyModel: null,
+      agyConversationId: null,
+      handoffSummary: null,
+      goalCondition: null,
+      leanMode: true,
+      usageSnapshot: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    const renderer = new StreamRenderer(session, transport, 1);
+
+    await renderer.start();
+
+    expect(sent[0]).toBe("[RUNNING] Codex 세션 시작");
+    renderer.dispose();
+  });
 });

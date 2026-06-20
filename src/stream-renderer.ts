@@ -44,10 +44,16 @@ export class StreamRenderer {
 
   async start(queued = false): Promise<void> {
     const keyboard = new InlineKeyboard().text("중단", `stop:${this.session.id}`);
+    const providerLabel =
+      this.session.provider === "codex" ? "Codex"
+      : this.session.provider === "agy" ? "agy"
+      : "Claude";
     this.statusMessageId = await this.transport.sendText(
       this.session.chatId,
       this.session.topicId,
-      queued ? "[QUEUED] 같은 프로젝트의 앞선 작업을 기다리는 중" : "[RUNNING] Claude 세션 시작",
+      queued
+        ? "[QUEUED] 같은 프로젝트의 앞선 작업을 기다리는 중"
+        : `[RUNNING] ${providerLabel} 세션 시작`,
       keyboard
     );
     if (!queued) {

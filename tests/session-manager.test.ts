@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import { PermissionBroker } from "../src/permission-broker.js";
 import { FALLBACK_MODEL_CATALOG, resolveModel } from "../src/model-catalog.js";
 import {
+  agyFailureFromLog,
+  agyRequestsProceed,
   buildClaudeEnvironment,
   buildCodexEnvironment,
   buildCompactCommand,
@@ -12,6 +14,7 @@ import {
   buildGoalPrompt,
   buildLeanInstructions,
   buildMemoryPrompt,
+  buildPublicProgressInstructions,
   buildUserMessage,
   CLAUDE_MODEL,
   MAX_GOAL_ROUNDS,
@@ -22,6 +25,7 @@ import {
   isRateLimitError,
   loadProjectInstructions,
   MessageQueue,
+  ProgressiveParagraphCollector,
   requireCodexSubscriptionAuth,
   resultFailureText,
   resultSummary,
@@ -183,6 +187,45 @@ describe("failure classification", () => {
     } as Parameters<typeof resultFailureText>[0];
 
     expect(resultFailureText(result, true)).toBe("Claude rate limit rejected");
+  });
+});
+
+describe("agy bridge behavior", () => {
+  it("recognizes a model-authored Proceed request that needs a Telegram button", () => {
+    expect(agyRequestsProceed("**Proceed(진행)** 버튼을 눌러 승인해 주시면 반영하겠습니다.")).toBe(true);
+    expect(agyRequestsProceed("작업을 모두 완료했습니다.")).toBe(false);
+  });
+
+  it("turns a hidden agy quota failure into an actionable error", () => {
+    const message = agyFailureFromLog(
+      "model unreachable: RESOURCE_EXHAUSTED: Individual quota reached. Resets in 155h9m55s."
+    );
+    expect(message).toContain("개인 할당량");
+    expect(message).toContain("155h9m55s");
+  });
+});
+
+describe("public progress streaming", () => {
+  it("requests public progress without exposing hidden reasoning", () => {
+    const instructions = buildPublicProgressInstructions();
+    expect(instructions).toContain("내부 사고 과정");
+    expect(instructions).toContain("공개 가능한");
+    expect(instructions).toContain("독립된 문단");
+  });
+
+  it("emits only completed agy paragraphs and flushes the final remainder", () => {
+    const collector = new ProgressiveParagraphCollector();
+
+    expect(collector.accept("첫 단계 확인 중")).toEqual([]);
+    expect(collector.accept("첫 단계 확인 중입니다.\n\n둘째 단계")).toEqual([
+      "첫 단계 확인 중입니다."
+    ]);
+    expect(collector.accept("첫 단계 확인 중입니다.\n\n둘째 단계 완료.\n\n최종")).toEqual([
+      "둘째 단계 완료."
+    ]);
+    expect(collector.finish("첫 단계 확인 중입니다.\n\n둘째 단계 완료.\n\n최종 답변")).toEqual([
+      "최종 답변"
+    ]);
   });
 });
 

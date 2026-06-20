@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import {
   deleteSession as deleteClaudeSession,
   query,
@@ -16,6 +17,7 @@ import {
   type SDKMessage
 } from "@anthropic-ai/claude-agent-sdk";
 import { Codex, type ThreadItem } from "@openai/codex-sdk";
+import { InlineKeyboard } from "grammy";
 import {
   isRetryableMcpError,
   mcpCallKey,
@@ -112,6 +114,53 @@ export function buildLeanInstructions(enabled: boolean): string {
     "요청하지 않은 추상화, 미래용 확장점, 중복 래퍼, 불필요한 설정과 의존성을 만들지 않는다.",
     "단, 신뢰 경계 입력 검증, 보안, 데이터 손실 방지 오류 처리, 접근성, 사용자가 명시한 요구사항과 실행 가능한 검증은 축소하지 않는다."
   ].join("\n");
+}
+
+export function buildPublicProgressInstructions(): string {
+  return [
+    "작업 중에는 내부 사고 과정이나 숨은 reasoning을 노출하지 마십시오.",
+    "대신 주요 단계의 시작, 확인된 중간 결과, 다음 행동을 공개 가능한 짧은 진행 설명으로 작성하십시오.",
+    "각 진행 설명은 독립된 문단으로 출력하고, 실제 작업 결과와 최종 답변도 명확히 구분하십시오."
+  ].join("\n");
+}
+
+export class ProgressiveParagraphCollector {
+  private emittedLength = 0;
+
+  accept(fullText: string): string[] {
+    if (fullText.length < this.emittedLength) this.emittedLength = 0;
+    const remaining = fullText.slice(this.emittedLength);
+    const boundary = remaining.lastIndexOf("\n\n");
+    if (boundary < 0) return [];
+    const completed = remaining.slice(0, boundary);
+    this.emittedLength += boundary + 2;
+    return completed
+      .split(/\n{2,}/)
+      .map((paragraph) => paragraph.trim())
+      .filter(Boolean);
+  }
+
+  finish(fullText: string): string[] {
+    const completed = this.accept(`${fullText}\n\n`);
+    this.emittedLength = fullText.length;
+    return completed;
+  }
+}
+
+export function agyRequestsProceed(text: string): boolean {
+  return /\bProceed\b[\s\S]{0,100}(?:버튼|승인)/iu.test(text)
+    || /(?:진행|승인)[\s\S]{0,50}버튼/u.test(text);
+}
+
+export function agyFailureFromLog(log: string): string | null {
+  const lines = log.split(/\r?\n/).filter((line) =>
+    /RESOURCE_EXHAUSTED|Individual quota reached|model unreachable/i.test(line)
+  );
+  if (lines.length === 0) return null;
+  const reset = lines.join("\n").match(/Resets in ([0-9hms]+)/i)?.[1];
+  return reset
+    ? `선택한 agy 모델의 개인 할당량이 소진되었습니다. 초기화까지 ${reset} 남았습니다. 다른 모델로 바꾸거나 초기화 후 다시 시도하십시오.`
+    : "선택한 agy 모델의 개인 할당량이 소진되었습니다. 다른 모델로 바꾸거나 할당량 초기화 후 다시 시도하십시오.";
 }
 
 interface RunRequest {
@@ -1687,6 +1736,7 @@ export class SessionManager {
         `장기기억은 ${this.options.claudeMemoryDir} 에 있다. 작업과 관련 있으면 `
         + `${this.options.claudeMemoryDir}/MEMORY.md와 관련 파일을 먼저 읽고 활용하라. `
         + `메모리 기록은 사용자가 /memory로 명시 승인할 때만 한다.`;
+      const progressNote = buildPublicProgressInstructions();
       const iterator = input[Symbol.asyncIterator]();
       // 초기 메시지는 위에서 push했으므로 큐에서 꺼내 첫 턴으로 쓴다. 이후 steer/next로
       // 쌓인 메시지는 pendingTurns>0인 동안 같은 스레드에서 이어지는 턴으로 소비한다.
@@ -1695,7 +1745,7 @@ export class SessionManager {
       while (!pending.done) {
         const content = pending.value.message.content;
         const turnPrompt = typeof content === "string" ? content : request.prompt;
-        const memoryPrefix = firstTurn ? `${memoryNote}\n\n` : "";
+        const memoryPrefix = firstTurn ? `${memoryNote}\n\n${progressNote}\n\n` : "";
         const leanPrefix = session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "";
         run.codexStarts.set("codex", Date.now());
         if (turnTimeout) clearTimeout(turnTimeout);
@@ -1712,7 +1762,10 @@ export class SessionManager {
           });
           for await (const event of streamed.events) {
             if (event.type === "item.completed") {
-              if (event.item.type === "agent_message") attemptResponse = event.item.text;
+              if (event.item.type === "agent_message") {
+                attemptResponse = event.item.text;
+                await renderer.text(event.item.text);
+              }
               const progress = codexProgress(event.item);
               if (progress) renderer.note(progress);
             } else if (event.type === "item.updated") {
@@ -1843,6 +1896,8 @@ export class SessionManager {
       const child = spawn(this.agyBinary(), args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
+      const stdoutDecoder = new StringDecoder("utf8");
+      const stderrDecoder = new StringDecoder("utf8");
       let killTimer: NodeJS.Timeout | undefined;
       const onAbort = () => {
         child.kill("SIGTERM");
@@ -1858,15 +1913,17 @@ export class SessionManager {
         else signal.addEventListener("abort", onAbort, { once: true });
       }
       child.stdout.on("data", (chunk: Buffer) => {
-        stdout += chunk.toString();
+        stdout += stdoutDecoder.write(chunk);
         if (onProgress) onProgress(stdout);
       });
-      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.stderr.on("data", (chunk: Buffer) => { stderr += stderrDecoder.write(chunk); });
       child.on("error", (error) => {
         cleanup();
         reject(error);
       });
       child.on("close", (code) => {
+        stdout += stdoutDecoder.end();
+        stderr += stderrDecoder.end();
         cleanup();
         resolve({ stdout, stderr, code });
       });
@@ -1928,13 +1985,14 @@ export class SessionManager {
         `장기기억은 ${this.options.claudeMemoryDir} 에 있다. 작업과 관련 있으면 `
         + `${this.options.claudeMemoryDir}/MEMORY.md와 관련 파일을 먼저 읽고 활용하라. `
         + `메모리 기록은 사용자가 /memory로 명시 승인할 때만 한다.`;
+      const progressNote = buildPublicProgressInstructions();
       const iterator = input[Symbol.asyncIterator]();
       let pending = await iterator.next();
       let firstTurn = true;
       while (!pending.done) {
         const content = pending.value.message.content;
         const turnPrompt = typeof content === "string" ? content : request.prompt;
-        const memoryPrefix = firstTurn ? `${memoryNote}\n\n` : "";
+        const memoryPrefix = firstTurn ? `${memoryNote}\n\n${progressNote}\n\n` : "";
         const leanPrefix = session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "";
         const finalPrompt = `${memoryPrefix}${leanPrefix}${turnPrompt}`;
 
@@ -1948,27 +2006,49 @@ export class SessionManager {
         // 작동하기 전에 agy가 스스로 print 대기를 끊는다. 우리 타임아웃보다 넉넉히 크게 줘서
         // 종료 판정·메시지를 우리 쪽(turnTimeout)이 일관되게 담당하도록 한다.
         const printTimeoutArg = `${Math.ceil(this.options.codexMcpTimeoutMs / 1000) + 60}s`;
+        const agyLogPath = join(tmpdir(), `telegram-agy-${session.id}-${randomUUID()}.log`);
         const args = [
           "--print", finalPrompt,
           "--dangerously-skip-permissions",
           "--model", agyModel,
-          "--print-timeout", printTimeoutArg
+          "--print-timeout", printTimeoutArg,
+          "--log-file", agyLogPath
         ];
         if (agyConversationId) args.push("--conversation", agyConversationId);
 
         // 첫 턴(대화 id 미보유)에는 새로 생기는 대화 id를 잡기 위해 실행 전 목록을 스냅샷한다.
         const before = agyConversationId ? null : this.listAgyConversationIds();
         let result!: { stdout: string; stderr: string; code: number | null };
+        let agyLog = "";
+        const progress = new ProgressiveParagraphCollector();
+        let progressDelivery = Promise.resolve();
         try {
           result = await this.runAgy(args, session.cwd, controller.signal, (soFar) => {
-            // agy --print stdout이 토막으로 도착하면 경고 배너를 제거한 본문을 미리보기로 흘려보낸다.
-            renderer.partial(this.stripAgyWarning(soFar));
+            // agy --print stdout이 토막으로 도착하면 완성된 공개 문단만 정식 메시지로 보내고,
+            // 아직 끝나지 않은 문단은 상태 메시지 미리보기로만 표시한다.
+            const visible = this.stripAgyWarning(soFar);
+            renderer.partial(visible);
+            for (const paragraph of progress.accept(visible)) {
+              progressDelivery = progressDelivery.then(() => renderer.text(paragraph));
+            }
           });
         } finally {
           if (turnTimeout) clearTimeout(turnTimeout);
+          try {
+            agyLog = readFileSync(agyLogPath, "utf8");
+          } catch {
+            // agy가 로그 파일을 만들지 못한 경우에는 stdout/stderr만으로 판정한다.
+          }
+          try {
+            unlinkSync(agyLogPath);
+          } catch {
+            // 이미 없거나 제거할 수 없는 임시 로그는 다음 OS 정리 주기에 맡긴다.
+          }
         }
         if (timedOut || controller.signal.aborted) throw new Error("turn aborted");
         if (result.code !== 0) {
+          const loggedFailure = agyFailureFromLog(agyLog);
+          if (loggedFailure) throw new Error(loggedFailure);
           const detail = this.stripAgyWarning(result.stderr || result.stdout).trim();
           throw new Error(`agy 실행 실패 (코드 ${result.code}): ${detail.slice(0, 500)}`);
         }
@@ -1982,8 +2062,29 @@ export class SessionManager {
         }
 
         const attemptResponse = this.stripAgyWarning(result.stdout).trim();
+        if (!attemptResponse) {
+          const loggedFailure = agyFailureFromLog(agyLog);
+          if (loggedFailure) throw new Error(loggedFailure);
+          const detail = this.stripAgyWarning(result.stderr).trim();
+          throw new Error(
+            detail
+              ? `agy가 빈 응답을 반환했습니다: ${detail.slice(0, 500)}`
+              : "agy가 성공 종료 코드와 함께 빈 응답을 반환했습니다. 모델 상태와 agy 로그를 확인하십시오."
+          );
+        }
+        for (const paragraph of progress.finish(attemptResponse)) {
+          progressDelivery = progressDelivery.then(() => renderer.text(paragraph));
+        }
+        await progressDelivery;
         lastResponse = attemptResponse || lastResponse;
-        if (attemptResponse) await renderer.text(attemptResponse);
+        if (agyRequestsProceed(attemptResponse)) {
+          await this.transport.sendText(
+            session.chatId,
+            session.topicId,
+            "제시된 계획대로 계속 진행하시겠습니까?",
+            new InlineKeyboard().text("진행", `agygo:${session.id}`)
+          );
+        }
         firstTurn = false;
 
         run.pendingTurns = Math.max(0, run.pendingTurns - 1);

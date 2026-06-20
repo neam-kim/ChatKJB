@@ -1294,6 +1294,26 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply(`다음 실행부터 agy ${option.label} 모델을 사용합니다.`);
   });
 
+  bot.callbackQuery(/^agygo:/, async (ctx) => {
+    const sessionId = ctx.callbackQuery.data.slice("agygo:".length);
+    const session = store.getSession(sessionId);
+    if (!session || session.provider !== "agy") {
+      await ctx.answerCallbackQuery({ text: "agy 세션을 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.answerCallbackQuery({ text: "이미 작업이 실행 중입니다.", show_alert: true });
+      return;
+    }
+    if (!sessions.resume(session, "승인합니다. 제시한 계획대로 계속 진행하십시오.")) {
+      await ctx.answerCallbackQuery({ text: "후속 작업을 시작할 수 없습니다.", show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "진행을 시작했습니다." });
+    await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
+    await ctx.reply("승인되어 후속 작업을 시작했습니다.");
+  });
+
   // 새 세션 기본값 패널: 모델 선택. setm:<provider>:<id>
   bot.callbackQuery(/^setm:/, async (ctx) => {
     const rest = ctx.callbackQuery.data.slice("setm:".length);
