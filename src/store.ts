@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import type { PermissionMode, PermissionUpdate } from "@anthropic-ai/claude-agent-sdk";
 import {
+  DEFAULT_AGY_MODEL,
   DEFAULT_CLAUDE_EFFORT,
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CODEX_MODEL,
@@ -24,10 +25,15 @@ import type {
   UsageSnapshot
 } from "./types.js";
 
+function normalizeProvider(value: string | null | undefined): ProviderKind {
+  return value === "codex" || value === "agy" ? value : "claude";
+}
+
 const SESSION_DEFAULT_SEED: SessionDefaults = {
   provider: "claude",
   claudeModel: DEFAULT_CLAUDE_MODEL,
   codexModel: DEFAULT_CODEX_MODEL,
+  agyModel: DEFAULT_AGY_MODEL,
   thinking: DEFAULT_THINKING_LEVEL,
   claudeEffort: DEFAULT_CLAUDE_EFFORT,
   codexReasoning: DEFAULT_CODEX_REASONING
@@ -50,6 +56,8 @@ interface SessionRow {
   codex_model: string | null;
   codex_reasoning: string | null;
   codex_thread_id: string | null;
+  agy_model: string | null;
+  agy_conversation_id: string | null;
   handoff_summary: string | null;
   goal_condition: string | null;
   lean_mode: number;
@@ -146,6 +154,8 @@ export class StateStore {
         thinking TEXT,
         codex_model TEXT,
         codex_thread_id TEXT,
+        agy_model TEXT,
+        agy_conversation_id TEXT,
         handoff_summary TEXT,
         lean_mode INTEGER NOT NULL DEFAULT 1,
         usage_snapshot TEXT,
@@ -259,6 +269,12 @@ export class StateStore {
     if (!sessionColumns.some((column) => column.name === "handoff_summary")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN handoff_summary TEXT");
     }
+    if (!sessionColumns.some((column) => column.name === "agy_model")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN agy_model TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "agy_conversation_id")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN agy_conversation_id TEXT");
+    }
     const planRunColumns = this.db
       .prepare("PRAGMA table_info(plan_runs)")
       .all() as Array<{ name: string }>;
@@ -301,10 +317,10 @@ export class StateStore {
       INSERT INTO sessions(
         id, sdk_session_id, chat_id, topic_id, project_name, cwd, title,
         status, permission_mode, provider, model, thinking, claude_effort,
-        codex_model, codex_reasoning, codex_thread_id, handoff_summary,
-        goal_condition, lean_mode, usage_snapshot,
+        codex_model, codex_reasoning, codex_thread_id, agy_model, agy_conversation_id,
+        handoff_summary, goal_condition, lean_mode, usage_snapshot,
         always_allowed_tools, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.sdkSessionId,
@@ -322,6 +338,8 @@ export class StateStore {
       session.codexModel ?? null,
       session.codexReasoning ?? null,
       session.codexThreadId ?? null,
+      session.agyModel ?? null,
+      session.agyConversationId ?? null,
       session.handoffSummary ?? null,
       session.goalCondition ?? null,
       session.leanMode ? 1 : 0,
@@ -362,7 +380,7 @@ export class StateStore {
     id: string,
     fields: Partial<Pick<
       SessionRecord,
-      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "codexModel" | "codexReasoning" | "codexThreadId" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
+      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "codexModel" | "codexReasoning" | "codexThreadId" | "agyModel" | "agyConversationId" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
     >>
   ): void {
     const entries: Array<[string, unknown]> = [];
@@ -377,6 +395,8 @@ export class StateStore {
     if ("codexModel" in fields) entries.push(["codex_model", fields.codexModel]);
     if ("codexReasoning" in fields) entries.push(["codex_reasoning", fields.codexReasoning]);
     if ("codexThreadId" in fields) entries.push(["codex_thread_id", fields.codexThreadId]);
+    if ("agyModel" in fields) entries.push(["agy_model", fields.agyModel]);
+    if ("agyConversationId" in fields) entries.push(["agy_conversation_id", fields.agyConversationId]);
     if ("handoffSummary" in fields) entries.push(["handoff_summary", fields.handoffSummary]);
     if ("goalCondition" in fields) entries.push(["goal_condition", fields.goalCondition]);
     if ("leanMode" in fields) entries.push(["lean_mode", fields.leanMode ? 1 : 0]);
@@ -407,11 +427,11 @@ export class StateStore {
       .prepare("SELECT key, value FROM app_settings WHERE key LIKE 'default.%'")
       .all() as Array<{ key: string; value: string }>;
     const stored = new Map(rows.map((row) => [row.key.slice("default.".length), row.value]));
-    const provider = stored.get("provider") === "codex" ? "codex" : "claude";
     return {
-      provider: provider as ProviderKind,
+      provider: normalizeProvider(stored.get("provider")),
       claudeModel: stored.get("claudeModel") ?? SESSION_DEFAULT_SEED.claudeModel,
       codexModel: stored.get("codexModel") ?? SESSION_DEFAULT_SEED.codexModel,
+      agyModel: stored.get("agyModel") ?? SESSION_DEFAULT_SEED.agyModel,
       thinking: stored.get("thinking") ?? SESSION_DEFAULT_SEED.thinking,
       claudeEffort: stored.get("claudeEffort") ?? SESSION_DEFAULT_SEED.claudeEffort,
       codexReasoning: stored.get("codexReasoning") ?? SESSION_DEFAULT_SEED.codexReasoning
@@ -673,13 +693,15 @@ export class StateStore {
       title: row.title,
       status: row.status,
       permissionMode: row.permission_mode,
-      provider: row.provider === "codex" ? "codex" : "claude",
+      provider: normalizeProvider(row.provider),
       model: row.model,
       thinking: row.thinking,
       claudeEffort: row.claude_effort,
       codexModel: row.codex_model,
       codexReasoning: row.codex_reasoning,
       codexThreadId: row.codex_thread_id,
+      agyModel: row.agy_model,
+      agyConversationId: row.agy_conversation_id,
       handoffSummary: row.handoff_summary,
       goalCondition: row.goal_condition,
       leanMode: row.lean_mode !== 0,

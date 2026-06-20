@@ -73,7 +73,7 @@ export interface PlanEvidenceRecord {
   createdAt: number;
 }
 
-export type ProviderKind = "claude" | "codex";
+export type ProviderKind = "claude" | "codex" | "agy";
 
 export interface ProjectConfig {
   name: string;
@@ -87,6 +87,7 @@ export interface SessionDefaults {
   provider: ProviderKind;
   claudeModel: string;
   codexModel: string;
+  agyModel: string;
   thinking: string;
   claudeEffort: string;
   codexReasoning: string;
@@ -140,6 +141,10 @@ export interface SessionRecord {
   codexReasoning: string | null;
   // Codex 스레드 재개 id(`~/.codex/sessions`). Claude의 sdkSessionId에 대응한다.
   codexThreadId: string | null;
+  // agy 전용 설정. provider="agy"일 때 사용한다.
+  agyModel: string | null;
+  // agy 대화 재개 id(`~/.gemini/antigravity-cli/conversations/<id>.db`). codexThreadId에 대응한다.
+  agyConversationId: string | null;
   // 제공사 전환 시 직전 provider가 만든 인계 요약. 다음 턴 프롬프트에 1회 주입 후 비운다.
   handoffSummary: string | null;
   // 활성 목표 조건. 설정되면 한 턴이 끝날 때마다 충족 여부를 평가하고, 미충족이면

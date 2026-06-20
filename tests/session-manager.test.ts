@@ -366,6 +366,8 @@ describe("goal state", () => {
       codexModel: null,
       codexReasoning: null,
       codexThreadId: null,
+      agyModel: null,
+      agyConversationId: null,
       handoffSummary: null,
       goalCondition: null,
       leanMode: true,
@@ -402,6 +404,88 @@ describe("goal state", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it("launches a goal run for codex and agy sessions via their resume handles", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-goal-providers-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const now = Date.now();
+    const base: SessionRecord = {
+      id: "",
+      sdkSessionId: null,
+      chatId: -1001,
+      topicId: 0,
+      projectName: "test",
+      cwd: directory,
+      title: "goal provider",
+      status: "done",
+      permissionMode: "default",
+      model: null,
+      thinking: null,
+      claudeEffort: null,
+      provider: "claude",
+      codexModel: null,
+      codexReasoning: null,
+      codexThreadId: null,
+      agyModel: null,
+      agyConversationId: null,
+      handoffSummary: null,
+      goalCondition: null,
+      leanMode: true,
+      usageSnapshot: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    const codexSession: SessionRecord = {
+      ...base, id: "codex-goal", topicId: 11, provider: "codex", codexThreadId: "thread-1"
+    };
+    const agySession: SessionRecord = {
+      ...base, id: "agy-goal", topicId: 12, provider: "agy", agyConversationId: "conv-1"
+    };
+    const noResumeCodex: SessionRecord = {
+      ...base, id: "codex-no-handle", topicId: 13, provider: "codex"
+    };
+    store.createSession(codexSession);
+    store.createSession(agySession);
+    store.createSession(noResumeCodex);
+    const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const manager = new SessionManager(store, fakeTransport, permissions, {
+      debounceMs: 1,
+      claudeCodeOauthToken: "test-token",
+      mcpToolTimeoutMs: 1000,
+      mcpMaxAttempts: 1,
+      codexMcpTimeoutMs: 1000,
+      codexMcpHeartbeatMs: 1000,
+      longRunningMcpServers: new Set(["codex"]),
+      turnIdleTimeoutMs: 600_000,
+      claudeMemoryDir: join(directory, ".claude", "memory"),
+      modelCatalog: FALLBACK_MODEL_CATALOG,
+      // 백그라운드 실제 실행을 막기 위해 곧장 삭제로 드레인하므로 Claude 트랜스크립트 삭제는 무시한다.
+      deleteClaudeSession: async () => {}
+    });
+
+    try {
+      // 재개 핸들(codexThreadId/agyConversationId)이 있으면 즉시 목표 턴을 큐에 넣는다.
+      expect(manager.setGoal("codex-goal", "테스트 통과")).toBe("queued");
+      expect(store.getSession("codex-goal")?.status).toBe("queued");
+      expect(manager.setGoal("agy-goal", "테스트 통과")).toBe("queued");
+      expect(store.getSession("agy-goal")?.status).toBe("queued");
+      // 재개 핸들이 없으면(한 번도 실행 안 한 세션) 저장만 한다.
+      expect(manager.setGoal("codex-no-handle", "테스트 통과")).toBe("stored");
+      expect(store.getSession("codex-no-handle")?.status).toBe("done");
+
+      // 큐에 들어간 실제 실행이 외부 CLI를 호출하기 전에 안전하게 드레인한다.
+      // deleteSession은 동기 구간에서 먼저 deleting에 등록하므로, await 전에 둘 다 호출하면
+      // 디스패치가 풀릴 때 두 세션 모두 deleting 가드에 걸려 즉시 반환한다. store가 열린 채
+      // 큐가 비워지도록 잠시 대기한 뒤(닫힌 store 접근 방지) 삭제 완료를 기다린다.
+      const drains = [manager.deleteSession(codexSession), manager.deleteSession(agySession)];
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await Promise.all(drains);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("session deletion", () => {
@@ -427,6 +511,8 @@ describe("session deletion", () => {
       codexModel: null,
       codexReasoning: null,
       codexThreadId: null,
+      agyModel: null,
+      agyConversationId: null,
       handoffSummary: null,
       goalCondition: null,
       leanMode: true,

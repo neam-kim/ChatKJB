@@ -29,6 +29,7 @@ export class StreamRenderer {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private typingTimer: NodeJS.Timeout | null = null;
   private lastRendered = "";
+  private partialText = "";
   private readonly sentTexts = new Set<string>();
   private usageSnapshot: UsageSnapshot | null;
   private finished = false;
@@ -68,6 +69,15 @@ export class StreamRenderer {
   note(message: string): void {
     this.events.push(message);
     if (this.events.length > 8) this.events.shift();
+    this.schedule();
+  }
+
+  // 실행 중 자라나는 답변 본문을 상태 메시지에 미리보기로 보여 준다(codex/agy 라이브 스트리밍).
+  // 누적 전체 텍스트를 받아 저장하고, 실제 갱신은 기존 디바운스(schedule)로 throttle 한다.
+  partial(fullTextSoFar: string): void {
+    const next = fullTextSoFar.trimEnd();
+    if (!next || next === this.partialText) return;
+    this.partialText = next;
     this.schedule();
   }
 
@@ -142,7 +152,11 @@ export class StreamRenderer {
     if (this.finished || this.statusMessageId === null) return;
     const recent = this.events.map((event) => `- ${event}`).join("\n");
     const usage = this.usageSnapshot ? `\n${formatUsageSnapshot(this.usageSnapshot)}` : "";
-    const text = `[RUNNING] ${elapsed(this.startedAt)}${usage}\n${recent || "Claude 응답 대기 중"}`;
+    // 자라나는 답변 본문이 있으면 끝부분을 미리보기로 보여 준다(전체는 완료 시 정식 메시지로 전송).
+    const preview = this.partialText
+      ? `\n\n${this.partialText.length > 1200 ? `…${this.partialText.slice(-1200)}` : this.partialText}`
+      : "";
+    const text = `[RUNNING] ${elapsed(this.startedAt)}${usage}\n${recent || "응답 대기 중"}${preview}`;
     if (text === this.lastRendered) return;
     this.lastRendered = text;
     const keyboard = new InlineKeyboard().text("중단", `stop:${this.session.id}`);

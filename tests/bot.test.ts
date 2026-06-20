@@ -28,6 +28,8 @@ function session(status: SessionRecord["status"]): SessionRecord {
     codexModel: null,
     codexReasoning: null,
     codexThreadId: null,
+    agyModel: null,
+    agyConversationId: null,
     handoffSummary: null,
     goalCondition: null,
     leanMode: true,
@@ -63,7 +65,8 @@ function botSetup() {
     codexMcpHeartbeatMs: 10_000,
     longRunningMcpServers: new Set(["codex"]),
     turnIdleTimeoutMs: 120_000,
-    claudeCodeExecutable: undefined
+    claudeCodeExecutable: undefined,
+    agyExecutable: "agy"
   } satisfies AppConfig;
   const instance = createBot(config, store);
   instance.bot.botInfo = {

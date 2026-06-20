@@ -12,6 +12,12 @@ interface ClaudeUserConfig {
   mcpServers?: Record<string, unknown>;
 }
 
+/** 파일에서 읽어 타임아웃을 적용할 수 있는 서버 형태(인스턴스 변형 제외). */
+export type ConfigurableMcpServer =
+  | McpStdioServerConfig
+  | McpHttpServerConfig
+  | McpSSEServerConfig;
+
 function stringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((item) => typeof item === "string")
     ? value
@@ -56,29 +62,67 @@ function remoteServer(value: unknown): McpHttpServerConfig | McpSSEServerConfig 
   };
 }
 
+/**
+ * 단일 MCP 서버 항목(claude.json 또는 codex config에서 정규화된 객체)을 SDK 설정으로 파싱한다.
+ * stdio(command) 또는 remote(http/sse) 둘 중 하나로 해석하며, 알 수 없는 형태면 null.
+ */
+export function parseMcpServerEntry(raw: unknown): ConfigurableMcpServer | null {
+  return stdioServer(raw) ?? remoteServer(raw);
+}
+
+/**
+ * 서버에 타임아웃과 alwaysLoad(장기 실행 서버만)를 적용한다. 장기 실행 서버는 tool search
+ * 지연 대신 항상 프롬프트에 포함되고, 나머지는 alwaysLoad를 주지 않아 지연 로딩된다.
+ */
+export function withMcpTimeout(
+  name: string,
+  server: ConfigurableMcpServer,
+  generalTimeoutMs: number,
+  longRunningTimeoutMs: number,
+  longRunningServers: ReadonlySet<string>
+): McpServerConfig {
+  const isLongRunning = longRunningServers.has(name.toLowerCase());
+  return {
+    ...server,
+    timeout: isLongRunning ? longRunningTimeoutMs : generalTimeoutMs,
+    ...(isLongRunning ? { alwaysLoad: true } : {})
+  };
+}
+
+/** claude.json의 mcpServers만 정규화해 반환한다(타임아웃 미적용). */
+export function loadClaudeJsonServers(
+  configPath = join(homedir(), ".claude.json")
+): Record<string, ConfigurableMcpServer> {
+  try {
+    const config = JSON.parse(readFileSync(configPath, "utf8")) as ClaudeUserConfig;
+    const result: Record<string, ConfigurableMcpServer> = {};
+    for (const [name, rawServer] of Object.entries(config.mcpServers ?? {})) {
+      const server = parseMcpServerEntry(rawServer);
+      if (server) result[name] = server;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
 export function loadMcpServersWithTimeouts(
   generalTimeoutMs: number,
   longRunningTimeoutMs: number,
   longRunningServers: ReadonlySet<string> = new Set(["codex"]),
   configPath = join(homedir(), ".claude.json")
 ): Record<string, McpServerConfig> {
-  try {
-    const config = JSON.parse(readFileSync(configPath, "utf8")) as ClaudeUserConfig;
-    const result: Record<string, McpServerConfig> = {};
-    for (const [name, rawServer] of Object.entries(config.mcpServers ?? {})) {
-      const server = stdioServer(rawServer) ?? remoteServer(rawServer);
-      if (!server) continue;
-      const isLongRunning = longRunningServers.has(name.toLowerCase());
-      result[name] = {
-        ...server,
-        timeout: isLongRunning ? longRunningTimeoutMs : generalTimeoutMs,
-        ...(isLongRunning ? { alwaysLoad: true } : {})
-      };
-    }
-    return result;
-  } catch {
-    return {};
+  const result: Record<string, McpServerConfig> = {};
+  for (const [name, server] of Object.entries(loadClaudeJsonServers(configPath))) {
+    result[name] = withMcpTimeout(
+      name,
+      server,
+      generalTimeoutMs,
+      longRunningTimeoutMs,
+      longRunningServers
+    );
   }
+  return result;
 }
 
 export function mcpServerName(toolName: string): string | null {

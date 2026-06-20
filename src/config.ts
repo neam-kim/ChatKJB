@@ -47,7 +47,8 @@ const environmentSchema = z.object({
   TURN_IDLE_TIMEOUT_MINUTES: z.coerce.number().int().min(1).default(35),
   CLAUDE_MEMORY_DIR: z.string().default("~/.claude/memory"),
   FILE_INBOX_DIR: z.string().default("~/.claude/channels/telegram/inbox"),
-  CLAUDE_CODE_EXECUTABLE: z.string().optional()
+  CLAUDE_CODE_EXECUTABLE: z.string().optional(),
+  AGY_EXECUTABLE: z.string().optional()
 });
 
 const projectSchema = z.object({
@@ -77,6 +78,14 @@ export type AppConfig = Awaited<ReturnType<typeof loadConfig>>;
 function absolutePath(path: string): string {
   const expanded = path.trim().replace(/^~(?=\/|$)/, homedir());
   return isAbsolute(expanded) ? expanded : resolve(process.cwd(), expanded);
+}
+
+// agy 바이너리 경로를 정한다. 데몬 PATH에 ~/.local/bin이 없을 수 있어, 명시 env가 없으면
+// 표준 설치 경로(~/.local/bin/agy)를 확인하고, 없으면 PATH의 "agy"에 맡긴다.
+function resolveAgyExecutable(explicit: string | undefined): string {
+  if (explicit && explicit.trim()) return absolutePath(explicit);
+  const local = join(homedir(), ".local", "bin", "agy");
+  return existsSync(local) ? local : "agy";
 }
 
 function validateEnvironmentFile(): void {
@@ -261,6 +270,7 @@ export async function loadConfig() {
       env.CODEX_MCP_TIMEOUT_MINUTES * 60_000 + 300_000,
       env.APPROVAL_TIMEOUT_MINUTES * 60_000 + 300_000
     ),
-    claudeCodeExecutable: env.CLAUDE_CODE_EXECUTABLE
+    claudeCodeExecutable: env.CLAUDE_CODE_EXECUTABLE,
+    agyExecutable: resolveAgyExecutable(env.AGY_EXECUTABLE)
   };
 }

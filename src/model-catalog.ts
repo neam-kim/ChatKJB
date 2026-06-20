@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -9,6 +9,7 @@ const execFileAsync = promisify(execFile);
 // Claude 모델 조회는 Claude Code 자식 프로세스를 띄우므로 콜드스타트 여유를 둔다.
 const CLAUDE_DISCOVERY_TIMEOUT_MS = 20_000;
 const CODEX_DISCOVERY_TIMEOUT_MS = 15_000;
+const AGY_DISCOVERY_TIMEOUT_MS = 15_000;
 
 export type ClaudeThinkingLevel =
   | "adaptive"
@@ -47,13 +48,22 @@ export interface CodexModelOption {
   source: "cli" | "fallback";
 }
 
+// agy는 추론(effort)이 모델 이름에 포함되므로 Codex 같은 별도 reasoning 축이 없다.
+export interface AgyModelOption {
+  id: string;
+  label: string;
+  source: "cli" | "fallback";
+}
+
 export interface ModelCatalog {
   claudeModels: ClaudeModelOption[];
   codexModels: CodexModelOption[];
+  agyModels: AgyModelOption[];
 }
 
 export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
+export const DEFAULT_AGY_MODEL = "Gemini 3.1 Pro (High)";
 export const DEFAULT_THINKING_LEVEL: ClaudeThinkingLevel = "adaptive";
 // Claude 작업량(effort). API 기본값과 동일하게 high. null이면 SDK에 effort를 넘기지 않아 API 기본(high)이 적용된다.
 export const DEFAULT_CLAUDE_EFFORT: ClaudeThinkingLevel = "high";
@@ -116,9 +126,22 @@ export const FALLBACK_CODEX_MODELS: CodexModelOption[] = [
   }
 ];
 
+// `agy models` 출력(표시명)을 그대로 쓴다. agy --model 은 이 표시명 문자열을 받는다.
+export const FALLBACK_AGY_MODELS: AgyModelOption[] = [
+  "Gemini 3.5 Flash (Medium)",
+  "Gemini 3.5 Flash (High)",
+  "Gemini 3.5 Flash (Low)",
+  "Gemini 3.1 Pro (Low)",
+  "Gemini 3.1 Pro (High)",
+  "Claude Sonnet 4.6 (Thinking)",
+  "Claude Opus 4.6 (Thinking)",
+  "GPT-OSS 120B (Medium)"
+].map((name) => ({ id: name, label: name, source: "fallback" as const }));
+
 export const FALLBACK_MODEL_CATALOG: ModelCatalog = {
   claudeModels: FALLBACK_CLAUDE_MODELS,
-  codexModels: FALLBACK_CODEX_MODELS
+  codexModels: FALLBACK_CODEX_MODELS,
+  agyModels: FALLBACK_AGY_MODELS
 };
 
 function thinkingOptions(levels: ClaudeThinkingLevel[]): ThinkingOption[] {
@@ -159,6 +182,17 @@ export function resolveCodexModel(catalog: ModelCatalog, input: string): string 
   const value = input.trim().toLowerCase();
   if (!value) return undefined;
   return catalog.codexModels.find((option) => option.id.toLowerCase() === value)?.id;
+}
+
+export function agyModelLabel(catalog: ModelCatalog, id: string | null | undefined): string {
+  if (!id) return agyModelLabel(catalog, DEFAULT_AGY_MODEL);
+  return catalog.agyModels.find((option) => option.id === id)?.label ?? id;
+}
+
+export function resolveAgyModel(catalog: ModelCatalog, input: string): string | undefined {
+  const value = input.trim().toLowerCase();
+  if (!value) return undefined;
+  return catalog.agyModels.find((option) => option.id.toLowerCase() === value)?.id;
 }
 
 export function thinkingOptionsForModel(
@@ -229,18 +263,56 @@ export interface CatalogProbe {
   cwd: string;
   oauthToken: string;
   claudeCodeExecutable?: string | undefined;
+  agyExecutable?: string | undefined;
   mcpToolTimeoutMs?: number | undefined;
 }
 
 export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalog> {
-  const [claudeModels, codexModels] = await Promise.all([
+  const [claudeModels, codexModels, agyModels] = await Promise.all([
     discoverClaudeModels(probe).catch(() => FALLBACK_CLAUDE_MODELS),
-    discoverCodexModels().catch(() => FALLBACK_CODEX_MODELS)
+    discoverCodexModels().catch(() => FALLBACK_CODEX_MODELS),
+    discoverAgyModels(probe).catch(() => FALLBACK_AGY_MODELS)
   ]);
   return {
     claudeModels: claudeModels.length ? claudeModels : FALLBACK_CLAUDE_MODELS,
-    codexModels: codexModels.length ? codexModels : FALLBACK_CODEX_MODELS
+    codexModels: codexModels.length ? codexModels : FALLBACK_CODEX_MODELS,
+    agyModels: agyModels.length ? agyModels : FALLBACK_AGY_MODELS
   };
+}
+
+// agy를 비대화로 실행해 stdout을 모은다. stdin을 ignore(=/dev/null)로 줘야 한다.
+// 그러지 않으면 agy가 stdin EOF를 기다리며 멈춘다(TTY 없는 파이프 환경).
+function runAgyCommand(binary: string, args: string[], timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    timer.unref();
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`agy ${args.join(" ")} 실패 (코드 ${code}): ${stderr.slice(0, 200)}`));
+    });
+  });
+}
+
+// agy 모델은 `agy models` 서브커맨드가 표시명을 한 줄씩 출력한다. 이 표시명을 그대로
+// --model 값으로 쓴다(추론 수준이 이름에 포함됨).
+async function discoverAgyModels(probe: CatalogProbe): Promise<AgyModelOption[]> {
+  const stdout = await runAgyCommand(probe.agyExecutable ?? "agy", ["models"], AGY_DISCOVERY_TIMEOUT_MS);
+  const seen = new Set<string>();
+  const models: AgyModelOption[] = [];
+  for (const line of stdout.split("\n")) {
+    const name = line.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    models.push({ id: name, label: name, source: "cli" });
+  }
+  return models;
 }
 
 // Claude 모델은 공개 REST API가 setup-token OAuth를 받지 않으므로(401), Agent SDK의

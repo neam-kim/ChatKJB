@@ -18,20 +18,23 @@ async function main(): Promise<void> {
       cwd: firstProject.cwd,
       oauthToken: config.claudeCodeOauthToken,
       claudeCodeExecutable: config.claudeCodeExecutable,
+      agyExecutable: config.agyExecutable,
       mcpToolTimeoutMs: config.mcpToolTimeoutMs
     }).catch(() => FALLBACK_MODEL_CATALOG);
     const claudeDynamic = config.modelCatalog.claudeModels.some((m) => m.source === "api");
     const codexDynamic = config.modelCatalog.codexModels.some((m) => m.source === "cli");
+    const agyDynamic = config.modelCatalog.agyModels.some((m) => m.source === "cli");
     console.log(
       `Model catalog → Claude: ${claudeDynamic ? "동적" : "기본값"}, `
-      + `Codex: ${codexDynamic ? "동적" : "기본값"}`
+      + `Codex: ${codexDynamic ? "동적" : "기본값"}, `
+      + `agy: ${agyDynamic ? "동적" : "기본값"}`
     );
   }
 
   const { bot } = createBot(config, store);
 
   await bot.api.setMyCommands([
-    { command: "new", description: "새 작업 시작 (Claude/Codex)" },
+    { command: "new", description: "새 작업 시작 (Claude/Codex/agy)" },
     { command: "status", description: "오케스트레이터와 현재 작업 상태" },
     { command: "doctor", description: "실행 환경 진단" },
     { command: "addp", description: "절대경로 프로젝트 추가" },
@@ -47,7 +50,7 @@ async function main(): Promise<void> {
     { command: "compact", description: "현재 세션 컨텍스트 압축" },
     { command: "memory", description: "현재 세션을 전역 메모리에 기록" },
     { command: "mode", description: "권한 모드 확인 또는 변경" },
-    { command: "model", description: "제공자(Claude/Codex)·모델 확인 또는 변경" },
+    { command: "model", description: "제공자(Claude/Codex/agy)·모델 확인 또는 변경" },
     { command: "thinking", description: "Claude 확장적 사고 on/off 확인 또는 변경" },
     { command: "power", description: "Claude 작업량(effort) 확인 또는 변경" },
     { command: "effort", description: "Codex 추론 작업량 확인 또는 변경" },

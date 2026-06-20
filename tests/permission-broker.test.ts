@@ -76,6 +76,8 @@ function setup() {
     codexModel: null,
     codexReasoning: null,
     codexThreadId: null,
+    agyModel: null,
+    agyConversationId: null,
     handoffSummary: null,
     goalCondition: null,
     leanMode: true,

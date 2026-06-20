@@ -1,5 +1,6 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,18 +18,20 @@ import {
 import { Codex, type ThreadItem } from "@openai/codex-sdk";
 import {
   isRetryableMcpError,
-  loadMcpServersWithTimeouts,
   mcpCallKey,
   mcpServerName
 } from "./mcp-policy.js";
+import { loadClaudeConnectors, loadMergedConnectors, syncAgyMcpConfig } from "./connectors.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { StateStore } from "./store.js";
 import { StreamRenderer } from "./stream-renderer.js";
 import { safeErrorMessage } from "./telegram-transport.js";
 import { TokenPool } from "./token-pool.js";
 import {
+  agyModelLabel,
   codexModelLabel,
   codexReasoningLabel,
+  DEFAULT_AGY_MODEL,
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING,
@@ -129,6 +132,8 @@ interface SessionManagerOptions {
   // 한도 도달 시 페일오버할 추가 계정 토큰(선택). 기본 토큰 다음 우선순위로 사용된다.
   additionalOauthTokens?: string[];
   claudeCodeExecutable?: string;
+  // agy(Antigravity CLI) 바이너리 경로. 데몬 PATH에 ~/.local/bin이 없을 수 있어 명시 경로를 받는다.
+  agyExecutable?: string;
   mcpToolTimeoutMs: number;
   mcpMaxAttempts: number;
   codexMcpTimeoutMs: number;
@@ -650,7 +655,8 @@ export class SessionManager {
     leanMode = true,
     provider: ProviderKind = "claude",
     codexModel?: string | null,
-    codexReasoning?: string | null
+    codexReasoning?: string | null,
+    agyModel?: string | null
   ): SessionRecord {
     const now = Date.now();
     const session: SessionRecord = {
@@ -670,6 +676,8 @@ export class SessionManager {
       codexModel: codexModel ?? null,
       codexReasoning: codexReasoning ?? null,
       codexThreadId: null,
+      agyModel: agyModel ?? null,
+      agyConversationId: null,
       handoffSummary: null,
       goalCondition: null,
       leanMode,
@@ -693,6 +701,7 @@ export class SessionManager {
     // SDK 세션 id가 있어야 한다. 제공사 전환 직후(handoffSummary 보유)에는 양쪽 모두 새
     // 맥락에서 요약을 받아 시작하므로 재개 핸들 없이도 진행한다.
     const canResume = session.provider === "codex"
+      || session.provider === "agy"
       || !!session.sdkSessionId
       || !!session.handoffSummary;
     if (!canResume) return false;
@@ -719,9 +728,16 @@ export class SessionManager {
     return true;
   }
 
+  /** 제공자별 "이어 갈 수 있는 재개 핸들". null이면 아직 한 번도 실행되지 않은 세션이다. */
+  private resumeHandle(session: SessionRecord): string | null {
+    if (session.provider === "codex") return session.codexThreadId;
+    if (session.provider === "agy") return session.agyConversationId;
+    return session.sdkSessionId;
+  }
+
   /**
-   * 목표를 설정한다. 유휴 상태이고 이어 갈 Claude 세션이 있으면 즉시 목표를 향한 턴을
-   * 시작한다("queued"). 실행 중이면 현재 턴이 끝날 때 평가한다("active"). 이어 갈 세션이
+   * 목표를 설정한다. 유휴 상태이고 이어 갈 세션(Claude/Codex/agy)이 있으면 즉시 목표를 향한
+   * 턴을 시작한다("queued"). 실행 중이면 현재 턴이 끝날 때 평가한다("active"). 이어 갈 세션이
    * 아직 없으면 저장만 한다("stored").
    */
   setGoal(sessionId: string, condition: string): "queued" | "active" | "stored" {
@@ -731,12 +747,16 @@ export class SessionManager {
     this.store.updateSession(sessionId, { goalCondition: clean });
     this.goalRounds.set(sessionId, 0);
     if (this.active.has(sessionId)) return "active";
-    if (!session.sdkSessionId) return "stored";
+    if (!this.resumeHandle(session)) return "stored";
     this.store.updateSession(sessionId, { status: "queued" });
     this.enqueue({
       session: this.store.getSession(sessionId) ?? session,
       prompt: buildGoalPrompt(clean),
-      resumeSessionId: session.sdkSessionId
+      // resumeSessionId는 Claude 전용 재개 핸들이다. codex/agy는 executeX가 스레드/대화 id를
+      // 저장소에서 다시 읽어 재개하므로 전달하지 않는다.
+      ...(session.provider === "claude" && session.sdkSessionId
+        ? { resumeSessionId: session.sdkSessionId }
+        : {})
     });
     return "queued";
   }
@@ -907,6 +927,13 @@ export class SessionManager {
         codexThreadId: null,
         ...(summary ? { handoffSummary: summary } : {})
       });
+    } else if (target === "agy") {
+      // 대상=agy: 새 대화에서 요약을 받아 시작한다.
+      this.store.updateSession(sessionId, {
+        provider: "agy",
+        agyConversationId: null,
+        ...(summary ? { handoffSummary: summary } : {})
+      });
     } else {
       // 대상=Claude: 새 SDK 세션에서 요약을 받아 시작한다.
       this.store.updateSession(sessionId, {
@@ -938,6 +965,19 @@ export class SessionManager {
         mcpFailures: new Map()
       };
       return this.runReadOnlyClaude(session, controller, run, prompt, this.tokenPool.select());
+    }
+    if (session.provider === "agy") {
+      // agy: 직전 대화를 재개해 요약 한 턴을 받는다(요약 프롬프트는 읽기 전용 의도).
+      if (!session.agyConversationId) return "";
+      const { stdout } = await this.runAgy(
+        [
+          "--print", prompt,
+          "--dangerously-skip-permissions",
+          "--conversation", session.agyConversationId
+        ],
+        session.cwd
+      );
+      return this.stripAgyWarning(stdout).trim();
     }
     // Codex: 직전 스레드를 재개해 비스트리밍으로 요약 한 턴을 받는다.
     if (!session.codexThreadId) return "";
@@ -1122,6 +1162,10 @@ export class SessionManager {
       await this.executeCodex(request);
       return;
     }
+    if (provider === "agy") {
+      await this.executeAgy(request);
+      return;
+    }
     await this.execute(request);
   }
 
@@ -1259,7 +1303,12 @@ export class SessionManager {
         ...(effort ? { effort } : {}),
         permissionMode: session.permissionMode,
         allowedTools: ["Read", "Glob", "Grep", "WebSearch"],
-        settingSources: [],
+        // 데스크톱/Claude Code와 동일하게 사용자 설정에서 스킬·플러그인·전역 CLAUDE.md를
+        // 발견한다. 사전 승인 권한 규칙은 settings.local.json('local' 소스)에만 있어 'user'
+        // 소스로는 로드되지 않으므로 모든 도구는 그대로 canUseTool 승인 브로커를 거친다.
+        settingSources: ["user"],
+        // 점진적 공개(name+description만 선로딩)로 모든 스킬을 켠다.
+        skills: "all",
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
@@ -1290,7 +1339,9 @@ export class SessionManager {
           process.env,
           this.options.mcpToolTimeoutMs
         ),
-        mcpServers: loadMcpServersWithTimeouts(
+        // claude.json + codex config.toml의 커넥터를 병합해 전달한다(장기 실행 서버만
+        // alwaysLoad, 나머지는 tool search로 지연 로딩되어 컨텍스트를 아낀다).
+        mcpServers: loadClaudeConnectors(
           this.options.mcpToolTimeoutMs,
           this.options.codexMcpTimeoutMs,
           this.options.longRunningMcpServers
@@ -1664,6 +1715,9 @@ export class SessionManager {
               if (event.item.type === "agent_message") attemptResponse = event.item.text;
               const progress = codexProgress(event.item);
               if (progress) renderer.note(progress);
+            } else if (event.type === "item.updated") {
+              // 답변 본문이 자라는 동안 상태 메시지에 미리보기로 흘려보낸다.
+              if (event.item.type === "agent_message") renderer.partial(event.item.text);
             } else if (event.type === "turn.completed") {
               completed = true;
             } else if (event.type === "turn.failed") {
@@ -1696,6 +1750,9 @@ export class SessionManager {
       this.store.updateSession(session.id, { status: "done" });
       await renderer.finish("done", lastResponse ? "" : "Codex가 텍스트 응답 없이 작업을 마쳤습니다.");
       await this.safeRename(session, `[DONE] ${session.title}`);
+      // 활성 목표가 있으면 충족 여부를 읽기 전용 Haiku로 평가하고, 미충족이면 다음 턴을 자동 예약한다.
+      // codex는 Claude 재개 핸들이 없으므로 sdkSessionId=null로 넘긴다(executeCodex가 스레드를 재개).
+      await this.maybeContinueGoal(session, request, null);
     } catch (error) {
       if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
       console.error(
@@ -1714,6 +1771,251 @@ export class SessionManager {
       } else {
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", `Codex 실행 실패: ${safeErrorMessage(error)}`);
+        await this.safeRename(session, `[ERROR] ${session.title}`);
+      }
+    } finally {
+      if (turnTimeout) clearTimeout(turnTimeout);
+      renderer.dispose();
+      input.close();
+      this.active.delete(session.id);
+    }
+  }
+
+  private agyBinary(): string {
+    return this.options.agyExecutable ?? "agy";
+  }
+
+  private agyConversationsDir(): string {
+    return join(homedir(), ".gemini", "antigravity-cli", "conversations");
+  }
+
+  // 현재 존재하는 agy 대화 id 집합(파일명에서 .db 제거). 디렉터리가 없으면 빈 집합.
+  private listAgyConversationIds(): Set<string> {
+    try {
+      return new Set(
+        readdirSync(this.agyConversationsDir())
+          .filter((name) => name.endsWith(".db"))
+          .map((name) => name.slice(0, -3))
+      );
+    } catch {
+      return new Set();
+    }
+  }
+
+  // 첫 턴 실행 전후 대화 파일 차집합으로 새 대화 id를 잡는다. agy가 id를 지정하게 두지 않아
+  // 직접 잡아야 한다. 동시 생성이 겹치면 가장 최근 mtime을 고른다.
+  private captureNewAgyConversationId(before: Set<string>): string | null {
+    const dir = this.agyConversationsDir();
+    let ids: string[];
+    try {
+      ids = readdirSync(dir).filter((name) => name.endsWith(".db")).map((name) => name.slice(0, -3));
+    } catch {
+      return null;
+    }
+    let newest: { id: string; mtimeMs: number } | null = null;
+    for (const id of ids) {
+      if (before.has(id)) continue;
+      let mtimeMs = 0;
+      try {
+        mtimeMs = statSync(join(dir, `${id}.db`)).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (!newest || mtimeMs > newest.mtimeMs) newest = { id, mtimeMs };
+    }
+    return newest?.id ?? null;
+  }
+
+  // agy stdout 선두의 "Warning: conversation ... not found." 한 줄을 제거한다.
+  private stripAgyWarning(text: string): string {
+    return text.replace(/^Warning: conversation .*not found\.\s*\n?/, "");
+  }
+
+  // agy를 한 번 실행한다. signal로 중단하면 SIGTERM 후 잠시 뒤 SIGKILL.
+  private runAgy(
+    args: string[],
+    cwd: string,
+    signal?: AbortSignal,
+    onProgress?: (stdoutSoFar: string) => void
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    return new Promise((resolve, reject) => {
+      // stdin을 ignore(=/dev/null)로 줘야 한다. 안 그러면 agy가 stdin EOF를 기다리며 멈춘다.
+      const child = spawn(this.agyBinary(), args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      let killTimer: NodeJS.Timeout | undefined;
+      const onAbort = () => {
+        child.kill("SIGTERM");
+        killTimer = setTimeout(() => child.kill("SIGKILL"), 3000);
+        killTimer.unref();
+      };
+      const cleanup = () => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        if (killTimer) clearTimeout(killTimer);
+      };
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+        if (onProgress) onProgress(stdout);
+      });
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.on("error", (error) => {
+        cleanup();
+        reject(error);
+      });
+      child.on("close", (code) => {
+        cleanup();
+        resolve({ stdout, stderr, code });
+      });
+    });
+  }
+
+  private async executeAgy(request: RunRequest): Promise<void> {
+    if (this.deleting.has(request.session.id)) return;
+    let session = this.store.getSession(request.session.id);
+    if (!session) return;
+    request = this.applyHandoffSummary(request, session);
+    session = this.store.getSession(request.session.id) ?? session;
+
+    const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
+    const controller = new AbortController();
+    const input = new MessageQueue();
+    input.push(buildUserMessage(request.prompt));
+    const run: ActiveRun = {
+      controller,
+      input,
+      pendingTurns: 1,
+      startedAt: Date.now(),
+      codexTimers: new Map(),
+      codexStarts: new Map(),
+      mcpFailures: new Map()
+    };
+    this.active.set(session.id, run);
+
+    let timedOut = false;
+    let turnTimeout: NodeJS.Timeout | undefined;
+    let lastResponse = "";
+    let agyConversationId = session.agyConversationId;
+
+    try {
+      await this.safeRename(session, `[RUNNING] ${session.title}`);
+      await renderer.start(false);
+      this.store.updateSession(session.id, { status: "running" });
+
+      const agyModel = session.agyModel ?? DEFAULT_AGY_MODEL;
+      // 병합 커넥터(claude.json + codex config)를 agy가 네이티브로 읽는 mcp_config.json에 동기화한다.
+      // 스킬·플러그인은 agy가 ~/.gemini/config 아래에서 네이티브로 읽으므로 별도 작업이 없다.
+      let agyConnectorCount = 0;
+      try {
+        const sync = syncAgyMcpConfig(loadMergedConnectors());
+        agyConnectorCount = sync.count;
+      } catch (error) {
+        console.error(
+          `agy MCP 동기화 실패 (session=${session.id}):`,
+          safeErrorMessage(error)
+        );
+      }
+      renderer.note(
+        `agy 실행 (${agyModelLabel(this.options.modelCatalog, agyModel)})`
+        + ` · 커넥터 ${agyConnectorCount}개 동기화(~/.gemini/config/mcp_config.json)`
+      );
+
+      // agy 턴에는 시스템 프롬프트가 없으므로 첫 턴에 장기기억 위치를 프롬프트로 알린다(Codex와 동일).
+      const memoryNote =
+        `장기기억은 ${this.options.claudeMemoryDir} 에 있다. 작업과 관련 있으면 `
+        + `${this.options.claudeMemoryDir}/MEMORY.md와 관련 파일을 먼저 읽고 활용하라. `
+        + `메모리 기록은 사용자가 /memory로 명시 승인할 때만 한다.`;
+      const iterator = input[Symbol.asyncIterator]();
+      let pending = await iterator.next();
+      let firstTurn = true;
+      while (!pending.done) {
+        const content = pending.value.message.content;
+        const turnPrompt = typeof content === "string" ? content : request.prompt;
+        const memoryPrefix = firstTurn ? `${memoryNote}\n\n` : "";
+        const leanPrefix = session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "";
+        const finalPrompt = `${memoryPrefix}${leanPrefix}${turnPrompt}`;
+
+        if (turnTimeout) clearTimeout(turnTimeout);
+        turnTimeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, this.options.codexMcpTimeoutMs);
+
+        // agy --print-timeout 기본값은 5분이라, 이를 넘기면 우리 턴 타임아웃(기본 30분)이
+        // 작동하기 전에 agy가 스스로 print 대기를 끊는다. 우리 타임아웃보다 넉넉히 크게 줘서
+        // 종료 판정·메시지를 우리 쪽(turnTimeout)이 일관되게 담당하도록 한다.
+        const printTimeoutArg = `${Math.ceil(this.options.codexMcpTimeoutMs / 1000) + 60}s`;
+        const args = [
+          "--print", finalPrompt,
+          "--dangerously-skip-permissions",
+          "--model", agyModel,
+          "--print-timeout", printTimeoutArg
+        ];
+        if (agyConversationId) args.push("--conversation", agyConversationId);
+
+        // 첫 턴(대화 id 미보유)에는 새로 생기는 대화 id를 잡기 위해 실행 전 목록을 스냅샷한다.
+        const before = agyConversationId ? null : this.listAgyConversationIds();
+        let result!: { stdout: string; stderr: string; code: number | null };
+        try {
+          result = await this.runAgy(args, session.cwd, controller.signal, (soFar) => {
+            // agy --print stdout이 토막으로 도착하면 경고 배너를 제거한 본문을 미리보기로 흘려보낸다.
+            renderer.partial(this.stripAgyWarning(soFar));
+          });
+        } finally {
+          if (turnTimeout) clearTimeout(turnTimeout);
+        }
+        if (timedOut || controller.signal.aborted) throw new Error("turn aborted");
+        if (result.code !== 0) {
+          const detail = this.stripAgyWarning(result.stderr || result.stdout).trim();
+          throw new Error(`agy 실행 실패 (코드 ${result.code}): ${detail.slice(0, 500)}`);
+        }
+
+        if (before) {
+          const newId = this.captureNewAgyConversationId(before);
+          if (newId && newId !== agyConversationId) {
+            agyConversationId = newId;
+            this.store.updateSession(session.id, { agyConversationId });
+          }
+        }
+
+        const attemptResponse = this.stripAgyWarning(result.stdout).trim();
+        lastResponse = attemptResponse || lastResponse;
+        if (attemptResponse) await renderer.text(attemptResponse);
+        firstTurn = false;
+
+        run.pendingTurns = Math.max(0, run.pendingTurns - 1);
+        if (run.pendingTurns === 0) break;
+        renderer.note(`예약 메시지 ${run.pendingTurns}개 처리 대기`);
+        pending = await iterator.next();
+      }
+
+      this.store.updateSession(session.id, { status: "done" });
+      await renderer.finish("done", lastResponse ? "" : "agy가 텍스트 응답 없이 작업을 마쳤습니다.");
+      await this.safeRename(session, `[DONE] ${session.title}`);
+      // 활성 목표가 있으면 충족 여부를 읽기 전용 Haiku로 평가하고, 미충족이면 다음 턴을 자동 예약한다.
+      // agy는 Claude 재개 핸들이 없으므로 sdkSessionId=null로 넘긴다(executeAgy가 대화를 재개).
+      await this.maybeContinueGoal(session, request, null);
+    } catch (error) {
+      if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
+      console.error(
+        `agy run failed (session=${session.id}):`,
+        safeErrorMessage(error, this.oauthTokens)
+      );
+      if (timedOut) {
+        const minutes = Math.round(this.options.codexMcpTimeoutMs / 60_000);
+        this.store.updateSession(session.id, { status: "error" });
+        await renderer.finish("error", `agy 턴이 ${minutes}분 제한을 초과해 중단되었습니다.`);
+        await this.safeRename(session, `[STALL] ${session.title}`);
+      } else if (controller.signal.aborted) {
+        this.store.updateSession(session.id, { status: "aborted" });
+        await renderer.finish("aborted", "사용자가 작업을 중단했습니다.");
+        await this.safeRename(session, `[STOP] ${session.title}`);
+      } else {
+        this.store.updateSession(session.id, { status: "error" });
+        await renderer.finish("error", `agy 실행 실패: ${safeErrorMessage(error)}`);
         await this.safeRename(session, `[ERROR] ${session.title}`);
       }
     } finally {

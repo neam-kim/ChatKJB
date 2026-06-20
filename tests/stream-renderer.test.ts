@@ -36,6 +36,8 @@ describe("StreamRenderer text deduplication", () => {
       codexModel: null,
       codexReasoning: null,
       codexThreadId: null,
+      agyModel: null,
+      agyConversationId: null,
       handoffSummary: null,
       goalCondition: null,
       leanMode: true,
@@ -88,6 +90,8 @@ describe("StreamRenderer text deduplication", () => {
       codexModel: null,
       codexReasoning: null,
       codexThreadId: null,
+      agyModel: null,
+      agyConversationId: null,
       handoffSummary: null,
       goalCondition: null,
       leanMode: true,
@@ -102,5 +106,55 @@ describe("StreamRenderer text deduplication", () => {
 
     expect(edited.at(-1)).toContain("[DONE]");
     expect(sent.at(-1)).toContain("[DONE] 작업 종료");
+  });
+
+  it("streams a growing partial answer into the running status message", async () => {
+    const edited: string[] = [];
+    const transport: MessageTransport = {
+      async sendText() { return 1; },
+      async editText(_chatId, _messageId, text) { edited.push(text); },
+      async createTopic() { return 1; },
+      async renameTopic() {},
+      async deleteTopic() {},
+      async sendDocument() {},
+      async sendChatAction() {},
+      async sendFile() {}
+    };
+    const now = Date.now();
+    const session: SessionRecord = {
+      id: "session",
+      sdkSessionId: null,
+      chatId: -1001,
+      topicId: 42,
+      projectName: "test",
+      cwd: "/tmp",
+      title: "test",
+      status: "running",
+      permissionMode: "auto",
+      model: null,
+      thinking: null,
+      claudeEffort: null,
+      provider: "agy",
+      codexModel: null,
+      codexReasoning: null,
+      codexThreadId: null,
+      agyModel: null,
+      agyConversationId: "conv-1",
+      handoffSummary: null,
+      goalCondition: null,
+      leanMode: true,
+      usageSnapshot: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    const renderer = new StreamRenderer(session, transport, 1);
+
+    await renderer.start();
+    renderer.partial("부분");
+    renderer.partial("부분 답변이 자라는 중");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(edited.some((text) => text.includes("부분 답변이 자라는 중"))).toBe(true);
+    renderer.dispose();
   });
 });

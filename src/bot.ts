@@ -7,11 +7,13 @@ import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { addProject, removeProject, resolveProject, type AppConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import {
+  agyModelLabel,
   claudeEffortLabel,
   claudeEffortOptionsForModel,
   codexModelLabel,
   codexReasoningLabel,
   codexReasoningOptionsForModel,
+  DEFAULT_AGY_MODEL,
   DEFAULT_CLAUDE_EFFORT,
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CODEX_MODEL,
@@ -21,6 +23,7 @@ import {
   type ModelCatalog,
   modelLabel,
   normalizeThinkingForModel,
+  resolveAgyModel,
   resolveCodexModel,
   resolveModel,
   thinkingLabel,
@@ -49,6 +52,7 @@ interface PendingStart {
   claudeEffort?: string | undefined;
   codexModel?: string | undefined;
   codexReasoning?: string | undefined;
+  agyModel?: string | undefined;
   leanMode?: boolean | undefined;
 }
 
@@ -109,6 +113,12 @@ export function formatSessionStatus(
         "제공자: Codex",
         `Codex 모델: ${codexModelLabel(catalog, session.codexModel ?? DEFAULT_CODEX_MODEL)} · reasoning ${codexReasoningLabel(session.codexReasoning ?? DEFAULT_CODEX_REASONING)}`
       ]
+    : session.provider === "agy"
+    ? [
+        "제공자: agy (Antigravity CLI)",
+        `agy 모델: ${agyModelLabel(catalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`,
+        "MCP: ~/.gemini/config/mcp_config.json"
+      ]
     : [
         "제공자: Claude",
         `모델: ${modelLabel(catalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`,
@@ -129,13 +139,21 @@ export function formatSessionStatus(
 
 // 새 세션 기본값을 보여주는 상시 reply 키보드(ChatKJB식). 좌상 라벨, 우상 모델,
 // 좌하 제공자, 우하 thinking(Claude) 또는 추론 강도(Codex).
+function providerDisplayLabel(provider: ProviderKind): string {
+  return provider === "codex" ? "Codex" : provider === "agy" ? "agy" : "Claude";
+}
+
 function defaultsKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): Keyboard {
-  const providerLabel = defaults.provider === "codex" ? "Codex" : "Claude";
+  const providerLabel = providerDisplayLabel(defaults.provider);
   const modelText = defaults.provider === "codex"
     ? codexModelLabel(catalog, defaults.codexModel)
+    : defaults.provider === "agy"
+    ? agyModelLabel(catalog, defaults.agyModel)
     : modelLabel(catalog, defaults.claudeModel);
   const fourth = defaults.provider === "codex"
     ? `💭 추론: ${codexReasoningLabel(defaults.codexReasoning)}`
+    : defaults.provider === "agy"
+    ? "💭 추론: 모델 내장"
     : `💭 thinking: ${defaults.thinking === "off" ? "off" : "on"}`;
   return new Keyboard()
     .text("⚙️ 새 세션 기본값")
@@ -152,6 +170,8 @@ function defaultsModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog)
   const keyboard = new InlineKeyboard();
   const options = defaults.provider === "codex"
     ? catalog.codexModels.map((option) => ({ id: option.id, label: option.label }))
+    : defaults.provider === "agy"
+    ? catalog.agyModels.map((option) => ({ id: option.id, label: option.label }))
     : catalog.claudeModels.map((option) => ({ id: option.id, label: option.label }));
   for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `setm:${defaults.provider}:${option.id}`);
@@ -164,6 +184,9 @@ function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): stri
   if (defaults.provider === "codex") {
     return `Codex · ${codexModelLabel(catalog, defaults.codexModel)} · reasoning ${codexReasoningLabel(defaults.codexReasoning)}`;
   }
+  if (defaults.provider === "agy") {
+    return `agy · ${agyModelLabel(catalog, defaults.agyModel)}`;
+  }
   return `Claude · ${modelLabel(catalog, defaults.claudeModel)} · thinking ${defaults.thinking === "off" ? "off" : "on"}`;
 }
 
@@ -174,6 +197,13 @@ function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<PendingSt
       provider: "codex",
       codexModel: defaults.codexModel,
       codexReasoning: defaults.codexReasoning,
+      leanMode: true
+    };
+  }
+  if (defaults.provider === "agy") {
+    return {
+      provider: "agy",
+      agyModel: defaults.agyModel,
       leanMode: true
     };
   }
@@ -233,11 +263,22 @@ function codexModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
   return keyboard;
 }
 
-// /model에서 제공자를 고르는 인라인 키보드. mprov:claude|codex
+// /model에서 세션의 agy 모델을 고르는 인라인 키보드. amodel:<id>
+function agyModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [index, option] of catalog.agyModels.entries()) {
+    keyboard.text(option.label, `amodel:${option.id}`);
+    if (index < catalog.agyModels.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+// /model에서 제공자를 고르는 인라인 키보드. mprov:claude|codex|agy
 function providerKeyboard(current: ProviderKind): InlineKeyboard {
   return new InlineKeyboard()
     .text(`${current === "claude" ? "✅ " : ""}Claude`, "mprov:claude")
-    .text(`${current === "codex" ? "✅ " : ""}Codex`, "mprov:codex");
+    .text(`${current === "codex" ? "✅ " : ""}Codex`, "mprov:codex")
+    .text(`${current === "agy" ? "✅ " : ""}agy`, "mprov:agy");
 }
 
 function effortKeyboard(catalog: ModelCatalog): InlineKeyboard {
@@ -292,6 +333,9 @@ export function createBot(config: AppConfig, store: StateStore) {
     modelCatalog: config.modelCatalog,
     ...(config.claudeCodeExecutable
       ? { claudeCodeExecutable: config.claudeCodeExecutable }
+      : {}),
+    ...(config.agyExecutable
+      ? { agyExecutable: config.agyExecutable }
       : {})
   });
   const pendingStarts = new Map<string, PendingStart>();
@@ -391,7 +435,7 @@ export function createBot(config: AppConfig, store: StateStore) {
         pending.model ?? null, pending.thinking ?? null,
         pending.claudeEffort ?? null, pending.leanMode ?? true,
         pending.provider ?? "claude", pending.codexModel ?? null,
-        pending.codexReasoning ?? null
+        pending.codexReasoning ?? null, pending.agyModel ?? null
       );
       await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;
@@ -418,7 +462,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   bot.command("start", async (ctx) => {
     const defaults = store.getSessionDefaults();
     await ctx.reply(
-      "Claude/Codex 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /power, /effort, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking)을 클릭만으로 바꿀 수 있습니다.",
+      "Claude/Codex/agy 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /power, /effort, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking)을 클릭만으로 바꿀 수 있습니다.",
       { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
     );
   });
@@ -724,12 +768,14 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("기록할 세션 토픽 안에서 사용하세요.");
       return;
     }
-    const hasContext = session.provider === "codex" ? !!session.codexThreadId : !!session.sdkSessionId;
+    const hasContext = session.provider === "codex"
+      ? !!session.codexThreadId
+      : session.provider === "agy"
+      ? !!session.agyConversationId
+      : !!session.sdkSessionId;
     if (!hasContext) {
       await ctx.reply(
-        session.provider === "codex"
-          ? "아직 검토할 Codex 세션 문맥이 없습니다."
-          : "아직 검토할 Claude 세션 문맥이 없습니다."
+        `아직 검토할 ${providerDisplayLabel(session.provider)} 세션 문맥이 없습니다.`
       );
       return;
     }
@@ -777,16 +823,20 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (!input) {
       const current = session.provider === "codex"
         ? `현재: Codex · ${codexModelLabel(config.modelCatalog, session.codexModel ?? DEFAULT_CODEX_MODEL)}`
+        : session.provider === "agy"
+        ? `현재: agy · ${agyModelLabel(config.modelCatalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`
         : `현재: Claude · ${modelLabel(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`;
       const modelBoard = session.provider === "codex"
         ? codexModelKeyboard(config.modelCatalog)
+        : session.provider === "agy"
+        ? agyModelKeyboard(config.modelCatalog)
         : modelKeyboard(config.modelCatalog);
       await ctx.reply(
         `${current}\n제공자를 바꾸려면 아래에서 선택하세요(직전 대화 요약이 새 제공자로 인계됩니다).`,
         { reply_markup: providerKeyboard(session.provider) }
       );
       await ctx.reply(
-        `현재 제공자(${session.provider === "codex" ? "Codex" : "Claude"})의 모델을 바꾸려면 선택하세요.`,
+        `현재 제공자(${providerDisplayLabel(session.provider)})의 모델을 바꾸려면 선택하세요.`,
         { reply_markup: modelBoard }
       );
       return;
@@ -804,6 +854,16 @@ export function createBot(config: AppConfig, store: StateStore) {
       }
       store.updateSession(session.id, { codexModel });
       await ctx.reply(`다음 실행부터 Codex ${codexModelLabel(config.modelCatalog, codexModel)} 모델을 사용합니다.`);
+      return;
+    }
+    if (session.provider === "agy") {
+      const agyModel = resolveAgyModel(config.modelCatalog, input);
+      if (!agyModel) {
+        await ctx.reply("지원하지 않는 agy 모델입니다. /model 버튼의 모델을 사용하세요.");
+        return;
+      }
+      store.updateSession(session.id, { agyModel });
+      await ctx.reply(`다음 실행부터 agy ${agyModelLabel(config.modelCatalog, agyModel)} 모델을 사용합니다.`);
       return;
     }
     const model = resolveModel(config.modelCatalog, input);
@@ -1152,7 +1212,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   // 걸릴 수 있어 먼저 안내한다).
   bot.callbackQuery(/^mprov:/, async (ctx) => {
     const target = ctx.callbackQuery.data.slice("mprov:".length) as ProviderKind;
-    if (target !== "claude" && target !== "codex") {
+    if (target !== "claude" && target !== "codex" && target !== "agy") {
       await ctx.answerCallbackQuery({ text: "알 수 없는 제공자입니다.", show_alert: true });
       return;
     }
@@ -1170,7 +1230,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.answerCallbackQuery({ text: "실행 중에는 전환할 수 없습니다.", show_alert: true });
       return;
     }
-    await ctx.answerCallbackQuery({ text: `${target === "codex" ? "Codex" : "Claude"}로 전환` });
+    await ctx.answerCallbackQuery({ text: `${providerDisplayLabel(target)}로 전환` });
     await ctx.reply("직전 대화 요약을 만들어 새 제공자로 인계하는 중입니다…");
     const result = await sessions.switchProvider(session.id, target);
     if (!result.ok) {
@@ -1180,6 +1240,8 @@ export function createBot(config: AppConfig, store: StateStore) {
     const updated = store.getSession(session.id);
     const label = target === "codex"
       ? `Codex · ${codexModelLabel(config.modelCatalog, updated?.codexModel ?? DEFAULT_CODEX_MODEL)}`
+      : target === "agy"
+      ? `agy · ${agyModelLabel(config.modelCatalog, updated?.agyModel ?? DEFAULT_AGY_MODEL)}`
       : `Claude · ${modelLabel(config.modelCatalog, updated?.model ?? DEFAULT_CLAUDE_MODEL)}`;
     await ctx.reply(
       `제공자를 ${label}로 전환했습니다. 다음 메시지부터 새 제공자가 직전 작업 요약을 이어받아 진행합니다.`
@@ -1209,6 +1271,29 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply(`다음 실행부터 Codex ${option.label} 모델을 사용합니다.`);
   });
 
+  // /model에서 agy 세션의 모델 선택. amodel:<id>
+  bot.callbackQuery(/^amodel:/, async (ctx) => {
+    const modelId = ctx.callbackQuery.data.slice("amodel:".length);
+    const option = config.modelCatalog.agyModels.find((item) => item.id === modelId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 agy 모델입니다.", show_alert: true });
+      return;
+    }
+    const topicId = ctx.callbackQuery.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.answerCallbackQuery({ text: "실행 중에는 바꿀 수 없습니다.", show_alert: true });
+      return;
+    }
+    store.updateSession(session.id, { agyModel: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    await ctx.reply(`다음 실행부터 agy ${option.label} 모델을 사용합니다.`);
+  });
+
   // 새 세션 기본값 패널: 모델 선택. setm:<provider>:<id>
   bot.callbackQuery(/^setm:/, async (ctx) => {
     const rest = ctx.callbackQuery.data.slice("setm:".length);
@@ -1224,6 +1309,19 @@ export function createBot(config: AppConfig, store: StateStore) {
       const defaults = store.updateSessionDefaults({ codexModel: option.id });
       await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
       await ctx.reply(`새 세션 기본 Codex 모델: ${option.label}`, {
+        reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+      });
+      return;
+    }
+    if (provider === "agy") {
+      const option = config.modelCatalog.agyModels.find((item) => item.id === modelId);
+      if (!option) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 모델입니다.", show_alert: true });
+        return;
+      }
+      const defaults = store.updateSessionDefaults({ agyModel: option.id });
+      await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
+      await ctx.reply(`새 세션 기본 agy 모델: ${option.label}`, {
         reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
       });
       return;
@@ -1344,10 +1442,12 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.hears(/^🤖 제공자/, async (ctx) => {
     const current = store.getSessionDefaults();
-    const next: ProviderKind = current.provider === "claude" ? "codex" : "claude";
+    // 제공자 순환: Claude → Codex → agy → Claude
+    const cycle: ProviderKind[] = ["claude", "codex", "agy"];
+    const next = cycle[(cycle.indexOf(current.provider) + 1) % cycle.length] ?? "claude";
     const defaults = store.updateSessionDefaults({ provider: next });
     await ctx.reply(
-      `새 세션 기본 제공자: ${next === "codex" ? "Codex" : "Claude"}\n${defaultsSummary(defaults, config.modelCatalog)}`,
+      `새 세션 기본 제공자: ${providerDisplayLabel(next)}\n${defaultsSummary(defaults, config.modelCatalog)}`,
       { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
     );
   });
@@ -1355,13 +1455,18 @@ export function createBot(config: AppConfig, store: StateStore) {
   bot.hears(/^🧠 모델/, async (ctx) => {
     const defaults = store.getSessionDefaults();
     await ctx.reply(
-      `${defaults.provider === "codex" ? "Codex" : "Claude"} 모델을 선택하세요.`,
+      `${providerDisplayLabel(defaults.provider)} 모델을 선택하세요.`,
       { reply_markup: defaultsModelKeyboard(defaults, config.modelCatalog) }
     );
   });
 
   bot.hears(/^💭 /, async (ctx) => {
     const current = store.getSessionDefaults();
+    if (current.provider === "agy") {
+      // agy는 추론 강도가 모델 이름에 포함되어 별도 축이 없다. 모델 버튼으로 바꾼다.
+      await ctx.reply("agy는 추론 강도가 모델에 포함됩니다. 🧠 모델 버튼에서 모델을 선택하세요.");
+      return;
+    }
     if (current.provider === "codex") {
       // Codex: 추론 강도를 다음 단계로 순환한다.
       const options = codexReasoningOptionsForModel(config.modelCatalog, current.codexModel);
@@ -1423,7 +1528,8 @@ export function createBot(config: AppConfig, store: StateStore) {
         pending.leanMode ?? true,
         pending.provider ?? "claude",
         pending.codexModel ?? null,
-        pending.codexReasoning ?? null
+        pending.codexReasoning ?? null,
+        pending.agyModel ?? null
       );
       await ctx.reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;

@@ -35,6 +35,8 @@ function makeSession(cwd: string): SessionRecord {
     codexModel: null,
     codexReasoning: null,
     codexThreadId: null,
+    agyModel: null,
+    agyConversationId: null,
     handoffSummary: null,
     goalCondition: null,
     leanMode: true,
