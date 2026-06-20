@@ -119,6 +119,12 @@ export function formatSessionStatus(
         `agy 모델: ${agyModelLabel(catalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`,
         "MCP: ~/.gemini/config/mcp_config.json"
       ]
+    : session.provider === "local-llm"
+    ? [
+        "제공자: 로컬LLM (goose + Ollama)",
+        "모델: qwen3.6:35b-a3b",
+        "MCP: ~/.config/goose/config.yaml (notion, google-calendar)"
+      ]
     : [
         "제공자: Claude",
         `모델: ${modelLabel(catalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`,
@@ -140,7 +146,10 @@ export function formatSessionStatus(
 // 새 세션 기본값을 보여주는 상시 reply 키보드(ChatKJB식). 좌상 라벨, 우상 모델,
 // 좌하 제공자, 우하 thinking(Claude) 또는 추론 강도(Codex).
 function providerDisplayLabel(provider: ProviderKind): string {
-  return provider === "codex" ? "Codex" : provider === "agy" ? "agy" : "Claude";
+  if (provider === "codex") return "Codex";
+  if (provider === "agy") return "agy";
+  if (provider === "local-llm") return "로컬LLM";
+  return "Claude";
 }
 
 function defaultsKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): Keyboard {
@@ -149,11 +158,15 @@ function defaultsKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): Key
     ? codexModelLabel(catalog, defaults.codexModel)
     : defaults.provider === "agy"
     ? agyModelLabel(catalog, defaults.agyModel)
+    : defaults.provider === "local-llm"
+    ? "qwen3 (Ollama)"
     : modelLabel(catalog, defaults.claudeModel);
   const fourth = defaults.provider === "codex"
     ? `💭 추론: ${codexReasoningLabel(defaults.codexReasoning)}`
     : defaults.provider === "agy"
     ? "💭 추론: 모델 내장"
+    : defaults.provider === "local-llm"
+    ? "💭 Ollama 로컬"
     : `💭 thinking: ${defaults.thinking === "off" ? "off" : "on"}`;
   return new Keyboard()
     .text("⚙️ 새 세션 기본값")
@@ -187,6 +200,9 @@ function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): stri
   if (defaults.provider === "agy") {
     return `agy · ${agyModelLabel(catalog, defaults.agyModel)}`;
   }
+  if (defaults.provider === "local-llm") {
+    return "로컬LLM · qwen3 (Ollama)";
+  }
   return `Claude · ${modelLabel(catalog, defaults.claudeModel)} · thinking ${defaults.thinking === "off" ? "off" : "on"}`;
 }
 
@@ -204,6 +220,12 @@ function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<PendingSt
     return {
       provider: "agy",
       agyModel: defaults.agyModel,
+      leanMode: true
+    };
+  }
+  if (defaults.provider === "local-llm") {
+    return {
+      provider: "local-llm",
       leanMode: true
     };
   }
@@ -273,12 +295,31 @@ function agyModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
   return keyboard;
 }
 
-// /model에서 제공자를 고르는 인라인 키보드. mprov:claude|codex|agy
+// /model에서 제공자를 고르는 인라인 키보드. mprov:claude|codex|agy|local-llm
 function providerKeyboard(current: ProviderKind): InlineKeyboard {
   return new InlineKeyboard()
     .text(`${current === "claude" ? "✅ " : ""}Claude`, "mprov:claude")
     .text(`${current === "codex" ? "✅ " : ""}Codex`, "mprov:codex")
-    .text(`${current === "agy" ? "✅ " : ""}agy`, "mprov:agy");
+    .row()
+    .text(`${current === "agy" ? "✅ " : ""}agy`, "mprov:agy")
+    .text(`${current === "local-llm" ? "✅ " : ""}로컬LLM`, "mprov:local-llm");
+}
+
+// 기본값 패널: 새 세션 기본 제공자 선택. 콜백 dprov:<provider> (mprov:과 의미 다름 — 요약 인계 없음)
+function defaultsProviderKeyboard(current: ProviderKind): InlineKeyboard {
+  const options: Array<[ProviderKind, string]> = [
+    ["claude", "Claude"],
+    ["codex", "Codex"],
+    ["agy", "agy"],
+    ["local-llm", "로컬LLM"]
+  ];
+  const keyboard = new InlineKeyboard();
+  for (const [index, [kind, label]] of options.entries()) {
+    const mark = kind === current ? "✅ " : "";
+    keyboard.text(`${mark}${label}`, `dprov:${kind}`);
+    if (index < options.length - 1) keyboard.row();
+  }
+  return keyboard;
 }
 
 function effortKeyboard(catalog: ModelCatalog): InlineKeyboard {
@@ -336,7 +377,14 @@ export function createBot(config: AppConfig, store: StateStore) {
       : {}),
     ...(config.agyExecutable
       ? { agyExecutable: config.agyExecutable }
-      : {})
+      : {}),
+    ...(config.gooseExecutable
+      ? { gooseExecutable: config.gooseExecutable }
+      : {}),
+    localLlmMcpServers: config.localLlmMcpServers,
+    localLlmModel: config.localLlmModel,
+    localLlmProvider: config.localLlmProvider,
+    ollamaHost: config.ollamaHost
   });
   const pendingStarts = new Map<string, PendingStart>();
   const pendingProjectPaths = new Set<string>();
@@ -825,11 +873,15 @@ export function createBot(config: AppConfig, store: StateStore) {
         ? `현재: Codex · ${codexModelLabel(config.modelCatalog, session.codexModel ?? DEFAULT_CODEX_MODEL)}`
         : session.provider === "agy"
         ? `현재: agy · ${agyModelLabel(config.modelCatalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`
+        : session.provider === "local-llm"
+        ? "현재: 로컬LLM · qwen3 (Ollama)"
         : `현재: Claude · ${modelLabel(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`;
       const modelBoard = session.provider === "codex"
         ? codexModelKeyboard(config.modelCatalog)
         : session.provider === "agy"
         ? agyModelKeyboard(config.modelCatalog)
+        : session.provider === "local-llm"
+        ? new InlineKeyboard().text("qwen3.6:35b-a3b (Ollama)", "noop:local-llm")
         : modelKeyboard(config.modelCatalog);
       await ctx.reply(
         `${current}\n제공자를 바꾸려면 아래에서 선택하세요(직전 대화 요약이 새 제공자로 인계됩니다).`,
@@ -864,6 +916,10 @@ export function createBot(config: AppConfig, store: StateStore) {
       }
       store.updateSession(session.id, { agyModel });
       await ctx.reply(`다음 실행부터 agy ${agyModelLabel(config.modelCatalog, agyModel)} 모델을 사용합니다.`);
+      return;
+    }
+    if (session.provider === "local-llm") {
+      await ctx.reply("로컬LLM 모델은 .env의 LOCAL_LLM_MODEL로 설정합니다. /model 버튼은 표시 전용입니다.");
       return;
     }
     const model = resolveModel(config.modelCatalog, input);
@@ -1212,7 +1268,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   // 걸릴 수 있어 먼저 안내한다).
   bot.callbackQuery(/^mprov:/, async (ctx) => {
     const target = ctx.callbackQuery.data.slice("mprov:".length) as ProviderKind;
-    if (target !== "claude" && target !== "codex" && target !== "agy") {
+    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "local-llm") {
       await ctx.answerCallbackQuery({ text: "알 수 없는 제공자입니다.", show_alert: true });
       return;
     }
@@ -1242,9 +1298,26 @@ export function createBot(config: AppConfig, store: StateStore) {
       ? `Codex · ${codexModelLabel(config.modelCatalog, updated?.codexModel ?? DEFAULT_CODEX_MODEL)}`
       : target === "agy"
       ? `agy · ${agyModelLabel(config.modelCatalog, updated?.agyModel ?? DEFAULT_AGY_MODEL)}`
+      : target === "local-llm"
+      ? "로컬LLM · qwen3 (Ollama)"
       : `Claude · ${modelLabel(config.modelCatalog, updated?.model ?? DEFAULT_CLAUDE_MODEL)}`;
     await ctx.reply(
       `제공자를 ${label}로 전환했습니다. 다음 메시지부터 새 제공자가 직전 작업 요약을 이어받아 진행합니다.`
+    );
+  });
+
+  // 기본값 패널 제공자 선택. mprov:(세션 전환·요약 인계)와 달리 새 세션 기본값만 바꾼다.
+  bot.callbackQuery(/^dprov:/, async (ctx) => {
+    const target = ctx.callbackQuery.data.slice("dprov:".length) as ProviderKind;
+    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "local-llm") {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+    const defaults = store.updateSessionDefaults({ provider: target });
+    await ctx.answerCallbackQuery({ text: `${providerDisplayLabel(target)} 선택` });
+    await ctx.reply(
+      `새 세션 기본 제공자: ${providerDisplayLabel(target)}\n${defaultsSummary(defaults, config.modelCatalog)}`,
+      { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
     );
   });
 
@@ -1462,13 +1535,9 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.hears(/^🤖 제공자/, async (ctx) => {
     const current = store.getSessionDefaults();
-    // 제공자 순환: Claude → Codex → agy → Claude
-    const cycle: ProviderKind[] = ["claude", "codex", "agy"];
-    const next = cycle[(cycle.indexOf(current.provider) + 1) % cycle.length] ?? "claude";
-    const defaults = store.updateSessionDefaults({ provider: next });
     await ctx.reply(
-      `새 세션 기본 제공자: ${providerDisplayLabel(next)}\n${defaultsSummary(defaults, config.modelCatalog)}`,
-      { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
+      `새 세션 기본 제공자를 선택하세요. (현재: ${providerDisplayLabel(current.provider)})`,
+      { reply_markup: defaultsProviderKeyboard(current.provider) }
     );
   });
 
