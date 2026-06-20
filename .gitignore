@@ -10,3 +10,4 @@ migration/
 .backup-*/
 .claude/
 .DS_Store
+.[Rr]esult.md
