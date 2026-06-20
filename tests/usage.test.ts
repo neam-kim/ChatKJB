@@ -40,6 +40,17 @@ describe("usage limits", () => {
     });
   });
 
+  it("treats a rejected event without utilization as exhausted", () => {
+    expect(snapshotFromRateLimitInfo({
+      status: "rejected",
+      rateLimitType: "five_hour",
+      resetsAt: 1_781_854_800
+    }, 123).fiveHour).toEqual({
+      utilization: 100,
+      resetsAt: "2026-06-19T07:40:00.000Z"
+    });
+  });
+
   it("merges partial rate-limit events without dropping other windows", () => {
     const previous = {
       capturedAt: 1,

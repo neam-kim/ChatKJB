@@ -24,7 +24,11 @@ function session(status: SessionRecord["status"]): SessionRecord {
     model: null,
     thinking: null,
     claudeEffort: null,
+    provider: "claude",
+    codexModel: null,
     codexReasoning: null,
+    codexThreadId: null,
+    handoffSummary: null,
     goalCondition: null,
     leanMode: true,
     usageSnapshot: null,
@@ -196,13 +200,13 @@ describe("session status formatting", () => {
   it("distinguishes a live active run from a stored status", () => {
     expect(formatSessionStatus(session("running"), true)).toContain("작업: 실행 중");
     expect(formatSessionStatus(session("running"), false)).toContain("작업: 실행 중인 작업 없음");
-    expect(formatSessionStatus(session("running"), true))
-      .toContain("Codex: GPT-5.5 · reasoning 높음 (High)");
+    expect(formatSessionStatus(session("running"), true)).toContain("제공자: Claude");
     expect(formatSessionStatus(session("running"), true)).toContain("lean: on");
   });
 
-  it("reflects the per-session Codex reasoning effort", () => {
-    const tuned = { ...session("running"), codexReasoning: "low" };
+  it("reflects the per-session Codex reasoning effort for a Codex session", () => {
+    const tuned = { ...session("running"), provider: "codex" as const, codexReasoning: "low" };
+    expect(formatSessionStatus(tuned, true)).toContain("제공자: Codex");
     expect(formatSessionStatus(tuned, true)).toContain("reasoning 낮음 (Low)");
   });
 
@@ -252,6 +256,21 @@ describe("/power command", () => {
   });
 });
 
+describe("/steer command", () => {
+  it("answers a pending Claude question before queueing a steering turn", async () => {
+    const { bot, sessions, permissions, calls } = botSetup();
+    const answer = vi.spyOn(permissions, "handleTextInput").mockResolvedValue(true);
+    const steer = vi.spyOn(sessions, "steer");
+
+    await bot.handleUpdate(modelCommand("/steer 2번으로 진행", 100));
+
+    expect(answer).toHaveBeenCalledWith("session", "2번으로 진행");
+    expect(steer).not.toHaveBeenCalled();
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
+      .toContain("대기 중인 Claude 질문에 답변");
+  });
+});
+
 function thinkingCommand(text: string, updateId = 1) {
   return {
     ...modelCommand(text, updateId),
@@ -276,40 +295,54 @@ describe("/thinking command", () => {
   });
 });
 
-describe("/new wizard", () => {
-  it("carries the chosen Claude 작업량(power) into the created session", async () => {
+describe("/new defaults fast path", () => {
+  it("creates a session from the current new-session defaults", async () => {
     const { bot, store, sessions } = botSetup();
     // 세션 생성은 즉시 백그라운드 실행을 큐에 넣는다. 테스트에서는 실제 Claude 실행이
     // afterEach의 store.close() 뒤에 비동기로 거부되며 unhandled rejection을 내므로,
-    // 실행만 무력화하고 생성·저장 결과(claudeEffort 등)만 검증한다.
+    // 실행만 무력화하고 생성·저장 결과만 검증한다.
     vi.spyOn(sessions as unknown as { execute: () => Promise<void> }, "execute")
       .mockResolvedValue();
 
     await bot.handleUpdate(newCommand());
     await bot.handleUpdate(callbackUpdate("newp:0", 2));
-    await bot.handleUpdate(callbackUpdate("newm:claude-opus-4-8", 3));
-    await bot.handleUpdate(callbackUpdate("newt:adaptive", 4));
-    await bot.handleUpdate(callbackUpdate("newpw:max", 5));
-    await bot.handleUpdate(textMessage("작업을 실행해줘", 6));
+    await bot.handleUpdate(textMessage("작업을 실행해줘", 3));
 
     const created = store
       .listSessions(10)
       .find((item) => item.topicId === 7777);
-    expect(created?.claudeEffort).toBe("max");
+    expect(created?.provider).toBe("claude");
     expect(created?.model).toBe("claude-opus-4-8");
     expect(created?.thinking).toBe("adaptive");
+    expect(created?.claudeEffort).toBe("high");
   });
 
-  it("prompts for power after thinking is chosen", async () => {
+  it("applies Codex defaults when the default provider is Codex", async () => {
+    const { bot, store, sessions } = botSetup();
+    vi.spyOn(sessions as unknown as { executeCodex: () => Promise<void> }, "executeCodex")
+      .mockResolvedValue();
+    store.updateSessionDefaults({ provider: "codex" });
+
+    await bot.handleUpdate(newCommand());
+    await bot.handleUpdate(callbackUpdate("newp:0", 2));
+    await bot.handleUpdate(textMessage("코덱스로 작업", 3));
+
+    const created = store
+      .listSessions(10)
+      .find((item) => item.topicId === 7777);
+    expect(created?.provider).toBe("codex");
+    expect(created?.codexModel).toBe("gpt-5.5");
+    expect(created?.codexReasoning).toBe("high");
+  });
+
+  it("asks for the task prompt right after the project is picked", async () => {
     const { bot, calls } = botSetup();
 
     await bot.handleUpdate(newCommand());
     await bot.handleUpdate(callbackUpdate("newp:0", 2));
-    await bot.handleUpdate(callbackUpdate("newm:claude-opus-4-8", 3));
-    await bot.handleUpdate(callbackUpdate("newt:adaptive", 4));
 
     const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
-    expect(reply?.text).toContain("작업량(power)을 선택하세요");
+    expect(reply?.text).toContain("실행할 작업을 입력하세요");
     expect(reply?.reply_markup).toBeDefined();
   });
 });
@@ -398,14 +431,20 @@ describe("/model command", () => {
       .toContain("실행 중에는 바꿀 수 없습니다.");
   });
 
-  it("shows the current model and inline keyboard without an argument", async () => {
+  it("shows the current provider/model and a model keyboard without an argument", async () => {
     const { bot, calls } = botSetup();
 
     await bot.handleUpdate(modelCommand("/model"));
 
-    const reply = calls.find((call) => call.method === "sendMessage")?.payload;
-    expect(reply?.text).toContain("현재 모델: Opus 4.8");
-    expect(reply?.reply_markup).toEqual(modelKeyboard());
+    const messages = calls.filter((call) => call.method === "sendMessage").map((call) => call.payload);
+    expect(messages[0]?.text).toContain("현재: Claude · Opus 4.8");
+    expect(messages.some((payload) => {
+      try {
+        return JSON.stringify(payload.reply_markup) === JSON.stringify(modelKeyboard());
+      } catch {
+        return false;
+      }
+    })).toBe(true);
   });
 });
 

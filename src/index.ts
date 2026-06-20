@@ -31,10 +31,9 @@ async function main(): Promise<void> {
   const { bot } = createBot(config, store);
 
   await bot.api.setMyCommands([
-    { command: "new", description: "새 Claude 작업 시작" },
+    { command: "new", description: "새 작업 시작 (Claude/Codex)" },
     { command: "status", description: "오케스트레이터와 현재 작업 상태" },
     { command: "doctor", description: "실행 환경 진단" },
-    { command: "plan", description: "계획·실행·검토 파이프라인" },
     { command: "addp", description: "절대경로 프로젝트 추가" },
     { command: "deltp", description: "등록 프로젝트 삭제" },
     { command: "sessions", description: "최근 세션 목록" },
@@ -48,7 +47,7 @@ async function main(): Promise<void> {
     { command: "compact", description: "현재 세션 컨텍스트 압축" },
     { command: "memory", description: "현재 세션을 전역 메모리에 기록" },
     { command: "mode", description: "권한 모드 확인 또는 변경" },
-    { command: "model", description: "Claude 모델 확인 또는 변경" },
+    { command: "model", description: "제공자(Claude/Codex)·모델 확인 또는 변경" },
     { command: "thinking", description: "Claude 확장적 사고 on/off 확인 또는 변경" },
     { command: "power", description: "Claude 작업량(effort) 확인 또는 변경" },
     { command: "effort", description: "Codex 추론 작업량 확인 또는 변경" },

@@ -225,7 +225,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
       return [`✅ 디스크: 데이터 디렉터리 여유 ${formatBytes(stats.bavail * stats.bsize)}`];
     }),
     check("최근 stderr", 2000, async () => recentStderr(
-      join(projectDir, "data", "stderr.log"),
+      // launchd 로그는 CloudStorage 밖(~/Library/Logs/<label>/)에 둔다 — install-launch-agent.mjs 참고.
+      join(homedir(), "Library", "Logs", localLaunchAgentLabel, "stderr.log"),
       [deps.config.telegramBotToken, ...deps.config.claudeCodeOauthTokens]
     ))
   ]);

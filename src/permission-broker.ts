@@ -147,16 +147,42 @@ export class PermissionBroker {
     const id = this.questionBySession.get(sessionId);
     if (!id) return false;
     const flow = this.questions.get(id);
-    if (!flow?.awaitingText) return false;
+    if (!flow) return false;
     const question = flow.questions[flow.index];
     if (!question) return false;
 
-    flow.answers[question.question] = text.trim();
+    const clean = text.trim();
+    if (!clean) return false;
+    const selectedIndexes = this.questionOptionIndexes(question, clean);
+    if (selectedIndexes.length > 0) {
+      flow.answers[question.question] = question.multiSelect
+        ? selectedIndexes.map((index) => question.options[index]!.label)
+        : question.options[selectedIndexes[0]!]!.label;
+    } else {
+      flow.answers[question.question] = clean;
+    }
     flow.awaitingText = false;
     flow.index += 1;
     flow.selected.clear();
     await this.advanceQuestion(flow);
     return true;
+  }
+
+  private questionOptionIndexes(question: Question, text: string): number[] {
+    const indexes = new Set<number>();
+    for (const match of text.matchAll(/(?:^|[^\d])(\d+)\s*번/g)) {
+      const index = Number(match[1]) - 1;
+      if (index >= 0 && index < question.options.length) indexes.add(index);
+    }
+    if (/^\d+$/.test(text)) {
+      const index = Number(text) - 1;
+      if (index >= 0 && index < question.options.length) indexes.add(index);
+    }
+    question.options.forEach((option, index) => {
+      const label = option.label.trim();
+      if (label && (text === label || text.includes(label))) indexes.add(index);
+    });
+    return [...indexes].sort((a, b) => a - b);
   }
 
   private async requestApproval(

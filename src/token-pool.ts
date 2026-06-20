@@ -156,6 +156,11 @@ export class TokenPool {
   noteRateLimited(token: string, now: number = Date.now(), until?: number): void {
     const slot = this.slots.find((item) => item.token === token);
     if (!slot) return;
+    // 직전 rate_limit_event/usage 응답에서 정확한 reset 시각을 이미 받았다면,
+    // resetsAt 없는 후속 오류의 추정 백오프(기본 1시간)로 덮어쓰지 않는다.
+    if (until === undefined && slot.exhaustedUntil !== null && slot.exhaustedUntil > now) {
+      return;
+    }
     const target = until ?? now + this.defaultBackoffMs;
     slot.exhaustedUntil = Math.max(slot.exhaustedUntil ?? 0, target);
   }

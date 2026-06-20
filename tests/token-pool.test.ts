@@ -71,6 +71,28 @@ describe("TokenPool", () => {
     expect(pool.select(now)).toBe(B);
   });
 
+  it("preserves an exact reset time when a later error has no reset metadata", () => {
+    const pool = new TokenPool([A, B], { defaultBackoffMs: 3_600_000 });
+    const now = 1_000_000;
+    const exactReset = now + 60_000;
+    pool.observe(
+      A,
+      snapshot({
+        fiveHour: {
+          utilization: 100,
+          resetsAt: new Date(exactReset).toISOString()
+        }
+      }),
+      now
+    );
+
+    pool.noteRateLimited(A, now + 1_000);
+
+    expect(pool.recoversAt(now)).toBeNull();
+    pool.noteRateLimited(B, now, exactReset + 60_000);
+    expect(pool.recoversAt(now)).toBe(exactReset);
+  });
+
   it("returns the soonest-recovering token when all are exhausted", () => {
     const pool = new TokenPool([A, B]);
     const now = 1_000_000;

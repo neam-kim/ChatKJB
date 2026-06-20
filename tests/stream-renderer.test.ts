@@ -32,7 +32,11 @@ describe("StreamRenderer text deduplication", () => {
       model: null,
       thinking: null,
       claudeEffort: null,
+      provider: "claude",
+      codexModel: null,
       codexReasoning: null,
+      codexThreadId: null,
+      handoffSummary: null,
       goalCondition: null,
       leanMode: true,
       usageSnapshot: null,
@@ -46,5 +50,57 @@ describe("StreamRenderer text deduplication", () => {
 
     expect(sent).toEqual(["완료된 답변입니다."]);
     renderer.dispose();
+  });
+
+  it("sends a new terminal notification even when the final answer was already streamed", async () => {
+    const sent: string[] = [];
+    const edited: string[] = [];
+    const transport: MessageTransport = {
+      async sendText(_chatId, _topicId, text) {
+        sent.push(text);
+        return sent.length;
+      },
+      async editText(_chatId, _messageId, text) {
+        edited.push(text);
+      },
+      async createTopic() { return 1; },
+      async renameTopic() {},
+      async deleteTopic() {},
+      async sendDocument() {},
+      async sendChatAction() {},
+      async sendFile() {}
+    };
+    const now = Date.now();
+    const session: SessionRecord = {
+      id: "session",
+      sdkSessionId: "sdk-session",
+      chatId: -1001,
+      topicId: 42,
+      projectName: "test",
+      cwd: "/tmp",
+      title: "test",
+      status: "running",
+      permissionMode: "auto",
+      model: null,
+      thinking: null,
+      claudeEffort: null,
+      provider: "claude",
+      codexModel: null,
+      codexReasoning: null,
+      codexThreadId: null,
+      handoffSummary: null,
+      goalCondition: null,
+      leanMode: true,
+      usageSnapshot: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    const renderer = new StreamRenderer(session, transport, 1);
+
+    await renderer.start();
+    await renderer.finish("done", "");
+
+    expect(edited.at(-1)).toContain("[DONE]");
+    expect(sent.at(-1)).toContain("[DONE] 작업 종료");
   });
 });

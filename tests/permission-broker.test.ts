@@ -72,7 +72,11 @@ function setup() {
     model: null,
     thinking: null,
     claudeEffort: null,
+    provider: "claude",
+    codexModel: null,
     codexReasoning: null,
+    codexThreadId: null,
+    handoffSummary: null,
     goalCondition: null,
     leanMode: true,
     usageSnapshot: null,
@@ -196,6 +200,68 @@ describe("PermissionBroker", () => {
         answers: {
           "형식은?": "상세",
           "포함할 항목은?": ["A", "B"]
+        }
+      }
+    });
+  });
+
+  it("accepts a numbered text answer without requiring the custom-input button", async () => {
+    const { session, broker } = setup();
+    const controller = new AbortController();
+    const decision = broker.request(session, "AskUserQuestion", {
+      questions: [{
+        question: "제거 범위는?",
+        options: [
+          { label: "A만 제거" },
+          { label: "A + B 모두 제거" },
+          { label: "전부 제거" }
+        ],
+        multiSelect: false
+      }]
+    }, {
+      signal: controller.signal,
+      toolUseID: "tool-text-option"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await expect(broker.handleTextInput(
+      session.id,
+      "2번으로 선택했는데 작업하고 있니?"
+    )).resolves.toBe(true);
+    await expect(decision).resolves.toMatchObject({
+      behavior: "allow",
+      updatedInput: {
+        answers: {
+          "제거 범위는?": "A + B 모두 제거"
+        }
+      }
+    });
+  });
+
+  it("accepts a direct text answer while a question is pending", async () => {
+    const { session, broker } = setup();
+    const controller = new AbortController();
+    const decision = broker.request(session, "AskUserQuestion", {
+      questions: [{
+        question: "추가 지시는?",
+        options: [{ label: "없음" }],
+        multiSelect: false
+      }]
+    }, {
+      signal: controller.signal,
+      toolUseID: "tool-direct-answer"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await expect(broker.handleTextInput(
+      session.id,
+      "표의 출처 문구도 제거해 주세요."
+    )).resolves.toBe(true);
+    await expect(decision).resolves.toMatchObject({
+      behavior: "allow",
+      updatedInput: {
+        answers: {
+          "추가 지시는?": "표의 출처 문구도 제거해 주세요."
         }
       }
     });

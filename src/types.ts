@@ -73,11 +73,23 @@ export interface PlanEvidenceRecord {
   createdAt: number;
 }
 
+export type ProviderKind = "claude" | "codex";
+
 export interface ProjectConfig {
   name: string;
   aliases?: string[];
   cwd: string;
   defaultMode: PermissionMode;
+}
+
+// /new로 만들 세션의 기본값. 상시 reply 키보드로 클릭 변경하며, 전역(단일 사용자) 1벌만 둔다.
+export interface SessionDefaults {
+  provider: ProviderKind;
+  claudeModel: string;
+  codexModel: string;
+  thinking: string;
+  claudeEffort: string;
+  codexReasoning: string;
 }
 
 export interface UsageWindow {
@@ -118,10 +130,18 @@ export interface SessionRecord {
   title: string;
   status: SessionStatus;
   permissionMode: PermissionMode;
+  // 이 세션이 어느 제공사로 턴을 실행하는지. /model로 세션 도중에도 바꿀 수 있다.
+  provider: ProviderKind;
   model: string | null;
   thinking: string | null;
   claudeEffort: string | null;
+  // Codex 전용 설정. codexModel/codexReasoning은 provider="codex"일 때 사용한다.
+  codexModel: string | null;
   codexReasoning: string | null;
+  // Codex 스레드 재개 id(`~/.codex/sessions`). Claude의 sdkSessionId에 대응한다.
+  codexThreadId: string | null;
+  // 제공사 전환 시 직전 provider가 만든 인계 요약. 다음 턴 프롬프트에 1회 주입 후 비운다.
+  handoffSummary: string | null;
   // 활성 목표 조건. 설정되면 한 턴이 끝날 때마다 충족 여부를 평가하고, 미충족이면
   // 자동으로 다음 턴을 이어 간다(/goal). null이면 목표 자동 진행 없음.
   goalCondition: string | null;

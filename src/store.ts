@@ -2,6 +2,13 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import type { PermissionMode, PermissionUpdate } from "@anthropic-ai/claude-agent-sdk";
+import {
+  DEFAULT_CLAUDE_EFFORT,
+  DEFAULT_CLAUDE_MODEL,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING,
+  DEFAULT_THINKING_LEVEL
+} from "./model-catalog.js";
 import { redactSensitiveText, redactSensitiveValue } from "./redaction.js";
 import type {
   ApprovalRecord,
@@ -10,10 +17,21 @@ import type {
   PlanEvidenceRecord,
   PlanRunRecord,
   ProjectConfig,
+  ProviderKind,
+  SessionDefaults,
   SessionRecord,
   SessionStatus,
   UsageSnapshot
 } from "./types.js";
+
+const SESSION_DEFAULT_SEED: SessionDefaults = {
+  provider: "claude",
+  claudeModel: DEFAULT_CLAUDE_MODEL,
+  codexModel: DEFAULT_CODEX_MODEL,
+  thinking: DEFAULT_THINKING_LEVEL,
+  claudeEffort: DEFAULT_CLAUDE_EFFORT,
+  codexReasoning: DEFAULT_CODEX_REASONING
+};
 
 interface SessionRow {
   id: string;
@@ -25,10 +43,14 @@ interface SessionRow {
   title: string;
   status: SessionStatus;
   permission_mode: PermissionMode;
+  provider: string | null;
   model: string | null;
   thinking: string | null;
   claude_effort: string | null;
+  codex_model: string | null;
   codex_reasoning: string | null;
+  codex_thread_id: string | null;
+  handoff_summary: string | null;
   goal_condition: string | null;
   lean_mode: number;
   usage_snapshot: string | null;
@@ -119,8 +141,12 @@ export class StateStore {
         title TEXT NOT NULL,
         status TEXT NOT NULL,
         permission_mode TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT 'claude',
         model TEXT,
         thinking TEXT,
+        codex_model TEXT,
+        codex_thread_id TEXT,
+        handoff_summary TEXT,
         lean_mode INTEGER NOT NULL DEFAULT 1,
         usage_snapshot TEXT,
         always_allowed_tools TEXT NOT NULL DEFAULT '[]',
@@ -131,6 +157,11 @@ export class StateStore {
 
       CREATE UNIQUE INDEX IF NOT EXISTS sessions_topic_idx
         ON sessions(chat_id, topic_id);
+
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
 
       CREATE TABLE IF NOT EXISTS pending_approvals (
         nonce TEXT PRIMARY KEY,
@@ -216,6 +247,18 @@ export class StateStore {
     if (!sessionColumns.some((column) => column.name === "goal_condition")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN goal_condition TEXT");
     }
+    if (!sessionColumns.some((column) => column.name === "provider")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'claude'");
+    }
+    if (!sessionColumns.some((column) => column.name === "codex_model")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN codex_model TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "codex_thread_id")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN codex_thread_id TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "handoff_summary")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN handoff_summary TEXT");
+    }
     const planRunColumns = this.db
       .prepare("PRAGMA table_info(plan_runs)")
       .all() as Array<{ name: string }>;
@@ -257,9 +300,11 @@ export class StateStore {
     this.db.prepare(`
       INSERT INTO sessions(
         id, sdk_session_id, chat_id, topic_id, project_name, cwd, title,
-        status, permission_mode, model, thinking, claude_effort, codex_reasoning, goal_condition, lean_mode, usage_snapshot,
+        status, permission_mode, provider, model, thinking, claude_effort,
+        codex_model, codex_reasoning, codex_thread_id, handoff_summary,
+        goal_condition, lean_mode, usage_snapshot,
         always_allowed_tools, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.sdkSessionId,
@@ -270,10 +315,14 @@ export class StateStore {
       session.title,
       session.status,
       session.permissionMode,
+      session.provider,
       session.model,
       session.thinking,
       session.claudeEffort ?? null,
+      session.codexModel ?? null,
       session.codexReasoning ?? null,
+      session.codexThreadId ?? null,
+      session.handoffSummary ?? null,
       session.goalCondition ?? null,
       session.leanMode ? 1 : 0,
       session.usageSnapshot ? JSON.stringify(session.usageSnapshot) : null,
@@ -313,7 +362,7 @@ export class StateStore {
     id: string,
     fields: Partial<Pick<
       SessionRecord,
-      "sdkSessionId" | "title" | "status" | "permissionMode" | "model" | "thinking" | "claudeEffort" | "codexReasoning" | "goalCondition" | "leanMode" | "usageSnapshot"
+      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "codexModel" | "codexReasoning" | "codexThreadId" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
     >>
   ): void {
     const entries: Array<[string, unknown]> = [];
@@ -321,10 +370,14 @@ export class StateStore {
     if ("title" in fields) entries.push(["title", fields.title]);
     if ("status" in fields) entries.push(["status", fields.status]);
     if ("permissionMode" in fields) entries.push(["permission_mode", fields.permissionMode]);
+    if ("provider" in fields) entries.push(["provider", fields.provider]);
     if ("model" in fields) entries.push(["model", fields.model]);
     if ("thinking" in fields) entries.push(["thinking", fields.thinking]);
     if ("claudeEffort" in fields) entries.push(["claude_effort", fields.claudeEffort]);
+    if ("codexModel" in fields) entries.push(["codex_model", fields.codexModel]);
     if ("codexReasoning" in fields) entries.push(["codex_reasoning", fields.codexReasoning]);
+    if ("codexThreadId" in fields) entries.push(["codex_thread_id", fields.codexThreadId]);
+    if ("handoffSummary" in fields) entries.push(["handoff_summary", fields.handoffSummary]);
     if ("goalCondition" in fields) entries.push(["goal_condition", fields.goalCondition]);
     if ("leanMode" in fields) entries.push(["lean_mode", fields.leanMode ? 1 : 0]);
     if ("usageSnapshot" in fields) {
@@ -346,6 +399,37 @@ export class StateStore {
   deleteSession(id: string): boolean {
     const result = this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
     return result.changes > 0;
+  }
+
+  // 새 세션 기본값(전역 1벌). app_settings의 default.* 키에 저장하고, 없는 값은 시드로 채운다.
+  getSessionDefaults(): SessionDefaults {
+    const rows = this.db
+      .prepare("SELECT key, value FROM app_settings WHERE key LIKE 'default.%'")
+      .all() as Array<{ key: string; value: string }>;
+    const stored = new Map(rows.map((row) => [row.key.slice("default.".length), row.value]));
+    const provider = stored.get("provider") === "codex" ? "codex" : "claude";
+    return {
+      provider: provider as ProviderKind,
+      claudeModel: stored.get("claudeModel") ?? SESSION_DEFAULT_SEED.claudeModel,
+      codexModel: stored.get("codexModel") ?? SESSION_DEFAULT_SEED.codexModel,
+      thinking: stored.get("thinking") ?? SESSION_DEFAULT_SEED.thinking,
+      claudeEffort: stored.get("claudeEffort") ?? SESSION_DEFAULT_SEED.claudeEffort,
+      codexReasoning: stored.get("codexReasoning") ?? SESSION_DEFAULT_SEED.codexReasoning
+    };
+  }
+
+  updateSessionDefaults(fields: Partial<SessionDefaults>): SessionDefaults {
+    const statement = this.db.prepare(
+      "INSERT INTO app_settings(key, value) VALUES (?, ?) "
+      + "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    );
+    this.db.transaction(() => {
+      for (const [key, value] of Object.entries(fields)) {
+        if (value === undefined) continue;
+        statement.run(`default.${key}`, String(value));
+      }
+    })();
+    return this.getSessionDefaults();
   }
 
   interruptIncompleteSessions(): number {
@@ -589,10 +673,14 @@ export class StateStore {
       title: row.title,
       status: row.status,
       permissionMode: row.permission_mode,
+      provider: row.provider === "codex" ? "codex" : "claude",
       model: row.model,
       thinking: row.thinking,
       claudeEffort: row.claude_effort,
+      codexModel: row.codex_model,
       codexReasoning: row.codex_reasoning,
+      codexThreadId: row.codex_thread_id,
+      handoffSummary: row.handoff_summary,
       goalCondition: row.goal_condition,
       leanMode: row.lean_mode !== 0,
       usageSnapshot: this.parseUsageSnapshot(row.usage_snapshot),

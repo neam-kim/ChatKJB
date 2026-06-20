@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import {
   deleteSession as deleteClaudeSession,
   query,
@@ -16,20 +14,13 @@ import {
   type SDKUserMessage,
   type SDKMessage
 } from "@anthropic-ai/claude-agent-sdk";
-import { Codex, type ThreadItem, type Usage } from "@openai/codex-sdk";
+import { Codex, type ThreadItem } from "@openai/codex-sdk";
 import {
   isRetryableMcpError,
   loadMcpServersWithTimeouts,
   mcpCallKey,
   mcpServerName
 } from "./mcp-policy.js";
-import {
-  buildPlanPrompt,
-  buildReviewPrompt,
-  formatStructuredReview,
-  parseAcceptanceCriteria,
-  parsePlanReview
-} from "./plan-verification.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { StateStore } from "./store.js";
 import { StreamRenderer } from "./stream-renderer.js";
@@ -50,8 +41,8 @@ import {
 } from "./model-catalog.js";
 import type {
   MessageTransport,
-  PlanEvidenceKind,
   ProjectConfig,
+  ProviderKind,
   SessionRecord,
   UsageSnapshot
 } from "./types.js";
@@ -61,8 +52,6 @@ import {
   snapshotFromUsageResponse
 } from "./usage.js";
 
-const execFileAsync = promisify(execFile);
-const MAX_PLAN_EXECUTION_ATTEMPTS = 3;
 // 일시적 과부하(Overloaded/5xx) 자동 재시도 상한과 백오프(지수, 상한 60초).
 const MAX_OVERLOAD_RETRIES = 5;
 const OVERLOAD_RETRY_BASE_MS = 5_000;
@@ -134,13 +123,6 @@ interface RunRequest {
   retryCount?: number;
 }
 
-interface PlanRequest {
-  session: SessionRecord;
-  instruction: string;
-  codexModel?: string | undefined;
-  codexReasoning?: CodexReasoningEffort | undefined;
-}
-
 interface SessionManagerOptions {
   debounceMs: number;
   claudeCodeOauthToken: string;
@@ -206,100 +188,6 @@ function codexProgress(item: ThreadItem): string | null {
   if (item.type === "mcp_tool_call") return `Codex MCP 완료: ${item.server}/${item.tool}`;
   if (item.type === "error") return `Codex 오류: ${item.message.slice(0, 180)}`;
   return null;
-}
-
-function codexEvidence(item: ThreadItem): {
-  kind: PlanEvidenceKind;
-  summary: string;
-  details: Record<string, unknown>;
-} | null {
-  if (item.type === "command_execution") {
-    return {
-      kind: "command",
-      summary: `${item.status}: ${item.command.split("\n")[0]?.slice(0, 500) ?? ""}`,
-      details: {
-        command: item.command,
-        status: item.status,
-        exitCode: item.exit_code ?? null,
-        output: item.aggregated_output.slice(-20_000)
-      }
-    };
-  }
-  if (item.type === "file_change") {
-    return {
-      kind: "file_change",
-      summary: `${item.status}: ${item.changes.map((change) => change.path).join(", ").slice(0, 1000)}`,
-      details: { status: item.status, changes: item.changes }
-    };
-  }
-  if (item.type === "todo_list") {
-    const completed = item.items.filter((todo) => todo.completed).length;
-    return {
-      kind: "todo",
-      summary: `${completed}/${item.items.length} 완료`,
-      details: { items: item.items }
-    };
-  }
-  if (item.type === "mcp_tool_call") {
-    return {
-      kind: "mcp",
-      summary: `${item.status}: ${item.server}/${item.tool}`,
-      details: {
-        server: item.server,
-        tool: item.tool,
-        status: item.status,
-        error: item.error?.message ?? null
-      }
-    };
-  }
-  if (item.type === "web_search") {
-    return {
-      kind: "web_search",
-      summary: item.query.slice(0, 1000),
-      details: { query: item.query }
-    };
-  }
-  if (item.type === "agent_message") {
-    return {
-      kind: "agent_result",
-      summary: item.text.slice(0, 2000),
-      details: { text: item.text.slice(0, 20_000) }
-    };
-  }
-  if (item.type === "error") {
-    return {
-      kind: "error",
-      summary: item.message.slice(0, 2000),
-      details: { message: item.message.slice(0, 20_000) }
-    };
-  }
-  return null;
-}
-
-function formatCodexUsage(usage: Usage | null): string {
-  if (!usage) return "사용량 정보 없음";
-  return [
-    `입력 ${usage.input_tokens.toLocaleString("ko-KR")}`,
-    `캐시 ${usage.cached_input_tokens.toLocaleString("ko-KR")}`,
-    `출력 ${usage.output_tokens.toLocaleString("ko-KR")}`,
-    `추론 ${usage.reasoning_output_tokens.toLocaleString("ko-KR")}`
-  ].join(" · ");
-}
-
-function addCodexUsage(current: Usage | null, next: Usage): Usage {
-  if (!current) return next;
-  return {
-    input_tokens: current.input_tokens + next.input_tokens,
-    cached_input_tokens: current.cached_input_tokens + next.cached_input_tokens,
-    output_tokens: current.output_tokens + next.output_tokens,
-    reasoning_output_tokens:
-      current.reasoning_output_tokens + next.reasoning_output_tokens
-  };
-}
-
-function summarize(text: string, length = 1200): string {
-  const clean = text.trim();
-  return clean.length <= length ? clean : `${clean.slice(0, length)}\n...`;
 }
 
 export function buildCodexEnvironment(
@@ -398,17 +286,21 @@ export function buildGoalCheckPrompt(condition: string): string {
   ].join("\n");
 }
 
-export function buildMemoryPrompt(focus?: string): string {
+export function buildMemoryPrompt(focus?: string, memoryDir = "~/.claude/memory"): string {
   const clean = focus?.replace(/\s+/g, " ").trim().slice(0, 1000);
   const scope = clean
     ? `사용자가 지정한 저장 초점: ${clean}`
     : "현재 세션 전체에서 앞으로도 반복해서 유용할 내용을 검토한다.";
+  // 경로와 파일 형식을 프롬프트 본문에 명시해 Claude/Codex 양쪽에서 동일하게 동작하게 한다.
+  // Codex 턴에는 Claude 같은 메모리 시스템 프롬프트가 없으므로 self-contained해야 한다.
   return [
     "[EXPLICIT_MEMORY_UPDATE]",
     "사용자가 /memory 명령으로 전역 장기 메모리 업데이트를 명시적으로 승인했다.",
     scope,
-    `메모리는 시스템 프롬프트에 지정된 전역 메모리 디렉터리에만 기록한다.`,
-    "기존 MEMORY.md와 관련 메모리 파일을 먼저 읽고, 중복 없이 최소 범위로 갱신한다.",
+    `메모리는 항상 ${memoryDir} 에만 기록한다. 새 메모리 파일은 이 경로에 만들고 인덱스는 ${memoryDir}/MEMORY.md 를 한 줄로 갱신한다.`,
+    "각 메모리 파일은 frontmatter(--- / name: <kebab-slug> / description: <한 줄 요약> / "
+    + "metadata: type: user|feedback|project|reference / ---)와 본문 한 가지 사실로 구성한다.",
+    `기존 ${memoryDir}/MEMORY.md와 관련 메모리 파일을 먼저 읽고, 중복 없이 최소 범위로 갱신한다.`,
     "일시적인 작업 상태, 이미 끝난 세부 절차, 추측, 비밀정보, 자격증명은 저장하지 않는다.",
     "새 사실을 발명하지 말고 현재 대화에서 확인된 사용자 선호, 결정, 반복 사용 가능한 프로젝트 지식만 기록한다.",
     "이 명령문 자체는 메모리 내용으로 저장하지 않는다.",
@@ -479,27 +371,119 @@ function hasUsageWindows(snapshot: UsageSnapshot): boolean {
   );
 }
 
-function nextKstReset(hour: number, minute: number, now = Date.now()): string {
-  const date = new Date(now);
-  const kstFormatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Seoul",
+function datePartsInTimeZone(timestamp: number, timeZone: string): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+} {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
     year: "numeric",
     month: "2-digit",
-    day: "2-digit"
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
   });
-  const [yearText, monthText, dayText] = kstFormatter.format(date).split("-");
-  const year = Number(yearText);
-  const month = Number(monthText);
-  const day = Number(dayText);
-  const reset = Date.UTC(year, month - 1, day, hour - 9, minute);
-  const next = reset > now ? reset : reset + 24 * 60 * 60 * 1000;
-  return new Date(next).toISOString();
+  const values = Object.fromEntries(
+    formatter
+      .formatToParts(new Date(timestamp))
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, Number(part.value)])
+  );
+  return {
+    year: values.year ?? 0,
+    month: values.month ?? 0,
+    day: values.day ?? 0,
+    hour: values.hour ?? 0,
+    minute: values.minute ?? 0,
+    second: values.second ?? 0
+  };
+}
+
+function zonedDateTimeToEpoch(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  timeZone: string
+): number {
+  const targetAsUtc = Date.UTC(year, month - 1, day, hour, minute);
+  let candidate = targetAsUtc;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const actual = datePartsInTimeZone(candidate, timeZone);
+    const actualAsUtc = Date.UTC(
+      actual.year,
+      actual.month - 1,
+      actual.day,
+      actual.hour,
+      actual.minute,
+      actual.second
+    );
+    const correction = targetAsUtc - actualAsUtc;
+    candidate += correction;
+    if (correction === 0) break;
+  }
+  return candidate;
+}
+
+function normalizeResetTimeZone(value: string | undefined): string {
+  const clean = value?.trim();
+  if (!clean) return "Asia/Seoul";
+  const aliases: Record<string, string> = {
+    KST: "Asia/Seoul",
+    UTC: "UTC",
+    GMT: "UTC"
+  };
+  const timeZone = aliases[clean.toUpperCase()] ?? clean;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
+    return timeZone;
+  } catch {
+    return "Asia/Seoul";
+  }
+}
+
+function nextResetInTimeZone(
+  hour: number,
+  minute: number,
+  timeZone: string,
+  now = Date.now()
+): string {
+  const current = datePartsInTimeZone(now, timeZone);
+  let reset = zonedDateTimeToEpoch(
+    current.year,
+    current.month,
+    current.day,
+    hour,
+    minute,
+    timeZone
+  );
+  if (reset <= now) {
+    const nextDate = new Date(Date.UTC(current.year, current.month - 1, current.day + 1));
+    reset = zonedDateTimeToEpoch(
+      nextDate.getUTCFullYear(),
+      nextDate.getUTCMonth() + 1,
+      nextDate.getUTCDate(),
+      hour,
+      minute,
+      timeZone
+    );
+  }
+  return new Date(reset).toISOString();
 }
 
 export function snapshotFromRateLimitError(error: unknown, capturedAt = Date.now()): UsageSnapshot | null {
   const message = error instanceof Error ? error.message : String(error);
   if (!isRateLimitError(message)) return null;
-  const resetMatch = message.match(/resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  const resetMatch = message.match(
+    /resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\))?/i
+  );
   let resetsAt: string | null = null;
   if (resetMatch) {
     let hour = Number(resetMatch[1]);
@@ -507,7 +491,8 @@ export function snapshotFromRateLimitError(error: unknown, capturedAt = Date.now
     const meridiem = resetMatch[3]?.toLowerCase();
     if (meridiem === "pm" && hour < 12) hour += 12;
     if (meridiem === "am" && hour === 12) hour = 0;
-    resetsAt = nextKstReset(hour, minute, capturedAt);
+    const timeZone = normalizeResetTimeZone(resetMatch[4]);
+    resetsAt = nextResetInTimeZone(hour, minute, timeZone, capturedAt);
   }
   return {
     capturedAt,
@@ -547,6 +532,18 @@ export function isOverloadedError(error: unknown): boolean {
     || message.includes("service unavailable")
     || message.includes("internal server error")
   );
+}
+
+export function resultFailureText(
+  message: SDKMessage,
+  rateLimitRejected = false
+): string | null {
+  if (message.type !== "result") return null;
+  const text = resultText(message);
+  if (rateLimitRejected || isRateLimitError(text) || isOverloadedError(text)) {
+    return text || (rateLimitRejected ? "Claude rate limit rejected" : null);
+  }
+  return message.subtype === "success" ? null : text || "Claude 실행이 실패했습니다.";
 }
 
 export function buildClaudeEnvironment(
@@ -650,7 +647,10 @@ export class SessionManager {
     model?: string | null,
     thinking?: string | null,
     claudeEffort?: string | null,
-    leanMode = true
+    leanMode = true,
+    provider: ProviderKind = "claude",
+    codexModel?: string | null,
+    codexReasoning?: string | null
   ): SessionRecord {
     const now = Date.now();
     const session: SessionRecord = {
@@ -663,10 +663,14 @@ export class SessionManager {
       title,
       status: "queued",
       permissionMode: project.defaultMode,
+      provider,
       model: model ?? null,
       thinking: thinking ?? null,
       claudeEffort: claudeEffort ?? null,
-      codexReasoning: null,
+      codexModel: codexModel ?? null,
+      codexReasoning: codexReasoning ?? null,
+      codexThreadId: null,
+      handoffSummary: null,
       goalCondition: null,
       leanMode,
       usageSnapshot: null,
@@ -684,9 +688,22 @@ export class SessionManager {
   }
 
   resume(session: SessionRecord, prompt: string): boolean {
-    if (!session.sdkSessionId || this.active.has(session.id)) return false;
+    if (this.active.has(session.id)) return false;
+    // Codex 세션은 스레드를 새로 시작할 수 있어 항상 이어 갈 수 있다. Claude 세션은 이어 갈
+    // SDK 세션 id가 있어야 한다. 제공사 전환 직후(handoffSummary 보유)에는 양쪽 모두 새
+    // 맥락에서 요약을 받아 시작하므로 재개 핸들 없이도 진행한다.
+    const canResume = session.provider === "codex"
+      || !!session.sdkSessionId
+      || !!session.handoffSummary;
+    if (!canResume) return false;
     this.store.updateSession(session.id, { status: "queued" });
-    this.enqueue({ session: this.store.getSession(session.id) ?? session, prompt, resumeSessionId: session.sdkSessionId });
+    this.enqueue({
+      session: this.store.getSession(session.id) ?? session,
+      prompt,
+      ...(session.provider === "claude" && session.sdkSessionId
+        ? { resumeSessionId: session.sdkSessionId }
+        : {})
+    });
     return true;
   }
 
@@ -862,21 +879,78 @@ export class SessionManager {
     return inspections;
   }
 
-  runPlanPipeline(
-    session: SessionRecord,
-    instruction: string,
-    options?: { codexModel?: string; codexReasoning?: CodexReasoningEffort }
-  ): boolean {
-    const clean = instruction.trim();
-    if (!clean || this.active.has(session.id) || this.sessionTasks.has(session.id)) return false;
-    this.store.updateSession(session.id, { status: "queued" });
-    this.enqueuePlan({
-      session: this.store.getSession(session.id) ?? session,
-      instruction: clean,
-      codexModel: options?.codexModel,
-      codexReasoning: options?.codexReasoning
+  // 제공사를 전환한다(유휴 상태에서만). 현재 provider로 인계 요약을 만들어 저장하고,
+  // 대상 provider의 재개 핸들을 비워 새 맥락에서 요약을 받아 이어 가게 한다. 전환 결과를
+  // 돌려주고, 다음 사용자 턴부터 새 provider가 적용된다.
+  async switchProvider(
+    sessionId: string,
+    target: ProviderKind
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const session = this.store.getSession(sessionId);
+    if (!session) return { ok: false, reason: "세션을 찾을 수 없습니다." };
+    if (this.active.has(sessionId) || this.sessionTasks.has(sessionId)) {
+      return { ok: false, reason: "실행 중에는 전환할 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요." };
+    }
+    if (session.provider === target) return { ok: false, reason: "이미 해당 제공사를 사용 중입니다." };
+
+    let summary = "";
+    try {
+      summary = await this.summarizeForHandoff(session);
+    } catch (error) {
+      console.error("Handoff summary failed:", safeErrorMessage(error, this.oauthTokens));
+    }
+
+    if (target === "codex") {
+      // 대상=Codex: 새 스레드에서 요약을 받아 시작한다.
+      this.store.updateSession(sessionId, {
+        provider: "codex",
+        codexThreadId: null,
+        ...(summary ? { handoffSummary: summary } : {})
+      });
+    } else {
+      // 대상=Claude: 새 SDK 세션에서 요약을 받아 시작한다.
+      this.store.updateSession(sessionId, {
+        provider: "claude",
+        sdkSessionId: null,
+        ...(summary ? { handoffSummary: summary } : {})
+      });
+    }
+    return { ok: true };
+  }
+
+  // 현재 provider에게 다음 어시스턴트가 이어받을 인계 요약을 만들게 한다. 한 번도 실행된 적이
+  // 없는 세션(재개 핸들 없음)은 인계할 맥락이 없으므로 빈 문자열을 돌려준다.
+  private async summarizeForHandoff(session: SessionRecord): Promise<string> {
+    const prompt =
+      "이 세션에서 지금까지 진행한 대화와 작업을, 다른 AI 어시스턴트가 그대로 이어받아 "
+      + "작업을 계속할 수 있도록 한국어로 간결하게 요약하세요. 핵심 목표, 현재까지의 진행/결정, "
+      + "수정한 파일과 그 이유, 남은 일과 주의점을 포함하고 요약 본문만 출력하세요.";
+    if (session.provider === "claude") {
+      if (!session.sdkSessionId) return "";
+      const controller = new AbortController();
+      const run: ActiveRun = {
+        controller,
+        input: new MessageQueue(),
+        pendingTurns: 0,
+        startedAt: Date.now(),
+        codexTimers: new Map(),
+        codexStarts: new Map(),
+        mcpFailures: new Map()
+      };
+      return this.runReadOnlyClaude(session, controller, run, prompt, this.tokenPool.select());
+    }
+    // Codex: 직전 스레드를 재개해 비스트리밍으로 요약 한 턴을 받는다.
+    if (!session.codexThreadId) return "";
+    requireCodexSubscriptionAuth();
+    const codex = new Codex({ env: buildCodexEnvironment() });
+    const thread = codex.resumeThread(session.codexThreadId, {
+      workingDirectory: session.cwd,
+      skipGitRepoCheck: true,
+      sandboxMode: "read-only",
+      approvalPolicy: "never"
     });
-    return true;
+    const result = await thread.run(prompt);
+    return result.finalResponse.trim();
   }
 
   async deleteSession(session: SessionRecord): Promise<void> {
@@ -977,11 +1051,44 @@ export class SessionManager {
     this.cancelLimitWaiter(request.session.id);
     const cwd = request.session.cwd;
     const count = this.queuedCounts.get(cwd) ?? 0;
+    const waitsForPrevious = this.projectTails.has(cwd);
     this.queuedCounts.set(cwd, count + 1);
     const previous = this.projectTails.get(cwd) ?? Promise.resolve();
+    if (waitsForPrevious) {
+      const ahead = Math.max(1, count);
+      void this.transport.sendText(
+        request.session.chatId,
+        request.session.topicId,
+        `[QUEUED] 같은 프로젝트에서 실행 중인 작업 ${ahead}개가 끝나기를 기다립니다.\n`
+        + "앞선 작업이 종료되면 자동으로 시작합니다."
+      ).catch((error: unknown) => {
+        console.error(
+          `Queued status notification failed (${request.session.id}):`,
+          safeErrorMessage(error, this.oauthTokens)
+        );
+      });
+    }
     const next = previous
       .catch(() => undefined)
-      .then(() => this.execute(request))
+      .then(() => this.dispatch(request))
+      .catch((error: unknown) => {
+        // execute()의 자체 오류 처리 중 Telegram 전송/토픽 변경까지 실패하면 예외가
+        // 여기까지 빠질 수 있다. 이 Promise를 미처리 rejection으로 두면 Node 데몬이
+        // 종료되고 launchd 재시작 뒤 토큰 풀이 초기화되어 같은 페일오버를 반복한다.
+        console.error(
+          `Session execution escaped error (${request.session.id}):`,
+          safeErrorMessage(error, this.oauthTokens)
+        );
+        if (this.store.getSession(request.session.id)) {
+          this.store.updateSession(request.session.id, { status: "error" });
+        }
+        void this.transport.sendText(
+          request.session.chatId,
+          request.session.topicId,
+          "[ERROR] 작업 오류를 처리하는 중 추가 통신 오류가 발생했습니다. "
+          + "오케스트레이터는 종료되지 않았습니다. 잠시 후 다시 시도하세요."
+        ).catch(() => undefined);
+      })
       .finally(() => {
         const remaining = Math.max(0, (this.queuedCounts.get(cwd) ?? 1) - 1);
         this.queuedCounts.set(cwd, remaining);
@@ -995,31 +1102,35 @@ export class SessionManager {
     this.sessionTasks.set(request.session.id, next);
   }
 
-  private enqueuePlan(request: PlanRequest): void {
-    const cwd = request.session.cwd;
-    const count = this.queuedCounts.get(cwd) ?? 0;
-    this.queuedCounts.set(cwd, count + 1);
-    const previous = this.projectTails.get(cwd) ?? Promise.resolve();
-    const next = previous
-      .catch(() => undefined)
-      .then(() => this.executePlan(request))
-      .finally(() => {
-        const remaining = Math.max(0, (this.queuedCounts.get(cwd) ?? 1) - 1);
-        this.queuedCounts.set(cwd, remaining);
-        if (this.projectTails.get(cwd) === next) this.projectTails.delete(cwd);
-        if (this.sessionTasks.get(request.session.id) === next) {
-          this.sessionTasks.delete(request.session.id);
-        }
-        this.deleting.delete(request.session.id);
-      });
-    this.projectTails.set(cwd, next);
-    this.sessionTasks.set(request.session.id, next);
+  // 제공사 전환 직후 첫 턴에 직전 provider의 인계 요약을 프롬프트 앞에 붙이고 저장값을
+  // 비운다. compact 같은 비대화 작업에는 주입하지 않는다.
+  private applyHandoffSummary(request: RunRequest, session: SessionRecord): RunRequest {
+    if (!session.handoffSummary || request.operation === "compact") return request;
+    const prompt =
+      `[이전 어시스턴트로부터 인계받은 작업 요약]\n${session.handoffSummary}\n\n`
+      + `[사용자의 새 지시]\n${request.prompt}`;
+    this.store.updateSession(session.id, { handoffSummary: null });
+    return { ...request, prompt };
+  }
+
+  // 큐에서 꺼낸 작업을 현재 저장된 provider에 맞는 실행기로 보낸다. provider는 /model
+  // 전환으로 큐 대기 중에 바뀔 수 있으므로 스냅샷이 아닌 최신 값을 다시 읽는다.
+  private async dispatch(request: RunRequest): Promise<void> {
+    const session = this.store.getSession(request.session.id);
+    const provider = session?.provider ?? request.session.provider;
+    if (provider === "codex") {
+      await this.executeCodex(request);
+      return;
+    }
+    await this.execute(request);
   }
 
   private async execute(request: RunRequest): Promise<void> {
     if (this.deleting.has(request.session.id)) return;
     const session = this.store.getSession(request.session.id);
     if (!session) return;
+    // 제공사 전환 직후 첫 턴이면 인계 요약을 프롬프트 앞에 1회 주입하고 비운다.
+    request = this.applyHandoffSummary(request, session);
     const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
     const abortController = new AbortController();
     const input = new MessageQueue();
@@ -1038,7 +1149,11 @@ export class SessionManager {
     const oauthToken = this.tokenPool.select();
     const tokenIndex = this.tokenPool.indexOf(oauthToken);
     let sdkSessionId = request.resumeSessionId ?? session.sdkSessionId;
+    // 세션의 usageSnapshot은 텔레그램 표시용 캐시이며 어느 계정 토큰에서 수집됐는지
+    // 식별하지 않는다. 토큰 전환 실행에서 이를 새 토큰의 관측값으로 재사용하면,
+    // 1번 토큰의 100% 스냅샷 때문에 2번 토큰까지 소진 처리될 수 있다.
     let latestUsage: UsageSnapshot | null = session.usageSnapshot;
+    let currentTokenUsage: UsageSnapshot | null = null;
     let lastAssistantText = "";
     let compactSummary = "";
     let finalStatus: "done" | "error" = "done";
@@ -1048,6 +1163,7 @@ export class SessionManager {
     const streamingText = new StreamingTextCollector();
     const streamedAssistantTexts: string[] = [];
     let hasDeliveredAssistantText = false;
+    let rateLimitRejected = false;
 
     try {
       await this.safeRename(session, `[RUNNING] ${session.title}`);
@@ -1220,8 +1336,10 @@ export class SessionManager {
         const completedStreamText = streamingText.accept(message);
         if (completedStreamText) {
           streamedAssistantTexts.push(completedStreamText);
-          await renderer.text(completedStreamText);
-          hasDeliveredAssistantText = true;
+          if (!isRateLimitError(completedStreamText) && !isOverloadedError(completedStreamText)) {
+            await renderer.text(completedStreamText);
+            hasDeliveredAssistantText = true;
+          }
         }
         if (message.type === "system" && message.subtype === "init") {
           sdkSessionId = message.session_id;
@@ -1229,13 +1347,17 @@ export class SessionManager {
         }
 
         if (message.type === "rate_limit_event") {
-          latestUsage = mergeUsageSnapshots(
-            latestUsage,
+          if (message.rate_limit_info.status === "rejected") {
+            rateLimitRejected = true;
+          }
+          currentTokenUsage = mergeUsageSnapshots(
+            currentTokenUsage,
             snapshotFromRateLimitInfo(message.rate_limit_info)
           );
+          latestUsage = currentTokenUsage;
           this.store.updateSession(session.id, { usageSnapshot: latestUsage });
           renderer.usage(latestUsage);
-          this.tokenPool.observe(oauthToken, latestUsage);
+          this.tokenPool.observe(oauthToken, currentTokenUsage);
         }
 
         if (message.type === "system" && message.subtype === "compact_boundary") {
@@ -1268,7 +1390,10 @@ export class SessionManager {
             const streamedIndex = streamedAssistantTexts.indexOf(lastAssistantText);
             if (streamedIndex >= 0) {
               streamedAssistantTexts.splice(streamedIndex, 1);
-            } else {
+            } else if (
+              !isRateLimitError(lastAssistantText)
+              && !isOverloadedError(lastAssistantText)
+            ) {
               await renderer.text(block.text);
               hasDeliveredAssistantText = true;
             }
@@ -1279,10 +1404,15 @@ export class SessionManager {
           sdkSessionId = message.session_id;
           const serverUsage = await readUsageSnapshot(sdkQuery);
           if (serverUsage) {
+            currentTokenUsage = serverUsage;
             latestUsage = serverUsage;
             renderer.usage(serverUsage);
           }
-          this.tokenPool.observe(oauthToken, latestUsage);
+          this.tokenPool.observe(oauthToken, currentTokenUsage);
+          const failureText = resultFailureText(message, rateLimitRejected);
+          if (failureText) {
+            throw new Error(failureText);
+          }
           run.pendingTurns = Math.max(0, run.pendingTurns - 1);
           finalStatus = message.subtype === "success" ? "done" : "error";
           this.store.updateSession(session.id, {
@@ -1298,6 +1428,10 @@ export class SessionManager {
                 ? compactSummary
                 : resultSummary(message, hasDeliveredAssistantText)
             );
+            // 스트리밍 입력 모드의 Query는 다음 사용자 턴을 받기 위해 result 뒤에도
+            // 열린 채로 있을 수 있다. 이 호스트는 후속 입력을 pendingTurns로 이미
+            // 추적하므로 마지막 턴이면 즉시 루프를 끝내고 finally에서 Query를 닫는다.
+            break;
           } else {
             renderer.note(`예약 메시지 ${run.pendingTurns}개 처리 대기`);
           }
@@ -1328,6 +1462,10 @@ export class SessionManager {
       }
     } catch (error) {
       if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
+      console.error(
+        `Claude run failed (session=${session.id}, token=#${tokenIndex + 1}):`,
+        safeErrorMessage(error, this.oauthTokens)
+      );
       if (idleTimedOut) {
         const minutes = Math.round(this.options.turnIdleTimeoutMs / 60_000);
         this.store.updateSession(session.id, { status: "error" });
@@ -1344,7 +1482,13 @@ export class SessionManager {
       } else if (isRateLimitError(error)) {
         // 한도 오류로 끝난 토큰을 봉인하고, 살아있는 다른 토큰이 있으면 같은 작업을
         // 그 토큰으로 즉시 자동 재실행한다. 사용자가 "계속" 같은 추가 입력을 보낼 필요가 없다.
-        this.tokenPool.noteRateLimited(oauthToken);
+        const limitSnapshot = snapshotFromRateLimitError(error);
+        const resetsAt = limitSnapshot?.fiveHour?.resetsAt;
+        this.tokenPool.noteRateLimited(
+          oauthToken,
+          Date.now(),
+          resetsAt ? Date.parse(resetsAt) : undefined
+        );
         const attempts = (request.autoSwitchCount ?? 0) + 1;
         const nextToken = this.tokenPool.select();
         const canAutoSwitch =
@@ -1429,13 +1573,20 @@ export class SessionManager {
     }
   }
 
-  private async executePlan(request: PlanRequest): Promise<void> {
+  // Codex 제공사 세션의 한 작업(여러 턴)을 실행한다. Claude의 execute()에 대응하며, Codex
+  // SDK 스레드로 턴을 돌린다. 웹검색은 항상 켜고 샌드박스는 full-access, 승인은 비대화(never)다.
+  // steer/next로 큐에 쌓인 메시지는 같은 스레드에서 이어지는 턴으로 처리한다.
+  private async executeCodex(request: RunRequest): Promise<void> {
     if (this.deleting.has(request.session.id)) return;
-    const session = this.store.getSession(request.session.id);
+    let session = this.store.getSession(request.session.id);
     if (!session) return;
+    request = this.applyHandoffSummary(request, session);
+    session = this.store.getSession(request.session.id) ?? session;
+
     const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
     const controller = new AbortController();
     const input = new MessageQueue();
+    input.push(buildUserMessage(request.prompt));
     const run: ActiveRun = {
       controller,
       input,
@@ -1446,164 +1597,75 @@ export class SessionManager {
       mcpFailures: new Map()
     };
     this.active.set(session.id, run);
-    // 계획 단계도 동일하게 살아있는 토큰을 고른다. 이 단계는 사용량 스트림을 추적하지
-    // 않으므로 한도 도달은 rate-limit 오류로만 감지한다.
-    const oauthToken = this.tokenPool.select();
-    const tokenIndex = this.tokenPool.indexOf(oauthToken);
-    const planRunId = randomUUID();
-    const planRunCreatedAt = Date.now();
-    this.store.createPlanRun({
-      id: planRunId,
-      sessionId: session.id,
-      instruction: request.instruction,
-      planText: "",
-      status: "planning",
-      reviewerVerdict: null,
-      reviewText: null,
-      codexResult: null,
-      attemptCount: 0,
-      createdAt: planRunCreatedAt,
-      updatedAt: planRunCreatedAt,
-      completedAt: null
-    });
+
     let timedOut = false;
-    let overallTimeout: NodeJS.Timeout | undefined;
+    let turnTimeout: NodeJS.Timeout | undefined;
+    let lastResponse = "";
+    let codexThreadId = session.codexThreadId;
 
     try {
-      await this.safeRename(session, `[PLAN] ${session.title}`);
+      await this.safeRename(session, `[RUNNING] ${session.title}`);
       await renderer.start(false);
       this.store.updateSession(session.id, { status: "running" });
 
-      renderer.note("Claude 구현 계획 작성 중");
-      let plan = await this.runReadOnlyClaude(
-        session,
-        controller,
-        run,
-        buildPlanPrompt(request.instruction),
-        oauthToken,
-        true
-      );
-      let criteria = parseAcceptanceCriteria(plan);
-      if (criteria.length === 0) {
-        renderer.note("완료 기준 형식 보정 중");
-        plan = await this.runReadOnlyClaude(
-          session,
-          controller,
-          run,
-          buildPlanPrompt(
-            request.instruction,
-            plan,
-            "계획 마지막의 [ACCEPTANCE_CRITERIA] 블록이 누락됐습니다. 계획 내용은 유지하고 독립 검증 가능한 기준을 추가하세요."
-          ),
-          oauthToken,
-          true
-        );
-        criteria = parseAcceptanceCriteria(plan);
-      }
-      if (criteria.length === 0) {
-        throw new Error("계획에 구조화된 완료 기준이 없어 실행을 시작하지 않았습니다.");
-      }
-      while (true) {
-        this.store.updatePlanRun(planRunId, {
-          planText: plan,
-          status: "awaiting_approval"
-        });
-        this.store.replacePlanCriteria(planRunId, criteria);
-        await renderer.text(`[PLAN]\n${plan}`);
-        const decision = await this.permissions.requestPlanDecision(session, controller.signal);
-        if (controller.signal.aborted) throw new Error("Plan approval aborted");
-        if (decision.action === "approve") break;
-        if (decision.action === "reject") {
-          run.pendingTurns = 0;
-          this.store.updatePlanRun(planRunId, {
-            status: "rejected",
-            completedAt: Date.now()
-          });
-          this.store.updateSession(session.id, { status: "done" });
-          await renderer.finish("done", "사용자가 계획을 거절해 파이프라인을 종료했습니다.");
-          await this.safeRename(session, `[STOP] ${session.title}`);
-          return;
-        }
-
-        renderer.note("Claude 계획 재작성 중");
-        plan = await this.runReadOnlyClaude(
-          session,
-          controller,
-          run,
-          buildPlanPrompt(request.instruction, plan, decision.text ?? ""),
-          oauthToken,
-          true
-        );
-        criteria = parseAcceptanceCriteria(plan);
-        if (criteria.length === 0) {
-          throw new Error("수정된 계획에 구조화된 완료 기준이 없어 실행을 시작하지 않았습니다.");
-        }
-      }
-
-      this.store.updatePlanRun(planRunId, { status: "executing" });
       requireCodexSubscriptionAuth();
-      overallTimeout = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-        run.query?.close();
-      }, this.options.codexMcpTimeoutMs);
-      const codexModel = request.codexModel ?? DEFAULT_CODEX_MODEL;
-      const codexReasoning = request.codexReasoning ?? (session.codexReasoning as CodexReasoningEffort | null) ?? DEFAULT_CODEX_REASONING;
-      renderer.note(
-        `Codex 계획 실행 시작 (${codexModelLabel(this.options.modelCatalog, codexModel)} · ${codexReasoningLabel(codexReasoning)})`
-      );
-      run.codexStarts.set("plan-codex", Date.now());
-      const codex = new Codex({ env: buildCodexEnvironment() });
-      const thread = codex.startThread({
+      const codexModel = session.codexModel ?? DEFAULT_CODEX_MODEL;
+      const codexReasoning =
+        (session.codexReasoning as CodexReasoningEffort | null) ?? DEFAULT_CODEX_REASONING;
+      const threadOptions = {
         model: codexModel,
         modelReasoningEffort: codexReasoning,
         workingDirectory: session.cwd,
         skipGitRepoCheck: true,
-        sandboxMode: "workspace-write",
-        approvalPolicy: "never"
-      });
-      let finalResponse = "";
-      let codexUsage: Usage | null = null;
-      let finalReview: ReturnType<typeof parsePlanReview> | null = null;
-      let codexPrompt =
-        `다음 구현 계획을 현재 작업 디렉터리에서 끝까지 실행하세요. `
-        + `필요한 파일을 수정하고 관련 테스트와 타입 검사를 실제로 실행하세요. `
-        + `각 완료 기준을 어떤 명령과 결과로 검증했는지 최종 응답에 명시하세요.`
-        + (session.leanMode ? `\n\n${buildLeanInstructions(true)}` : "")
-        + `\n\n${plan}`;
+        sandboxMode: "danger-full-access" as const,
+        approvalPolicy: "never" as const,
+        webSearchEnabled: true
+      };
+      const codex = new Codex({ env: buildCodexEnvironment() });
+      const thread = codexThreadId
+        ? codex.resumeThread(codexThreadId, threadOptions)
+        : codex.startThread(threadOptions);
+      renderer.note(
+        `Codex 실행 (${codexModelLabel(this.options.modelCatalog, codexModel)} · reasoning ${codexReasoningLabel(codexReasoning)})`
+      );
 
-      for (let attempt = 1; attempt <= MAX_PLAN_EXECUTION_ATTEMPTS; attempt += 1) {
-        this.store.updatePlanRun(planRunId, {
-          status: "executing",
-          attemptCount: attempt
-        });
-        renderer.note(`Codex 실행 ${attempt}/${MAX_PLAN_EXECUTION_ATTEMPTS}`);
-        run.codexStarts.set("plan-codex", Date.now());
-        const streamed = await thread.runStreamed(codexPrompt, { signal: controller.signal });
+      // Claude는 시스템 프롬프트로 장기기억 위치를 받지만 Codex 턴에는 그게 없다. 첫 턴에
+      // 장기기억 경로를 알려 스레드 맥락에 남기면 이후 턴에서도 알아서 참고한다. 기록은
+      // /memory(buildMemoryPrompt)로 명시 승인할 때만 한다.
+      const memoryNote =
+        `장기기억은 ${this.options.claudeMemoryDir} 에 있다. 작업과 관련 있으면 `
+        + `${this.options.claudeMemoryDir}/MEMORY.md와 관련 파일을 먼저 읽고 활용하라. `
+        + `메모리 기록은 사용자가 /memory로 명시 승인할 때만 한다.`;
+      const iterator = input[Symbol.asyncIterator]();
+      // 초기 메시지는 위에서 push했으므로 큐에서 꺼내 첫 턴으로 쓴다. 이후 steer/next로
+      // 쌓인 메시지는 pendingTurns>0인 동안 같은 스레드에서 이어지는 턴으로 소비한다.
+      let pending = await iterator.next();
+      let firstTurn = true;
+      while (!pending.done) {
+        const content = pending.value.message.content;
+        const turnPrompt = typeof content === "string" ? content : request.prompt;
+        const memoryPrefix = firstTurn ? `${memoryNote}\n\n` : "";
+        const leanPrefix = session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "";
+        run.codexStarts.set("codex", Date.now());
+        if (turnTimeout) clearTimeout(turnTimeout);
+        turnTimeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, this.options.codexMcpTimeoutMs);
+
         let attemptResponse = "";
-        let codexCompleted = false;
+        let completed = false;
         try {
+          const streamed = await thread.runStreamed(`${memoryPrefix}${leanPrefix}${turnPrompt}`, {
+            signal: controller.signal
+          });
           for await (const event of streamed.events) {
             if (event.type === "item.completed") {
               if (event.item.type === "agent_message") attemptResponse = event.item.text;
               const progress = codexProgress(event.item);
               if (progress) renderer.note(progress);
-              const recorded = codexEvidence(event.item);
-              if (recorded) {
-                this.store.addPlanEvidence({
-                  id: randomUUID(),
-                  planRunId,
-                  criterionId: null,
-                  kind: recorded.kind,
-                  source: "codex",
-                  summary: `시도 ${attempt}: ${recorded.summary}`,
-                  details: { attempt, ...recorded.details },
-                  createdAt: Date.now()
-                });
-              }
             } else if (event.type === "turn.completed") {
-              codexUsage = addCodexUsage(codexUsage, event.usage);
-              codexCompleted = true;
+              completed = true;
             } else if (event.type === "turn.failed") {
               throw new Error(`Codex 실행 실패: ${event.error.message}`);
             } else if (event.type === "error") {
@@ -1611,176 +1673,53 @@ export class SessionManager {
             }
           }
         } finally {
-          run.codexStarts.delete("plan-codex");
+          run.codexStarts.delete("codex");
+          if (turnTimeout) clearTimeout(turnTimeout);
         }
-        if (!codexCompleted) throw new Error("Codex 실행이 완료 이벤트 없이 종료되었습니다.");
-        finalResponse = attemptResponse || finalResponse;
-        this.store.updatePlanRun(planRunId, { codexResult: finalResponse });
+        if (timedOut || controller.signal.aborted) throw new Error("turn aborted");
+        if (!completed) throw new Error("Codex 실행이 완료 이벤트 없이 종료되었습니다.");
 
-        const changes = await this.captureGitChanges(session.cwd);
-        this.store.addPlanEvidence({
-          id: randomUUID(),
-          planRunId,
-          criterionId: null,
-          kind: "git_status",
-          source: "orchestrator",
-          summary: `시도 ${attempt}: ${changes.status || "변경 없음"}`,
-          details: { attempt, status: changes.status },
-          createdAt: Date.now()
-        });
-        this.store.addPlanEvidence({
-          id: randomUUID(),
-          planRunId,
-          criterionId: null,
-          kind: "git_diff",
-          source: "orchestrator",
-          summary: `시도 ${attempt}: ${changes.diff ? "git diff 캡처 완료" : "git diff 없음"}`,
-          details: { attempt, diff: changes.diff.slice(0, 200_000) },
-          createdAt: Date.now()
-        });
-        renderer.note(`Claude 완료 검토 ${attempt}/${MAX_PLAN_EXECUTION_ATTEMPTS}`);
-        this.store.updatePlanRun(planRunId, { status: "reviewing" });
-        const evidence = this.store.listPlanEvidence(planRunId);
-        const reviewText = await this.runReadOnlyClaude(
-          session,
-          controller,
-          run,
-          buildReviewPrompt(plan, finalResponse, criteria, evidence, changes.status, changes.diff),
-          oauthToken
-        );
-        const review = parsePlanReview(reviewText, criteria.length);
-        finalReview = review;
-        const storedCriteria = this.store.listPlanCriteria(planRunId);
-        for (const criterion of review.criteria) {
-          const stored = storedCriteria[criterion.ordinal - 1];
-          if (!stored) continue;
-          this.store.updatePlanCriterion(stored.id, criterion.status, criterion.evidence);
-          this.store.addPlanEvidence({
-            id: randomUUID(),
-            planRunId,
-            criterionId: stored.id,
-            kind: "review",
-            source: "claude",
-            summary: `시도 ${attempt} ${criterion.status}: ${criterion.evidence}`,
-            details: {
-              attempt,
-              ordinal: criterion.ordinal,
-              status: criterion.status,
-              description: stored.description
-            },
-            createdAt: Date.now()
-          });
+        if (thread.id && thread.id !== codexThreadId) {
+          codexThreadId = thread.id;
+          this.store.updateSession(session.id, { codexThreadId });
         }
-        this.store.addPlanEvidence({
-          id: randomUUID(),
-          planRunId,
-          criterionId: null,
-          kind: "review",
-          source: "claude",
-          summary: `시도 ${attempt} ${review.verdict}: ${review.summary}`,
-          details: {
-            attempt,
-            verdict: review.verdict,
-            blockers: review.blockers,
-            criteria: review.criteria,
-            raw: reviewText.slice(0, 20_000)
-          },
-          createdAt: Date.now()
-        });
-        this.store.updatePlanRun(planRunId, {
-          reviewerVerdict: review.verdict,
-          reviewText
-        });
-        if (review.approved || attempt === MAX_PLAN_EXECUTION_ATTEMPTS) break;
+        lastResponse = attemptResponse || lastResponse;
+        if (attemptResponse) await renderer.text(attemptResponse);
+        firstTurn = false;
 
-        await renderer.text(
-          `[검증 실패 ${attempt}/${MAX_PLAN_EXECUTION_ATTEMPTS}]\n`
-          + `${formatStructuredReview(review)}\n\n`
-          + "같은 Codex 스레드에서 차단 문제를 수정하고 다시 검증합니다."
-        );
-        const failedCriteria = review.criteria
-          .filter((criterion) => criterion.status !== "pass")
-          .map((criterion) => `${criterion.ordinal}. ${criterion.status}: ${criterion.evidence}`)
-          .join("\n");
-        codexPrompt = [
-          "독립 검토에서 구현이 거절되었습니다. 설명만 하지 말고 현재 작업 디렉터리의 파일을 직접 수정하세요.",
-          "아래 차단 문제와 실패 기준만 해결하되 기존에 통과한 동작을 회귀시키지 마세요.",
-          "수정 후 관련 테스트와 타입 검사를 실제로 다시 실행하고 결과를 보고하세요.",
-          "",
-          "[차단 문제]",
-          review.blockers.length > 0 ? review.blockers.map((item) => `- ${item}`).join("\n") : "- 명시된 차단 문제 없음",
-          "",
-          "[실패 또는 차단된 완료 기준]",
-          failedCriteria || "- 검토 형식 또는 증거가 부족함",
-          "",
-          "[검토 요약]",
-          review.summary
-        ].join("\n");
+        run.pendingTurns = Math.max(0, run.pendingTurns - 1);
+        if (run.pendingTurns === 0) break;
+        renderer.note(`예약 메시지 ${run.pendingTurns}개 처리 대기`);
+        pending = await iterator.next();
       }
 
-      if (!finalReview) throw new Error("Claude 완료 검토 결과가 생성되지 않았습니다.");
-      this.store.updatePlanRun(planRunId, {
-        status: finalReview.approved ? "passed" : "failed",
-        completedAt: Date.now()
-      });
-
-      run.pendingTurns = 0;
-      this.store.updateSession(session.id, {
-        status: finalReview.approved ? "done" : "verification_failed"
-      });
-      await renderer.finish(
-        finalReview.approved ? "done" : "error",
-        [
-          finalReview.approved ? "[PLAN PIPELINE 완료]" : "[PLAN PIPELINE 검증 실패]",
-          "",
-          "계획 요약",
-          summarize(plan),
-          "",
-          "Codex 실행 결과",
-          summarize(finalResponse || "최종 응답 없음"),
-          "",
-          "Claude 검토",
-          formatStructuredReview(finalReview),
-          "",
-          `Codex 사용량: ${formatCodexUsage(codexUsage)}`
-        ].join("\n")
-      );
-      await this.safeRename(
-        session,
-        `${finalReview.approved ? "[DONE]" : "[REVIEW FAILED]"} ${session.title}`
-      );
+      this.store.updateSession(session.id, { status: "done" });
+      await renderer.finish("done", lastResponse ? "" : "Codex가 텍스트 응답 없이 작업을 마쳤습니다.");
+      await this.safeRename(session, `[DONE] ${session.title}`);
     } catch (error) {
       if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
-      const aborted = controller.signal.aborted && !timedOut;
-      if (!aborted && !timedOut && isRateLimitError(error)) {
-        this.tokenPool.noteRateLimited(oauthToken);
-        if (this.tokenPool.size > 1) {
-          renderer.note(`토큰 #${tokenIndex + 1} 한도 도달. 다음 세션은 다른 계정 토큰으로 전환됩니다.`);
-        }
+      console.error(
+        `Codex run failed (session=${session.id}):`,
+        safeErrorMessage(error, this.oauthTokens)
+      );
+      if (timedOut) {
+        const minutes = Math.round(this.options.codexMcpTimeoutMs / 60_000);
+        this.store.updateSession(session.id, { status: "error" });
+        await renderer.finish("error", `Codex 턴이 ${minutes}분 제한을 초과해 중단되었습니다.`);
+        await this.safeRename(session, `[STALL] ${session.title}`);
+      } else if (controller.signal.aborted) {
+        this.store.updateSession(session.id, { status: "aborted" });
+        await renderer.finish("aborted", "사용자가 작업을 중단했습니다.");
+        await this.safeRename(session, `[STOP] ${session.title}`);
+      } else {
+        this.store.updateSession(session.id, { status: "error" });
+        await renderer.finish("error", `Codex 실행 실패: ${safeErrorMessage(error)}`);
+        await this.safeRename(session, `[ERROR] ${session.title}`);
       }
-      this.store.updatePlanRun(planRunId, {
-        status: aborted ? "aborted" : "failed",
-        reviewText: safeErrorMessage(error),
-        completedAt: Date.now()
-      });
-      this.store.updateSession(session.id, { status: aborted ? "aborted" : "error" });
-      await renderer.finish(
-        aborted ? "aborted" : "error",
-        timedOut
-          ? `Plan 파이프라인이 ${Math.round(this.options.codexMcpTimeoutMs / 60_000)}분 제한을 초과해 중단되었습니다.`
-          : aborted
-            ? "사용자가 Plan 파이프라인을 중단했습니다."
-            : `Plan 파이프라인 실패: ${safeErrorMessage(error)}`
-      );
-      await this.safeRename(
-        session,
-        `${aborted ? "[STOP]" : timedOut ? "[STALL]" : "[ERROR]"} ${session.title}`
-      );
     } finally {
-      if (overallTimeout) clearTimeout(overallTimeout);
+      if (turnTimeout) clearTimeout(turnTimeout);
       renderer.dispose();
       input.close();
-      run.query?.close();
       this.active.delete(session.id);
     }
   }
@@ -2031,27 +1970,6 @@ export class SessionManager {
     }
     if (!text) throw new Error("Claude 읽기 전용 단계가 빈 응답을 반환했습니다.");
     return text;
-  }
-
-  private async captureGitChanges(cwd: string): Promise<{ status: string; diff: string }> {
-    try {
-      await execFileAsync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], {
-        timeout: 5000
-      });
-      const [status, diff] = await Promise.all([
-        execFileAsync("git", ["-C", cwd, "status", "--porcelain"], {
-          timeout: 10_000,
-          maxBuffer: 2 * 1024 * 1024
-        }),
-        execFileAsync("git", ["-C", cwd, "diff"], {
-          timeout: 20_000,
-          maxBuffer: 10 * 1024 * 1024
-        })
-      ]);
-      return { status: status.stdout.trim(), diff: diff.stdout.trim() };
-    } catch {
-      return { status: "git 저장소가 아니거나 변경 사항을 읽을 수 없습니다.", diff: "" };
-    }
   }
 
   private async safeRename(session: SessionRecord, title: string): Promise<void> {

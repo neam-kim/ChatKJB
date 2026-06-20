@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, Keyboard } from "grammy";
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { addProject, removeProject, resolveProject, type AppConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
@@ -21,6 +21,7 @@ import {
   type ModelCatalog,
   modelLabel,
   normalizeThinkingForModel,
+  resolveCodexModel,
   resolveModel,
   thinkingLabel,
   thinkingToggleOptionsForModel
@@ -28,13 +29,12 @@ import {
 import { PermissionBroker } from "./permission-broker.js";
 import {
   buildMemoryPrompt,
-  CODEX_MODEL,
   MAX_GOAL_ROUNDS,
   SessionManager
 } from "./session-manager.js";
 import { StateStore } from "./store.js";
 import { safeErrorMessage, TelegramTransport } from "./telegram-transport.js";
-import type { ProjectConfig, SessionRecord } from "./types.js";
+import type { ProjectConfig, ProviderKind, SessionDefaults, SessionRecord } from "./types.js";
 import { formatUsageSnapshot } from "./usage.js";
 
 const execFileAsync = promisify(execFile);
@@ -43,16 +43,13 @@ interface PendingStart {
   project: ProjectConfig;
   resumeSessionId?: string;
   forkSession?: boolean;
+  provider?: ProviderKind | undefined;
   model?: string | undefined;
   thinking?: string | undefined;
   claudeEffort?: string | undefined;
-  leanMode?: boolean | undefined;
-}
-
-interface PendingPlan {
-  sessionId: string;
-  instruction: string;
   codexModel?: string | undefined;
+  codexReasoning?: string | undefined;
+  leanMode?: boolean | undefined;
 }
 
 function pendingStartKey(userId: number, topicId?: number): string {
@@ -107,34 +104,86 @@ export function formatSessionStatus(
       : session.status === "queued"
       ? "대기 중"
       : "실행 중인 작업 없음";
+  const providerLines = session.provider === "codex"
+    ? [
+        "제공자: Codex",
+        `Codex 모델: ${codexModelLabel(catalog, session.codexModel ?? DEFAULT_CODEX_MODEL)} · reasoning ${codexReasoningLabel(session.codexReasoning ?? DEFAULT_CODEX_REASONING)}`
+      ]
+    : [
+        "제공자: Claude",
+        `모델: ${modelLabel(catalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`,
+        `thinking: ${thinkingLabel(session.thinking ?? DEFAULT_THINKING_LEVEL)}`,
+        `Claude 작업량: ${claudeEffortLabel(session.claudeEffort ?? DEFAULT_CLAUDE_EFFORT)}`
+      ];
   return [
     "오케스트레이터: 정상 응답",
     `작업: ${state}`,
     `저장 상태: ${session.status}`,
     `프로젝트: ${session.projectName}`,
-    `모델: ${modelLabel(catalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`,
-    `thinking: ${thinkingLabel(session.thinking ?? DEFAULT_THINKING_LEVEL)}`,
-    `Claude 작업량: ${claudeEffortLabel(session.claudeEffort ?? DEFAULT_CLAUDE_EFFORT)}`,
+    ...providerLines,
     `lean: ${session.leanMode ? "on" : "off"}`,
-    `Codex: ${codexModelLabel(catalog, CODEX_MODEL)} · reasoning ${codexReasoningLabel(session.codexReasoning ?? DEFAULT_CODEX_REASONING)}`,
     ...(session.goalCondition ? [`목표(자동 진행): ${session.goalCondition}`] : []),
     `마지막 상태 변경: ${formatTimestamp(session.updatedAt)}`
   ].join("\n");
 }
 
-function formatPlanProgress(store: StateStore, sessionId: string): string {
-  const run = store.getLatestPlanRunForSession(sessionId);
-  if (!run) return "";
-  const criteria = store.listPlanCriteria(run.id);
-  const pass = criteria.filter((criterion) => criterion.status === "pass").length;
-  const fail = criteria.filter((criterion) => criterion.status === "fail").length;
-  const blocked = criteria.filter((criterion) => criterion.status === "blocked").length;
-  return [
-    "",
-    `계획 실행: ${run.status} · Codex 시도 ${run.attemptCount}회`,
-    `완료 기준: ${pass}/${criteria.length} 통과 · 실패 ${fail} · 차단 ${blocked}`,
-    `검토 판정: ${run.reviewerVerdict ?? "대기"}`
-  ].join("\n");
+// 새 세션 기본값을 보여주는 상시 reply 키보드(ChatKJB식). 좌상 라벨, 우상 모델,
+// 좌하 제공자, 우하 thinking(Claude) 또는 추론 강도(Codex).
+function defaultsKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): Keyboard {
+  const providerLabel = defaults.provider === "codex" ? "Codex" : "Claude";
+  const modelText = defaults.provider === "codex"
+    ? codexModelLabel(catalog, defaults.codexModel)
+    : modelLabel(catalog, defaults.claudeModel);
+  const fourth = defaults.provider === "codex"
+    ? `💭 추론: ${codexReasoningLabel(defaults.codexReasoning)}`
+    : `💭 thinking: ${defaults.thinking === "off" ? "off" : "on"}`;
+  return new Keyboard()
+    .text("⚙️ 새 세션 기본값")
+    .text(`🧠 모델: ${modelText}`)
+    .row()
+    .text(`🤖 제공자: ${providerLabel}`)
+    .text(fourth)
+    .resized()
+    .persistent();
+}
+
+// 기본값 패널의 모델 선택용 인라인 키보드(제공자별). setm:<provider>:<id>
+function defaultsModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const options = defaults.provider === "codex"
+    ? catalog.codexModels.map((option) => ({ id: option.id, label: option.label }))
+    : catalog.claudeModels.map((option) => ({ id: option.id, label: option.label }));
+  for (const [index, option] of options.entries()) {
+    keyboard.text(option.label, `setm:${defaults.provider}:${option.id}`);
+    if (index < options.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): string {
+  if (defaults.provider === "codex") {
+    return `Codex · ${codexModelLabel(catalog, defaults.codexModel)} · reasoning ${codexReasoningLabel(defaults.codexReasoning)}`;
+  }
+  return `Claude · ${modelLabel(catalog, defaults.claudeModel)} · thinking ${defaults.thinking === "off" ? "off" : "on"}`;
+}
+
+// 새 세션 기본값을 PendingStart 필드로 변환한다. provider에 따라 해당 제공자 설정만 채운다.
+function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<PendingStart> {
+  if (defaults.provider === "codex") {
+    return {
+      provider: "codex",
+      codexModel: defaults.codexModel,
+      codexReasoning: defaults.codexReasoning,
+      leanMode: true
+    };
+  }
+  return {
+    provider: "claude",
+    model: defaults.claudeModel,
+    thinking: defaults.thinking,
+    claudeEffort: defaults.claudeEffort,
+    leanMode: true
+  };
 }
 
 function projectKeyboard(projects: ProjectConfig[]): InlineKeyboard {
@@ -150,35 +199,6 @@ export function modelKeyboard(catalog: ModelCatalog = FALLBACK_MODEL_CATALOG): I
   for (const [index, option] of catalog.claudeModels.entries()) {
     keyboard.text(option.label, `model:${option.id}`);
     if (index < catalog.claudeModels.length - 1) keyboard.row();
-  }
-  return keyboard;
-}
-
-function newModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-  for (const [index, option] of catalog.claudeModels.entries()) {
-    keyboard.text(option.label, `newm:${option.id}`);
-    if (index < catalog.claudeModels.length - 1) keyboard.row();
-  }
-  return keyboard;
-}
-
-function newThinkingKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-  const options = thinkingToggleOptionsForModel(catalog, modelId);
-  for (const [index, option] of options.entries()) {
-    keyboard.text(option.label, `newt:${option.id}`);
-    if (index < options.length - 1) keyboard.row();
-  }
-  return keyboard;
-}
-
-function newPowerKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-  const options = claudeEffortOptionsForModel(catalog, modelId);
-  for (const [index, option] of options.entries()) {
-    keyboard.text(option.label, `newpw:${option.id}`);
-    if (index < options.length - 1) keyboard.row();
   }
   return keyboard;
 }
@@ -203,23 +223,21 @@ function powerKeyboard(catalog: ModelCatalog, modelId: string | null | undefined
   return keyboard;
 }
 
+// /model에서 세션의 Codex 모델을 고르는 인라인 키보드. cmodel:<id>
 function codexModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const [index, option] of catalog.codexModels.entries()) {
-    keyboard.text(option.label, `planm:${option.id}`);
+    keyboard.text(option.label, `cmodel:${option.id}`);
     if (index < catalog.codexModels.length - 1) keyboard.row();
   }
   return keyboard;
 }
 
-function codexReasoningKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-  const options = codexReasoningOptionsForModel(catalog, modelId);
-  for (const [index, option] of options.entries()) {
-    keyboard.text(option.label, `plant:${option.id}`);
-    if (index < options.length - 1) keyboard.row();
-  }
-  return keyboard;
+// /model에서 제공자를 고르는 인라인 키보드. mprov:claude|codex
+function providerKeyboard(current: ProviderKind): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(`${current === "claude" ? "✅ " : ""}Claude`, "mprov:claude")
+    .text(`${current === "codex" ? "✅ " : ""}Codex`, "mprov:codex");
 }
 
 function effortKeyboard(catalog: ModelCatalog): InlineKeyboard {
@@ -277,7 +295,6 @@ export function createBot(config: AppConfig, store: StateStore) {
       : {})
   });
   const pendingStarts = new Map<string, PendingStart>();
-  const pendingPlans = new Map<string, PendingPlan>();
   const pendingProjectPaths = new Set<string>();
 
   const registerProject = async (path: string): Promise<ProjectConfig> => {
@@ -372,7 +389,9 @@ export function createBot(config: AppConfig, store: StateStore) {
         pending.project, config.chatId, newTopicId, title,
         fileMessage, pending.resumeSessionId, pending.forkSession ?? false,
         pending.model ?? null, pending.thinking ?? null,
-        pending.claudeEffort ?? null, pending.leanMode ?? true
+        pending.claudeEffort ?? null, pending.leanMode ?? true,
+        pending.provider ?? "claude", pending.codexModel ?? null,
+        pending.codexReasoning ?? null
       );
       await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;
@@ -397,12 +416,15 @@ export function createBot(config: AppConfig, store: StateStore) {
   }
 
   bot.command("start", async (ctx) => {
+    const defaults = store.getSessionDefaults();
     await ctx.reply(
-      "Claude 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/plan 계획·실행·검토 파이프라인\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /power, /effort, /lean, /diff, /upload, /delete 사용"
+      "Claude/Codex 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /power, /effort, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking)을 클릭만으로 바꿀 수 있습니다.",
+      { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
     );
   });
 
   bot.command("new", async (ctx) => {
+    const defaults = store.getSessionDefaults();
     const identifier = ctx.match.trim();
     if (identifier) {
       const project = resolveProject(config.projects, identifier);
@@ -412,11 +434,11 @@ export function createBot(config: AppConfig, store: StateStore) {
       }
       pendingStarts.set(
         pendingStartKey(config.allowedUserId, ctx.message?.message_thread_id),
-        { project }
+        { project, ...pendingFieldsFromDefaults(defaults) }
       );
       await ctx.reply(
-        `${project.name} 프로젝트. 모델을 선택하세요.`,
-        { reply_markup: newModelKeyboard(config.modelCatalog) }
+        `${project.name} 프로젝트 · ${defaultsSummary(defaults, config.modelCatalog)}\n실행할 작업을 입력하세요. (기본값은 아래 패널에서 변경)`,
+        { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
       );
       return;
     }
@@ -506,7 +528,7 @@ export function createBot(config: AppConfig, store: StateStore) {
         : "";
       await ctx.reply(
         `${formatSessionStatus(session, sessions.isActive(session.id), config.modelCatalog)}`
-        + `${formatPlanProgress(store, session.id)}${codex}`
+        + `${codex}`
       );
       return;
     }
@@ -547,28 +569,6 @@ export function createBot(config: AppConfig, store: StateStore) {
     for (let offset = 0; offset < report.length; offset += 3900) {
       await ctx.reply(report.slice(offset, offset + 3900));
     }
-  });
-
-  bot.command("plan", async (ctx) => {
-    const topicId = ctx.message?.message_thread_id;
-    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
-    const instruction = ctx.match.trim();
-    if (!session || !instruction || !topicId) {
-      await ctx.reply("기존 세션 토픽에서 `/plan 구현할 작업` 형식으로 사용하세요.");
-      return;
-    }
-    if (sessions.isActive(session.id)) {
-      await ctx.reply("이 세션에서 이미 실행 중이거나 대기 중인 작업이 있습니다.");
-      return;
-    }
-    pendingPlans.set(pendingStartKey(config.allowedUserId, topicId), {
-      sessionId: session.id,
-      instruction
-    });
-    await ctx.reply(
-      "Codex 모델을 선택하세요. (이후 추론 강도를 고른 뒤 파이프라인이 시작됩니다)",
-      { reply_markup: codexModelKeyboard(config.modelCatalog) }
-    );
   });
 
   bot.command("usage", async (ctx) => {
@@ -640,6 +640,10 @@ export function createBot(config: AppConfig, store: StateStore) {
     const prompt = ctx.match.trim();
     if (!session || !prompt) {
       await ctx.reply("실행 중인 세션 토픽에서 `/steer 수정할 지시` 형식으로 사용하세요.");
+      return;
+    }
+    if (await permissions.handleTextInput(session.id, prompt)) {
+      await ctx.reply("대기 중인 Claude 질문에 답변을 전달했습니다.");
       return;
     }
     if (!sessions.steer(session.id, prompt)) {
@@ -720,11 +724,16 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("기록할 세션 토픽 안에서 사용하세요.");
       return;
     }
-    if (!session.sdkSessionId) {
-      await ctx.reply("아직 검토할 Claude 세션 문맥이 없습니다.");
+    const hasContext = session.provider === "codex" ? !!session.codexThreadId : !!session.sdkSessionId;
+    if (!hasContext) {
+      await ctx.reply(
+        session.provider === "codex"
+          ? "아직 검토할 Codex 세션 문맥이 없습니다."
+          : "아직 검토할 Claude 세션 문맥이 없습니다."
+      );
       return;
     }
-    if (!sessions.resume(session, buildMemoryPrompt(ctx.match))) {
+    if (!sessions.resume(session, buildMemoryPrompt(ctx.match, config.claudeMemoryDir))) {
       await ctx.reply("현재 작업이 실행 중입니다. 완료하거나 /stop으로 중단한 뒤 메모리를 기록하세요.");
       return;
     }
@@ -755,6 +764,8 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply(`다음 실행부터 권한 모드를 ${mode}(으)로 사용합니다.`);
   });
 
+  // /model: 제공자(Claude/Codex)와 모델을 확인·변경한다. 제공자 전환은 버튼(mprov:)으로만
+  // 하며, 전환 시 직전 provider가 만든 요약을 새 provider에 인계한다(SessionManager.switchProvider).
   bot.command("model", async (ctx) => {
     const topicId = ctx.message?.message_thread_id;
     const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
@@ -764,22 +775,40 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
     const input = ctx.match.trim();
     if (!input) {
+      const current = session.provider === "codex"
+        ? `현재: Codex · ${codexModelLabel(config.modelCatalog, session.codexModel ?? DEFAULT_CODEX_MODEL)}`
+        : `현재: Claude · ${modelLabel(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`;
+      const modelBoard = session.provider === "codex"
+        ? codexModelKeyboard(config.modelCatalog)
+        : modelKeyboard(config.modelCatalog);
       await ctx.reply(
-        `현재 모델: ${modelLabel(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL)}\n`
-        + "아래 버튼은 현재 실행 환경에서 확인한 Claude 모델 목록입니다.",
-        { reply_markup: modelKeyboard(config.modelCatalog) }
+        `${current}\n제공자를 바꾸려면 아래에서 선택하세요(직전 대화 요약이 새 제공자로 인계됩니다).`,
+        { reply_markup: providerKeyboard(session.provider) }
       );
-      return;
-    }
-    const model = resolveModel(config.modelCatalog, input);
-    if (!model) {
       await ctx.reply(
-        "지원하지 않는 모델입니다. /model 버튼에 표시되는 모델 ID나 별칭을 사용하세요."
+        `현재 제공자(${session.provider === "codex" ? "Codex" : "Claude"})의 모델을 바꾸려면 선택하세요.`,
+        { reply_markup: modelBoard }
       );
       return;
     }
     if (sessions.isActive(session.id)) {
       await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
+      return;
+    }
+    // 텍스트 인자: 현재 제공자 기준으로 모델 id/별칭을 해석한다.
+    if (session.provider === "codex") {
+      const codexModel = resolveCodexModel(config.modelCatalog, input);
+      if (!codexModel) {
+        await ctx.reply("지원하지 않는 Codex 모델입니다. /model 버튼의 모델을 사용하세요.");
+        return;
+      }
+      store.updateSession(session.id, { codexModel });
+      await ctx.reply(`다음 실행부터 Codex ${codexModelLabel(config.modelCatalog, codexModel)} 모델을 사용합니다.`);
+      return;
+    }
+    const model = resolveModel(config.modelCatalog, input);
+    if (!model) {
+      await ctx.reply("지원하지 않는 모델입니다. /model 버튼에 표시되는 모델 ID나 별칭을 사용하세요.");
       return;
     }
     const thinking = normalizeThinkingForModel(config.modelCatalog, model, session.thinking);
@@ -874,7 +903,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     store.updateSession(session.id, { codexReasoning: option.id });
-    await ctx.reply(`다음 /plan부터 Codex 작업량을 ${option.label}(으)로 사용합니다.`);
+    await ctx.reply(`다음 실행부터 Codex 작업량을 ${option.label}(으)로 사용합니다.`);
   });
 
   bot.command("lean", async (ctx) => {
@@ -980,6 +1009,8 @@ export function createBot(config: AppConfig, store: StateStore) {
     );
   });
 
+  // 프로젝트를 고르면 현재 기본값(제공자·모델·thinking)을 그대로 적용하고 바로 작업 입력을
+  // 기다린다. 매번 모델/thinking을 누를 필요 없이 기본값 패널로 미리 정해 둔 값을 쓴다.
   bot.callbackQuery(/^newp:/, async (ctx) => {
     const projectIndex = Number.parseInt(ctx.callbackQuery.data.slice("newp:".length), 10);
     const project = Number.isInteger(projectIndex)
@@ -989,79 +1020,15 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.answerCallbackQuery({ text: "프로젝트를 찾을 수 없습니다." });
       return;
     }
+    const defaults = store.getSessionDefaults();
     pendingStarts.set(
       pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id),
-      { project }
+      { project, ...pendingFieldsFromDefaults(defaults) }
     );
     await ctx.answerCallbackQuery({ text: `${project.name} 선택` });
-    await ctx.reply("모델을 선택하세요.", { reply_markup: newModelKeyboard(config.modelCatalog) });
-  });
-
-  bot.callbackQuery(/^newm:/, async (ctx) => {
-    const modelId = ctx.callbackQuery.data.slice("newm:".length);
-    const option = config.modelCatalog.claudeModels.find((item) => item.id === modelId);
-    if (!option) {
-      await ctx.answerCallbackQuery({ text: "지원하지 않는 모델입니다.", show_alert: true });
-      return;
-    }
-    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
-    const pending = pendingStarts.get(key);
-    if (!pending) {
-      await ctx.answerCallbackQuery({ text: "먼저 /new로 프로젝트를 선택하세요.", show_alert: true });
-      return;
-    }
-    pendingStarts.set(key, { ...pending, model: option.id });
-    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    await ctx.reply(`모델: ${option.label}. thinking 수준을 선택하세요.`, {
-      reply_markup: newThinkingKeyboard(config.modelCatalog, option.id)
-    });
-  });
-
-  bot.callbackQuery(/^newt:/, async (ctx) => {
-    const thinkingId = ctx.callbackQuery.data.slice("newt:".length);
-    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
-    const pending = pendingStarts.get(key);
-    if (!pending) {
-      await ctx.answerCallbackQuery({ text: "먼저 /new로 프로젝트를 선택하세요.", show_alert: true });
-      return;
-    }
-    const selectedModel = pending.model ?? DEFAULT_CLAUDE_MODEL;
-    const option = thinkingToggleOptionsForModel(config.modelCatalog, selectedModel)
-      .find((item) => item.id === thinkingId);
-    if (!option) {
-      await ctx.answerCallbackQuery({ text: "지원하지 않는 thinking 수준입니다.", show_alert: true });
-      return;
-    }
-    pendingStarts.set(key, { ...pending, thinking: option.id });
-    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    const modelText = modelLabel(config.modelCatalog, selectedModel);
     await ctx.reply(
-      `모델: ${modelText} / thinking: ${option.label}\nClaude 작업량(power)을 선택하세요.`,
-      { reply_markup: newPowerKeyboard(config.modelCatalog, selectedModel) }
-    );
-  });
-
-  bot.callbackQuery(/^newpw:/, async (ctx) => {
-    const effortId = ctx.callbackQuery.data.slice("newpw:".length);
-    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
-    const pending = pendingStarts.get(key);
-    if (!pending) {
-      await ctx.answerCallbackQuery({ text: "먼저 /new로 프로젝트를 선택하세요.", show_alert: true });
-      return;
-    }
-    const selectedModel = pending.model ?? DEFAULT_CLAUDE_MODEL;
-    const option = claudeEffortOptionsForModel(config.modelCatalog, selectedModel)
-      .find((item) => item.id === effortId);
-    if (!option) {
-      await ctx.answerCallbackQuery({ text: "지원하지 않는 작업량입니다.", show_alert: true });
-      return;
-    }
-    pendingStarts.set(key, { ...pending, claudeEffort: option.id });
-    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    const modelText = modelLabel(config.modelCatalog, selectedModel);
-    const thinkingText = thinkingLabel(pending.thinking ?? DEFAULT_THINKING_LEVEL);
-    await ctx.reply(
-      `모델: ${modelText} / thinking: ${thinkingText} / 작업량: ${option.label}\n실행할 작업을 입력하세요.`
+      `${project.name} 프로젝트 · ${defaultsSummary(defaults, config.modelCatalog)}\n실행할 작업을 입력하세요. (기본값은 아래 패널에서 변경)`,
+      { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
     );
   });
 
@@ -1178,79 +1145,99 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
     store.updateSession(session.id, { codexReasoning: option.id });
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    await ctx.reply(`다음 /plan부터 Codex 작업량을 ${option.label}(으)로 사용합니다.`);
+    await ctx.reply(`다음 실행부터 Codex 작업량을 ${option.label}(으)로 사용합니다.`);
   });
 
-  bot.callbackQuery(/^planm:/, async (ctx) => {
-    const modelId = ctx.callbackQuery.data.slice("planm:".length);
+  // /model 제공자 전환. 직전 provider의 요약을 새 provider로 인계한다(요약 생성에 시간이
+  // 걸릴 수 있어 먼저 안내한다).
+  bot.callbackQuery(/^mprov:/, async (ctx) => {
+    const target = ctx.callbackQuery.data.slice("mprov:".length) as ProviderKind;
+    if (target !== "claude" && target !== "codex") {
+      await ctx.answerCallbackQuery({ text: "알 수 없는 제공자입니다.", show_alert: true });
+      return;
+    }
+    const topicId = ctx.callbackQuery.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    if (session.provider === target) {
+      await ctx.answerCallbackQuery({ text: "이미 사용 중입니다." });
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.answerCallbackQuery({ text: "실행 중에는 전환할 수 없습니다.", show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: `${target === "codex" ? "Codex" : "Claude"}로 전환` });
+    await ctx.reply("직전 대화 요약을 만들어 새 제공자로 인계하는 중입니다…");
+    const result = await sessions.switchProvider(session.id, target);
+    if (!result.ok) {
+      await ctx.reply(result.reason ?? "제공자를 전환하지 못했습니다.");
+      return;
+    }
+    const updated = store.getSession(session.id);
+    const label = target === "codex"
+      ? `Codex · ${codexModelLabel(config.modelCatalog, updated?.codexModel ?? DEFAULT_CODEX_MODEL)}`
+      : `Claude · ${modelLabel(config.modelCatalog, updated?.model ?? DEFAULT_CLAUDE_MODEL)}`;
+    await ctx.reply(
+      `제공자를 ${label}로 전환했습니다. 다음 메시지부터 새 제공자가 직전 작업 요약을 이어받아 진행합니다.`
+    );
+  });
+
+  // /model에서 Codex 세션의 모델 선택. cmodel:<id>
+  bot.callbackQuery(/^cmodel:/, async (ctx) => {
+    const modelId = ctx.callbackQuery.data.slice("cmodel:".length);
     const option = config.modelCatalog.codexModels.find((item) => item.id === modelId);
     if (!option) {
       await ctx.answerCallbackQuery({ text: "지원하지 않는 Codex 모델입니다.", show_alert: true });
       return;
     }
     const topicId = ctx.callbackQuery.message?.message_thread_id;
-    const key = pendingStartKey(config.allowedUserId, topicId);
-    const pending = pendingPlans.get(key);
-    if (!pending) {
-      await ctx.answerCallbackQuery({
-        text: "먼저 /plan 명령으로 시작하세요.",
-        show_alert: true
-      });
-      return;
-    }
-    pendingPlans.set(key, { ...pending, codexModel: option.id });
-    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    const session = store.getSession(pending.sessionId);
-    const current = session?.codexReasoning
-      ? `\n현재 기본값: ${codexReasoningLabel(session.codexReasoning)} (/effort로 변경)`
-      : "";
-    await ctx.reply(
-      `Codex 모델: ${option.label}. 추론 강도(작업량)를 선택하세요.${current}`,
-      { reply_markup: codexReasoningKeyboard(config.modelCatalog, option.id) }
-    );
-  });
-
-  bot.callbackQuery(/^plant:/, async (ctx) => {
-    const reasoningId = ctx.callbackQuery.data.slice("plant:".length);
-    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
-    const pending = pendingPlans.get(key);
-    if (!pending) {
-      await ctx.answerCallbackQuery({
-        text: "먼저 /plan 명령으로 시작하세요.",
-        show_alert: true
-      });
-      return;
-    }
-    const selectedCodexModel = pending.codexModel ?? DEFAULT_CODEX_MODEL;
-    const option = codexReasoningOptionsForModel(config.modelCatalog, selectedCodexModel)
-      .find((item) => item.id === reasoningId);
-    if (!option) {
-      await ctx.answerCallbackQuery({ text: "지원하지 않는 추론 강도입니다.", show_alert: true });
-      return;
-    }
-    const session = store.getSession(pending.sessionId);
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
     if (!session) {
-      pendingPlans.delete(key);
       await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
       return;
     }
-    const codexModel = selectedCodexModel;
-    pendingPlans.delete(key);
-    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    if (
-      !sessions.runPlanPipeline(session, pending.instruction, {
-        codexModel,
-        codexReasoning: option.id
-      })
-    ) {
-      await ctx.reply("이 세션에서 이미 실행 중이거나 대기 중인 작업이 있습니다.");
+    if (sessions.isActive(session.id)) {
+      await ctx.answerCallbackQuery({ text: "실행 중에는 바꿀 수 없습니다.", show_alert: true });
       return;
     }
-    await ctx.reply(
-      `Claude가 계획 작성, Codex ${codexModelLabel(config.modelCatalog, codexModel)} · ${option.label}로 실행, `
-      + "완료 기준별 증거 수집, Claude 승인 검토 파이프라인을 예약했습니다. "
-      + "Claude 구독 OAuth와 ChatGPT 구독 로그인을 사용하며 API 키 인증은 허용하지 않습니다."
-    );
+    store.updateSession(session.id, { codexModel: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    await ctx.reply(`다음 실행부터 Codex ${option.label} 모델을 사용합니다.`);
+  });
+
+  // 새 세션 기본값 패널: 모델 선택. setm:<provider>:<id>
+  bot.callbackQuery(/^setm:/, async (ctx) => {
+    const rest = ctx.callbackQuery.data.slice("setm:".length);
+    const sep = rest.indexOf(":");
+    const provider = rest.slice(0, sep) as ProviderKind;
+    const modelId = rest.slice(sep + 1);
+    if (provider === "codex") {
+      const option = config.modelCatalog.codexModels.find((item) => item.id === modelId);
+      if (!option) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 모델입니다.", show_alert: true });
+        return;
+      }
+      const defaults = store.updateSessionDefaults({ codexModel: option.id });
+      await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
+      await ctx.reply(`새 세션 기본 Codex 모델: ${option.label}`, {
+        reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+      });
+      return;
+    }
+    const option = config.modelCatalog.claudeModels.find((item) => item.id === modelId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 모델입니다.", show_alert: true });
+      return;
+    }
+    const defaults = store.updateSessionDefaults({ claudeModel: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
+    await ctx.reply(`새 세션 기본 Claude 모델: ${option.label}`, {
+      reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+    });
   });
 
   bot.callbackQuery(/^delp:/, async (ctx) => {
@@ -1346,6 +1333,55 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
   });
 
+  // 상시 기본값 패널(reply 키보드) 버튼 처리. message:text보다 먼저 등록해 일반 메시지로
+  // 새지 않게 한다. 버튼 라벨은 동적이라 접두 이모지로 매칭한다.
+  bot.hears(/^⚙️ 새 세션 기본값/, async (ctx) => {
+    const defaults = store.getSessionDefaults();
+    await ctx.reply(`현재 새 세션 기본값: ${defaultsSummary(defaults, config.modelCatalog)}`, {
+      reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+    });
+  });
+
+  bot.hears(/^🤖 제공자/, async (ctx) => {
+    const current = store.getSessionDefaults();
+    const next: ProviderKind = current.provider === "claude" ? "codex" : "claude";
+    const defaults = store.updateSessionDefaults({ provider: next });
+    await ctx.reply(
+      `새 세션 기본 제공자: ${next === "codex" ? "Codex" : "Claude"}\n${defaultsSummary(defaults, config.modelCatalog)}`,
+      { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
+    );
+  });
+
+  bot.hears(/^🧠 모델/, async (ctx) => {
+    const defaults = store.getSessionDefaults();
+    await ctx.reply(
+      `${defaults.provider === "codex" ? "Codex" : "Claude"} 모델을 선택하세요.`,
+      { reply_markup: defaultsModelKeyboard(defaults, config.modelCatalog) }
+    );
+  });
+
+  bot.hears(/^💭 /, async (ctx) => {
+    const current = store.getSessionDefaults();
+    if (current.provider === "codex") {
+      // Codex: 추론 강도를 다음 단계로 순환한다.
+      const options = codexReasoningOptionsForModel(config.modelCatalog, current.codexModel);
+      const index = options.findIndex((option) => option.id === current.codexReasoning);
+      const nextOption = options[(index + 1) % options.length] ?? options[0];
+      if (!nextOption) return;
+      const defaults = store.updateSessionDefaults({ codexReasoning: nextOption.id });
+      await ctx.reply(`새 세션 기본 Codex 추론 강도: ${nextOption.label}`, {
+        reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+      });
+      return;
+    }
+    // Claude: thinking on(adaptive)/off 토글.
+    const next = current.thinking === "off" ? "adaptive" : "off";
+    const defaults = store.updateSessionDefaults({ thinking: next });
+    await ctx.reply(`새 세션 기본 thinking: ${next === "off" ? "off" : "on"}`, {
+      reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+    });
+  });
+
   bot.on("message:text", async (ctx) => {
     const topicId = ctx.message.message_thread_id;
     const pendingKey = pendingStartKey(config.allowedUserId, topicId);
@@ -1384,7 +1420,10 @@ export function createBot(config: AppConfig, store: StateStore) {
         pending.model ?? null,
         pending.thinking ?? null,
         pending.claudeEffort ?? null,
-        pending.leanMode ?? true
+        pending.leanMode ?? true,
+        pending.provider ?? "claude",
+        pending.codexModel ?? null,
+        pending.codexReasoning ?? null
       );
       await ctx.reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;

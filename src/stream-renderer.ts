@@ -109,6 +109,11 @@ export class StreamRenderer {
     if (this.statusMessageId !== null) {
       await this.transport.editText(this.session.chatId, this.statusMessageId, statusText);
     }
+    await this.transport.sendText(
+      this.session.chatId,
+      this.session.topicId,
+      `${heading} 작업 종료 · ${elapsed(this.startedAt)}`
+    );
     if (summary.trim()) {
       if (summary.length > 10_000) {
         await this.transport.sendDocument(

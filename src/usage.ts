@@ -75,7 +75,9 @@ export function snapshotFromRateLimitInfo(
   capturedAt = Date.now()
 ): UsageSnapshot {
   const window: UsageWindow = {
-    utilization: percentage(info.utilization),
+    // 실제 거부 이벤트는 status와 resetsAt만 주고 utilization을 생략할 수 있다.
+    // 토큰 선택 관점에서 rejected는 소진 상태이므로 100%로 정규화한다.
+    utilization: info.status === "rejected" ? 100 : percentage(info.utilization),
     resetsAt: timestamp(info.resetsAt)
   };
   const snapshot: UsageSnapshot = {

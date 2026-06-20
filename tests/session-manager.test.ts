@@ -23,6 +23,7 @@ import {
   loadProjectInstructions,
   MessageQueue,
   requireCodexSubscriptionAuth,
+  resultFailureText,
   resultSummary,
   SessionManager,
   snapshotFromRateLimitError,
@@ -70,6 +71,18 @@ describe("usage lookup fallback", () => {
     expect(snapshot?.fiveHour).toEqual({
       utilization: 100,
       resetsAt: "2026-06-16T05:00:00.000Z"
+    });
+  });
+
+  it("honors an explicit reset timezone instead of assuming Korea time", () => {
+    const snapshot = snapshotFromRateLimitError(
+      new Error("You've hit your session limit · resets 2pm (America/Los_Angeles)"),
+      Date.parse("2026-06-16T02:20:00.000Z")
+    );
+
+    expect(snapshot?.fiveHour).toEqual({
+      utilization: 100,
+      resetsAt: "2026-06-16T21:00:00.000Z"
     });
   });
 });
@@ -148,6 +161,28 @@ describe("failure classification", () => {
     const limit = new Error("You've hit your session limit · resets 2pm");
     expect(isRateLimitError(limit)).toBe(true);
     expect(isOverloadedError(limit)).toBe(false);
+  });
+
+  it("treats a success result containing a session-limit message as failure", () => {
+    const result = {
+      type: "result",
+      subtype: "success",
+      result: "You've hit your session limit · resets 4:40pm (Asia/Seoul)",
+      session_id: "session"
+    } as Parameters<typeof resultFailureText>[0];
+
+    expect(resultFailureText(result)).toContain("session limit");
+  });
+
+  it("treats a rejected rate-limit event as failure even with an empty success result", () => {
+    const result = {
+      type: "result",
+      subtype: "success",
+      result: "",
+      session_id: "session"
+    } as Parameters<typeof resultFailureText>[0];
+
+    expect(resultFailureText(result, true)).toBe("Claude rate limit rejected");
   });
 });
 
@@ -327,7 +362,11 @@ describe("goal state", () => {
       model: null,
       thinking: null,
       claudeEffort: null,
+      provider: "claude",
+      codexModel: null,
       codexReasoning: null,
+      codexThreadId: null,
+      handoffSummary: null,
       goalCondition: null,
       leanMode: true,
       usageSnapshot: null,
@@ -384,7 +423,11 @@ describe("session deletion", () => {
       model: null,
       thinking: null,
       claudeEffort: null,
+      provider: "claude",
+      codexModel: null,
       codexReasoning: null,
+      codexThreadId: null,
+      handoffSummary: null,
       goalCondition: null,
       leanMode: true,
       usageSnapshot: null,
