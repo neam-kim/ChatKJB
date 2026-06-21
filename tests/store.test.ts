@@ -4,6 +4,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { StateStore } from "../src/store.js";
+import { DEFAULT_AGY_MODEL } from "../src/model-catalog.js";
 import type { SessionRecord } from "../src/types.js";
 
 const tempDirs: string[] = [];
@@ -36,7 +37,9 @@ function makeSession(cwd: string): SessionRecord {
     codexReasoning: null,
     codexThreadId: null,
     agyModel: null,
+    agyThinkingLevel: null,
     agyConversationId: null,
+    agyUsage: null,
     handoffSummary: null,
     goalCondition: null,
     leanMode: true,
@@ -116,6 +119,32 @@ describe("StateStore", () => {
     reopened.close();
   });
 
+  it("resets incompatible agy CLI conversation handles once during the SDK cutover", () => {
+    const store = makeStore();
+    const path = store.db.name;
+    const session = {
+      ...makeSession(path.replace(/\/state\.sqlite$/, "")),
+      provider: "agy" as const,
+      agyModel: "Gemini 3.1 Pro (High)",
+      agyConversationId: "legacy-cli-conversation"
+    };
+    store.createSession(session);
+    store.db.prepare("DELETE FROM app_settings WHERE key = 'agy.backend'").run();
+    store.close();
+
+    const migrated = new StateStore(path);
+    expect(migrated.getSession(session.id)).toMatchObject({
+      agyModel: DEFAULT_AGY_MODEL,
+      agyConversationId: null
+    });
+    migrated.updateSession(session.id, { agyConversationId: "sdk-conversation" });
+    migrated.close();
+
+    const reopened = new StateStore(path);
+    expect(reopened.getSession(session.id)?.agyConversationId).toBe("sdk-conversation");
+    reopened.close();
+  });
+
   it("marks unfinished work interrupted on restart", () => {
     const store = makeStore();
     const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));
@@ -146,6 +175,151 @@ describe("StateStore", () => {
     expect(store.getSession(session.id)).toBeUndefined();
     expect(store.getApproval("approval-1")).toBeUndefined();
     expect(store.deleteSession(session.id)).toBe(false);
+    store.close();
+  });
+
+  it("persists agyThinkingLevel and defaults new sessions to null", () => {
+    const store = makeStore();
+    const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));
+    store.createSession(session);
+
+    expect(store.getSession(session.id)?.agyThinkingLevel).toBeNull();
+    store.updateSession(session.id, { agyThinkingLevel: "medium" });
+    expect(store.getSession(session.id)?.agyThinkingLevel).toBe("medium");
+    store.updateSession(session.id, { agyThinkingLevel: null });
+    expect(store.getSession(session.id)?.agyThinkingLevel).toBeNull();
+    store.close();
+  });
+
+  it("persists and normalizes the new-session agy thinking default", () => {
+    const store = makeStore();
+
+    expect(store.getSessionDefaults().agyThinkingLevel).toBe("minimal");
+    expect(store.updateSessionDefaults({ agyThinkingLevel: "high" }).agyThinkingLevel)
+      .toBe("high");
+    store.db.prepare(
+      "INSERT OR REPLACE INTO app_settings(key, value) VALUES ('default.agyThinkingLevel', 'invalid')"
+    ).run();
+    expect(store.getSessionDefaults().agyThinkingLevel).toBe("minimal");
+
+    store.close();
+  });
+
+  it("migrates agy_thinking_level column to null on existing databases", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-agy-think-"));
+    tempDirs.push(directory);
+    const path = join(directory, "state.sqlite");
+    const legacy = new Database(path);
+    legacy.exec(`
+      CREATE TABLE projects (
+        name TEXT PRIMARY KEY,
+        cwd TEXT NOT NULL UNIQUE,
+        default_mode TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        sdk_session_id TEXT UNIQUE,
+        chat_id INTEGER NOT NULL,
+        topic_id INTEGER NOT NULL,
+        project_name TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        permission_mode TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT 'claude',
+        agy_model TEXT,
+        agy_conversation_id TEXT,
+        always_allowed_tools TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO projects(name, cwd, default_mode, updated_at) VALUES ('test', '${directory}', 'default', 0);
+      INSERT INTO sessions(
+        id, chat_id, topic_id, project_name, cwd, title, status, permission_mode,
+        provider, always_allowed_tools, created_at, updated_at
+      ) VALUES (
+        'sess-agy-migrate', -1001, 99, 'test', '${directory}', 'legacy', 'done', 'default',
+        'agy', '[]', 0, 0
+      );
+    `);
+    legacy.close();
+
+    const store = new StateStore(path);
+    const columns = store.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).toContain("agy_thinking_level");
+    // 기존 행은 null 기본값이어야 한다.
+    expect(store.getSession("sess-agy-migrate")?.agyThinkingLevel).toBeNull();
+    store.close();
+  });
+
+  it("persists agyUsage and defaults new sessions to null", () => {
+    const store = makeStore();
+    const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));
+    store.createSession(session);
+
+    expect(store.getSession(session.id)?.agyUsage).toBeNull();
+    const usageJson = JSON.stringify({
+      promptTokenCount: 100,
+      cachedContentTokenCount: null,
+      candidatesTokenCount: 50,
+      thoughtsTokenCount: null,
+      totalTokenCount: 150
+    });
+    store.updateSession(session.id, { agyUsage: usageJson });
+    expect(store.getSession(session.id)?.agyUsage).toBe(usageJson);
+    store.updateSession(session.id, { agyUsage: null });
+    expect(store.getSession(session.id)?.agyUsage).toBeNull();
+    store.close();
+  });
+
+  it("migrates agy_usage column to null on existing databases (Phase 3)", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-agy-usage-"));
+    tempDirs.push(directory);
+    const path = join(directory, "state.sqlite");
+    const legacy = new Database(path);
+    legacy.exec(`
+      CREATE TABLE projects (
+        name TEXT PRIMARY KEY,
+        cwd TEXT NOT NULL UNIQUE,
+        default_mode TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        sdk_session_id TEXT UNIQUE,
+        chat_id INTEGER NOT NULL,
+        topic_id INTEGER NOT NULL,
+        project_name TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        permission_mode TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT 'claude',
+        agy_model TEXT,
+        agy_conversation_id TEXT,
+        agy_thinking_level TEXT,
+        always_allowed_tools TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO projects(name, cwd, default_mode, updated_at) VALUES ('test', '${directory}', 'default', 0);
+      INSERT INTO sessions(
+        id, chat_id, topic_id, project_name, cwd, title, status, permission_mode,
+        provider, always_allowed_tools, created_at, updated_at
+      ) VALUES (
+        'sess-phase3-migrate', -1001, 101, 'test', '${directory}', 'legacy', 'done', 'default',
+        'agy', '[]', 0, 0
+      );
+    `);
+    legacy.close();
+
+    const store = new StateStore(path);
+    const columns = store.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+    // agy_usage 컬럼이 마이그레이션으로 추가되어 있어야 한다.
+    expect(columns.map((c) => c.name)).toContain("agy_usage");
+    // 기존 행은 null 기본값이어야 한다.
+    expect(store.getSession("sess-phase3-migrate")?.agyUsage).toBeNull();
     store.close();
   });
 

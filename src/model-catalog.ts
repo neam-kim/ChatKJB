@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -48,11 +48,19 @@ export interface CodexModelOption {
   source: "cli" | "fallback";
 }
 
-// agy는 추론(effort)이 모델 이름에 포함되므로 Codex 같은 별도 reasoning 축이 없다.
+// agy 추론 강도는 GeminiModelOptions.thinking_level(MINIMAL/LOW/MEDIUM/HIGH)로 제어한다.
+// null이면 API 기본(레벨 미지정)이다. Codex의 codexReasoning과 동일하게 /effort 명령으로 노출한다.
+export type AgyThinkingLevel = "minimal" | "low" | "medium" | "high";
+
+export interface AgyThinkingOption {
+  id: AgyThinkingLevel;
+  label: string;
+}
+
 export interface AgyModelOption {
   id: string;
   label: string;
-  source: "cli" | "fallback";
+  source: "api" | "fallback";
 }
 
 export interface ModelCatalog {
@@ -63,11 +71,13 @@ export interface ModelCatalog {
 
 export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
-export const DEFAULT_AGY_MODEL = "Gemini 3.1 Pro (High)";
+export const DEFAULT_AGY_MODEL = "gemini-3.1-pro-preview";
 export const DEFAULT_THINKING_LEVEL: ClaudeThinkingLevel = "adaptive";
 // Claude 작업량(effort). API 기본값과 동일하게 high. null이면 SDK에 effort를 넘기지 않아 API 기본(high)이 적용된다.
 export const DEFAULT_CLAUDE_EFFORT: ClaudeThinkingLevel = "high";
 export const DEFAULT_CODEX_REASONING: CodexReasoningEffort = "high";
+// agy thinking_level 기본값. null이면 API 기본(레벨 미지정)을 사용한다.
+export const DEFAULT_AGY_THINKING_LEVEL: AgyThinkingLevel | null = null;
 
 // /thinking은 확장적 사고 on/off만, /power는 작업량(effort) 수준만 다룬다. 두 축은 Claude API에서
 // 서로 독립이다(thinking: adaptive|disabled vs output_config.effort: low~max).
@@ -90,6 +100,14 @@ const CODEX_REASONING_LABELS: Record<CodexReasoningEffort, string> = {
   medium: "보통 (Medium)",
   high: "높음 (High)",
   xhigh: "매우 높음 (xHigh)"
+};
+
+// agy thinking_level 4단계 레이블. null(API 기본)은 별도 라벨 없이 "API 기본"으로 표시한다.
+const AGY_THINKING_LABELS: Record<AgyThinkingLevel, string> = {
+  minimal: "최소 (Minimal)",
+  low: "낮음 (Low)",
+  medium: "보통 (Medium)",
+  high: "높음 (High)"
 };
 
 export const FALLBACK_CLAUDE_MODELS: ClaudeModelOption[] = [
@@ -126,17 +144,13 @@ export const FALLBACK_CODEX_MODELS: CodexModelOption[] = [
   }
 ];
 
-// `agy models` 출력(표시명)을 그대로 쓴다. agy --model 은 이 표시명 문자열을 받는다.
 export const FALLBACK_AGY_MODELS: AgyModelOption[] = [
-  "Gemini 3.5 Flash (Medium)",
-  "Gemini 3.5 Flash (High)",
-  "Gemini 3.5 Flash (Low)",
-  "Gemini 3.1 Pro (Low)",
-  "Gemini 3.1 Pro (High)",
-  "Claude Sonnet 4.6 (Thinking)",
-  "Claude Opus 4.6 (Thinking)",
-  "GPT-OSS 120B (Medium)"
-].map((name) => ({ id: name, label: name, source: "fallback" as const }));
+  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", source: "fallback" },
+  { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash", source: "fallback" },
+  { id: "gemini-3-flash-preview", label: "Gemini 3 Flash", source: "fallback" },
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", source: "fallback" },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", source: "fallback" }
+];
 
 export const FALLBACK_MODEL_CATALOG: ModelCatalog = {
   claudeModels: FALLBACK_CLAUDE_MODELS,
@@ -158,6 +172,26 @@ export function thinkingLabel(level: string | null | undefined): string {
 
 export function codexReasoningLabel(id: string | null | undefined): string {
   return CODEX_REASONING_LABELS[id as CodexReasoningEffort] ?? "높음 (High)";
+}
+
+/** agy thinking_level 표시 라벨. null/없음이면 "API 기본"을 반환한다. */
+export function agyThinkingLabel(level: string | null | undefined): string {
+  if (!level) return "API 기본";
+  return AGY_THINKING_LABELS[level as AgyThinkingLevel] ?? "API 기본";
+}
+
+/** agy thinking_level 옵션 목록(4종). /effort 키보드용. */
+export function agyThinkingOptions(): AgyThinkingOption[] {
+  return (["minimal", "low", "medium", "high"] as AgyThinkingLevel[]).map((id) => ({
+    id,
+    label: AGY_THINKING_LABELS[id]
+  }));
+}
+
+/** 문자열 입력을 정규화된 AgyThinkingLevel로 변환. 인식할 수 없으면 undefined를 반환한다. */
+export function resolveAgyThinkingLevel(input: string): AgyThinkingLevel | undefined {
+  const value = input.trim().toLowerCase() as AgyThinkingLevel;
+  return AGY_THINKING_LABELS[value] ? value : undefined;
 }
 
 export function modelLabel(catalog: ModelCatalog, id: string): string {
@@ -264,6 +298,7 @@ export interface CatalogProbe {
   oauthToken: string;
   claudeCodeExecutable?: string | undefined;
   agyExecutable?: string | undefined;
+  geminiApiKey?: string | undefined;
   mcpToolTimeoutMs?: number | undefined;
 }
 
@@ -280,37 +315,45 @@ export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalo
   };
 }
 
-// agy를 비대화로 실행해 stdout을 모은다. stdin을 ignore(=/dev/null)로 줘야 한다.
-// 그러지 않으면 agy가 stdin EOF를 기다리며 멈춘다(TTY 없는 파이프 환경).
-function runAgyCommand(binary: string, args: string[], timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    timer.unref();
-    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.on("error", (error) => { clearTimeout(timer); reject(error); });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`agy ${args.join(" ")} 실패 (코드 ${code}): ${stderr.slice(0, 200)}`));
-    });
-  });
-}
-
-// agy 모델은 `agy models` 서브커맨드가 표시명을 한 줄씩 출력한다. 이 표시명을 그대로
-// --model 값으로 쓴다(추론 수준이 이름에 포함됨).
 async function discoverAgyModels(probe: CatalogProbe): Promise<AgyModelOption[]> {
-  const stdout = await runAgyCommand(probe.agyExecutable ?? "agy", ["models"], AGY_DISCOVERY_TIMEOUT_MS);
+  if (!probe.geminiApiKey) throw new Error("GEMINI_API_KEY is required");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AGY_DISCOVERY_TIMEOUT_MS);
+  timeout.unref();
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100",
+    {
+      headers: { "x-goog-api-key": probe.geminiApiKey },
+      signal: controller.signal
+    }
+  ).finally(() => clearTimeout(timeout));
+  if (!response.ok) throw new Error(`Gemini model catalog HTTP ${response.status}`);
+  const payload = await response.json() as {
+    models?: Array<{
+      name?: string;
+      displayName?: string;
+      supportedGenerationMethods?: string[];
+    }>;
+  };
   const seen = new Set<string>();
   const models: AgyModelOption[] = [];
-  for (const line of stdout.split("\n")) {
-    const name = line.trim();
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    models.push({ id: name, label: name, source: "cli" });
+  for (const item of payload.models ?? []) {
+    const id = item.name?.replace(/^models\//, "") ?? "";
+    if (
+      !id
+      || !item.supportedGenerationMethods?.includes("generateContent")
+      || !/^gemini-/i.test(id)
+      || /(?:image|tts|robotics|computer-use|embedding)/i.test(id)
+      || seen.has(id)
+    ) {
+      continue;
+    }
+    seen.add(id);
+    models.push({
+      id,
+      label: item.displayName?.trim() || id,
+      source: "api"
+    });
   }
   return models;
 }

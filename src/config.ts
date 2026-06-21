@@ -48,7 +48,12 @@ const environmentSchema = z.object({
   CLAUDE_MEMORY_DIR: z.string().default("~/.claude/memory"),
   FILE_INBOX_DIR: z.string().default("~/.claude/channels/telegram/inbox"),
   CLAUDE_CODE_EXECUTABLE: z.string().optional(),
-  AGY_EXECUTABLE: z.string().optional()
+  AGY_EXECUTABLE: z.string().optional(),
+  GEMINI_API_KEY: z.string().trim().min(30).regex(
+    /^[A-Za-z0-9._-]+$/,
+    "GEMINI_API_KEY contains unsupported characters"
+  ),
+  AGY_SDK_PYTHON: z.string().optional()
 });
 
 const projectSchema = z.object({
@@ -271,6 +276,18 @@ export async function loadConfig() {
       env.APPROVAL_TIMEOUT_MINUTES * 60_000 + 300_000
     ),
     claudeCodeExecutable: env.CLAUDE_CODE_EXECUTABLE,
-    agyExecutable: resolveAgyExecutable(env.AGY_EXECUTABLE)
+    agyExecutable: resolveAgyExecutable(env.AGY_EXECUTABLE),
+    geminiApiKey: env.GEMINI_API_KEY,
+    agySdkPython: env.AGY_SDK_PYTHON
+      ? absolutePath(env.AGY_SDK_PYTHON)
+      : join(
+        homedir(),
+        ".local",
+        "share",
+        "telegram-claude-orchestrator",
+        "agy-sdk",
+        "bin",
+        "python"
+      )
   };
 }

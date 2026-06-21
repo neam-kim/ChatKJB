@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -27,6 +27,8 @@ import {
   isRateLimitError,
   loadProjectInstructions,
   MessageQueue,
+  mimeFromPath,
+  extractAgyAttachments,
   ProgressiveParagraphCollector,
   requireCodexSubscriptionAuth,
   resultFailureText,
@@ -37,6 +39,7 @@ import {
 } from "../src/session-manager.js";
 import { StateStore } from "../src/store.js";
 import type { MessageTransport, SessionRecord } from "../src/types.js";
+import { agyApiModel, normalizeAgyResponse } from "../src/agy-interactive.js";
 
 const fakeTransport: MessageTransport = {
   async sendText() { return 1; },
@@ -193,6 +196,17 @@ describe("failure classification", () => {
 });
 
 describe("agy bridge behavior", () => {
+  it("maps agy display model names to Gemini API model ids", () => {
+    expect(agyApiModel("Gemini 3.1 Pro (High)")).toBe("gemini-3.1-pro-preview");
+    expect(agyApiModel("Gemini 3.5 Flash (Medium)")).toBe("gemini-3.5-flash");
+    expect(agyApiModel("gemini-2.5-flash")).toBe("gemini-2.5-flash");
+  });
+
+  it("removes an exact duplicated Antigravity final response", () => {
+    expect(normalizeAgyResponse("GREEN-964GREEN-964")).toBe("GREEN-964");
+    expect(normalizeAgyResponse("서로 다른 응답")).toBe("서로 다른 응답");
+  });
+
   it("recognizes a model-authored Proceed request that needs a Telegram button", () => {
     expect(agyRequestsProceed("**Proceed(진행)** 버튼을 눌러 승인해 주시면 반영하겠습니다.")).toBe(true);
     expect(agyRequestsProceed("작업을 모두 완료했습니다.")).toBe(false);
@@ -425,7 +439,9 @@ describe("goal state", () => {
       codexReasoning: null,
       codexThreadId: null,
       agyModel: null,
+      agyThinkingLevel: null,
       agyConversationId: null,
+      agyUsage: null,
       handoffSummary: null,
       goalCondition: null,
       leanMode: true,
@@ -486,7 +502,9 @@ describe("goal state", () => {
       codexReasoning: null,
       codexThreadId: null,
       agyModel: null,
+      agyThinkingLevel: null,
       agyConversationId: null,
+      agyUsage: null,
       handoffSummary: null,
       goalCondition: null,
       leanMode: true,
@@ -546,6 +564,148 @@ describe("goal state", () => {
   });
 });
 
+describe("session context reset", () => {
+  it("clears Claude resume state only after transcript deletion succeeds", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-reset-claude-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const session: SessionRecord = {
+      id: "reset-claude",
+      sdkSessionId: "sdk-reset",
+      chatId: -1001,
+      topicId: 70,
+      projectName: "test",
+      cwd: directory,
+      title: "reset claude",
+      status: "done",
+      permissionMode: "default",
+      provider: "claude",
+      model: "claude-sonnet-4-6",
+      thinking: "adaptive",
+      claudeEffort: "high",
+      codexModel: null,
+      codexReasoning: null,
+      codexThreadId: null,
+      agyModel: null,
+      agyThinkingLevel: null,
+      agyConversationId: null,
+      agyUsage: null,
+      handoffSummary: "old context",
+      goalCondition: null,
+      leanMode: true,
+      usageSnapshot: {
+        capturedAt: 1,
+        subscriptionType: "pro",
+        rateLimitsAvailable: true
+      },
+      createdAt: 1,
+      updatedAt: 1
+    };
+    store.createSession(session);
+    const deleted: string[] = [];
+    const manager = new SessionManager(
+      store,
+      fakeTransport,
+      new PermissionBroker(store, fakeTransport, 1000),
+      {
+        debounceMs: 1,
+        claudeCodeOauthToken: "test-token",
+        mcpToolTimeoutMs: 1000,
+        mcpMaxAttempts: 1,
+        codexMcpTimeoutMs: 1000,
+        codexMcpHeartbeatMs: 1000,
+        longRunningMcpServers: new Set(["codex"]),
+        turnIdleTimeoutMs: 600_000,
+        claudeMemoryDir: join(directory, ".claude", "memory"),
+        modelCatalog: FALLBACK_MODEL_CATALOG,
+        deleteClaudeSession: async (id) => { deleted.push(id); }
+      }
+    );
+
+    try {
+      await expect(manager.resetContext(session.id)).resolves.toEqual({ ok: true });
+      expect(deleted).toEqual(["sdk-reset"]);
+      expect(store.getSession(session.id)).toMatchObject({
+        sdkSessionId: null,
+        handoffSummary: null,
+        usageSnapshot: null,
+        topicId: 70,
+        model: "claude-sonnet-4-6"
+      });
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves Claude resume state when transcript deletion fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-reset-failure-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const now = Date.now();
+    const session: SessionRecord = {
+      id: "reset-failure",
+      sdkSessionId: "sdk-still-valid",
+      chatId: -1001,
+      topicId: 71,
+      projectName: "test",
+      cwd: directory,
+      title: "reset failure",
+      status: "done",
+      permissionMode: "default",
+      provider: "claude",
+      model: null,
+      thinking: null,
+      claudeEffort: null,
+      codexModel: null,
+      codexReasoning: null,
+      codexThreadId: null,
+      agyModel: null,
+      agyThinkingLevel: null,
+      agyConversationId: null,
+      agyUsage: null,
+      handoffSummary: "keep me",
+      goalCondition: null,
+      leanMode: true,
+      usageSnapshot: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    store.createSession(session);
+    const manager = new SessionManager(
+      store,
+      fakeTransport,
+      new PermissionBroker(store, fakeTransport, 1000),
+      {
+        debounceMs: 1,
+        claudeCodeOauthToken: "test-token",
+        mcpToolTimeoutMs: 1000,
+        mcpMaxAttempts: 1,
+        codexMcpTimeoutMs: 1000,
+        codexMcpHeartbeatMs: 1000,
+        longRunningMcpServers: new Set(["codex"]),
+        turnIdleTimeoutMs: 600_000,
+        claudeMemoryDir: join(directory, ".claude", "memory"),
+        modelCatalog: FALLBACK_MODEL_CATALOG,
+        deleteClaudeSession: async () => { throw new Error("delete failed"); }
+      }
+    );
+
+    try {
+      const result = await manager.resetContext(session.id);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toContain("delete failed");
+      expect(store.getSession(session.id)).toMatchObject({
+        sdkSessionId: "sdk-still-valid",
+        handoffSummary: "keep me"
+      });
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("session deletion", () => {
   it("removes the orchestrator record and the local Claude transcript", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-claude-delete-"));
@@ -570,7 +730,9 @@ describe("session deletion", () => {
       codexReasoning: null,
       codexThreadId: null,
       agyModel: null,
+      agyThinkingLevel: null,
       agyConversationId: null,
+      agyUsage: null,
       handoffSummary: null,
       goalCondition: null,
       leanMode: true,
@@ -605,5 +767,331 @@ describe("session deletion", () => {
       store.close();
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe("agy conversation file cleanup on delete", () => {
+  // 유효한 32자 16진수 conversation_id를 가진 agy 세션을 삭제하면
+  // save_dir의 .db/.db-shm/.db-wal 파일이 제거되어야 한다.
+  it("removes .db and sidecar files when conversation_id is valid", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-agy-delete-"));
+    const saveDir = join(directory, "agy-conversations");
+    mkdirSync(saveDir, { recursive: true });
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const now = Date.now();
+    const convId = "0589e314d927af6f4f204b5926cec2a7"; // 32자 16진수
+    const session: SessionRecord = {
+      id: "agy-session",
+      sdkSessionId: null,
+      chatId: -1001,
+      topicId: 50,
+      projectName: "test",
+      cwd: directory,
+      title: "agy delete test",
+      status: "done",
+      permissionMode: "default",
+      model: null,
+      thinking: null,
+      claudeEffort: null,
+      provider: "agy",
+      codexModel: null,
+      codexReasoning: null,
+      codexThreadId: null,
+      agyModel: "gemini-2.5-pro",
+      agyThinkingLevel: null,
+      agyConversationId: convId,
+      agyUsage: null,
+      handoffSummary: null,
+      goalCondition: null,
+      leanMode: false,
+      usageSnapshot: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    // 가짜 .db/.db-shm/.db-wal 파일 생성
+    for (const suffix of [".db", ".db-shm", ".db-wal"]) {
+      writeFileSync(join(saveDir, convId + suffix), "fake");
+    }
+    store.createSession(session);
+    const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const manager = new SessionManager(store, fakeTransport, permissions, {
+      debounceMs: 1,
+      claudeCodeOauthToken: "test-token",
+      mcpToolTimeoutMs: 1000,
+      mcpMaxAttempts: 1,
+      codexMcpTimeoutMs: 1000,
+      codexMcpHeartbeatMs: 1000,
+      longRunningMcpServers: new Set(["codex"]),
+      turnIdleTimeoutMs: 600_000,
+      claudeMemoryDir: join(directory, ".claude", "memory"),
+      modelCatalog: FALLBACK_MODEL_CATALOG,
+      deleteClaudeSession: async () => {},
+      agyConvSaveDir: saveDir
+    });
+
+    try {
+      await manager.deleteSession(session);
+      // 세션 레코드가 삭제되어야 한다.
+      expect(store.getSession(session.id)).toBeUndefined();
+      // .db/.db-shm/.db-wal 파일이 모두 제거되어야 한다.
+      for (const suffix of [".db", ".db-shm", ".db-wal"]) {
+        expect(existsSync(join(saveDir, convId + suffix))).toBe(false);
+      }
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  // WAL/SHM 사이드카가 없어도 force: true 덕분에 예외 없이 완료되어야 한다.
+  it("succeeds even when sidecar files are absent", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-agy-delete-nosidecar-"));
+    const saveDir = join(directory, "agy-conversations");
+    mkdirSync(saveDir, { recursive: true });
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const now = Date.now();
+    const convId = "aabbccdd11223344aabbccdd11223344"; // 32자 16진수
+    const session: SessionRecord = {
+      id: "agy-session-nosidecar",
+      sdkSessionId: null,
+      chatId: -1001,
+      topicId: 51,
+      projectName: "test",
+      cwd: directory,
+      title: "agy delete no sidecar",
+      status: "done",
+      permissionMode: "default",
+      model: null,
+      thinking: null,
+      claudeEffort: null,
+      provider: "agy",
+      codexModel: null,
+      codexReasoning: null,
+      codexThreadId: null,
+      agyModel: "gemini-2.5-pro",
+      agyThinkingLevel: null,
+      agyConversationId: convId,
+      agyUsage: null,
+      handoffSummary: null,
+      goalCondition: null,
+      leanMode: false,
+      usageSnapshot: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    // .db 파일만 생성 (사이드카 없음)
+    writeFileSync(join(saveDir, convId + ".db"), "fake");
+    store.createSession(session);
+    const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const manager = new SessionManager(store, fakeTransport, permissions, {
+      debounceMs: 1,
+      claudeCodeOauthToken: "test-token",
+      mcpToolTimeoutMs: 1000,
+      mcpMaxAttempts: 1,
+      codexMcpTimeoutMs: 1000,
+      codexMcpHeartbeatMs: 1000,
+      longRunningMcpServers: new Set(["codex"]),
+      turnIdleTimeoutMs: 600_000,
+      claudeMemoryDir: join(directory, ".claude", "memory"),
+      modelCatalog: FALLBACK_MODEL_CATALOG,
+      deleteClaudeSession: async () => {},
+      agyConvSaveDir: saveDir
+    });
+
+    try {
+      // 사이드카가 없어도 예외 없이 완료되어야 한다.
+      await expect(manager.deleteSession(session)).resolves.not.toThrow();
+      expect(existsSync(join(saveDir, convId + ".db"))).toBe(false);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  // conversation_id가 유효하지 않은 형식이면 파일 제거 없이 건너뛰어야 한다.
+  it("skips file removal when conversation_id has invalid format", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-agy-delete-invalid-"));
+    const saveDir = join(directory, "agy-conversations");
+    mkdirSync(saveDir, { recursive: true });
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const now = Date.now();
+    const badConvId = "../etc/passwd"; // 경로 조작 시도
+    const session: SessionRecord = {
+      id: "agy-session-badid",
+      sdkSessionId: null,
+      chatId: -1001,
+      topicId: 52,
+      projectName: "test",
+      cwd: directory,
+      title: "agy delete bad id",
+      status: "done",
+      permissionMode: "default",
+      model: null,
+      thinking: null,
+      claudeEffort: null,
+      provider: "agy",
+      codexModel: null,
+      codexReasoning: null,
+      codexThreadId: null,
+      agyModel: "gemini-2.5-pro",
+      agyThinkingLevel: null,
+      agyConversationId: badConvId,
+      agyUsage: null,
+      handoffSummary: null,
+      goalCondition: null,
+      leanMode: false,
+      usageSnapshot: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    store.createSession(session);
+    const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const manager = new SessionManager(store, fakeTransport, permissions, {
+      debounceMs: 1,
+      claudeCodeOauthToken: "test-token",
+      mcpToolTimeoutMs: 1000,
+      mcpMaxAttempts: 1,
+      codexMcpTimeoutMs: 1000,
+      codexMcpHeartbeatMs: 1000,
+      longRunningMcpServers: new Set(["codex"]),
+      turnIdleTimeoutMs: 600_000,
+      claudeMemoryDir: join(directory, ".claude", "memory"),
+      modelCatalog: FALLBACK_MODEL_CATALOG,
+      deleteClaudeSession: async () => {},
+      agyConvSaveDir: saveDir
+    });
+
+    try {
+      // 잘못된 형식이어도 예외 없이 완료되어야 한다.
+      await expect(manager.deleteSession(session)).resolves.not.toThrow();
+      // 세션 레코드만 삭제되고, saveDir에 별도 파일이 생성되지 않아야 한다.
+      expect(store.getSession(session.id)).toBeUndefined();
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 6: mimeFromPath / extractAgyAttachments 단위 테스트
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe("mimeFromPath — 확장자 → MIME 테이블", () => {
+  it.each([
+    // 이미지
+    ["/inbox/photo.jpg",  "image/jpeg"],
+    ["/inbox/photo.jpeg", "image/jpeg"],
+    ["/inbox/img.png",    "image/png"],
+    ["/inbox/img.webp",   "image/webp"],
+    ["/inbox/img.bmp",    "image/bmp"],
+    // 문서
+    ["/inbox/doc.pdf",   "application/pdf"],
+    ["/inbox/notes.txt", "text/plain"],
+    ["/inbox/data.csv",  "text/csv"],
+    ["/inbox/info.json", "application/json"],
+    ["/inbox/page.html", "text/html"],
+    ["/inbox/page.htm",  "text/html"],
+    ["/inbox/feed.xml",  "text/xml"],
+    ["/inbox/style.css", "text/css"],
+    ["/inbox/app.js",    "text/javascript"],
+    ["/inbox/doc.rtf",   "text/rtf"],
+    // 오디오
+    ["/inbox/track.mp3",  "audio/mpeg"],
+    ["/inbox/voice.m4a",  "audio/m4a"],
+    ["/inbox/sound.wav",  "audio/wav"],
+    ["/inbox/music.aac",  "audio/aac"],
+    ["/inbox/song.flac",  "audio/flac"],
+    ["/inbox/pod.ogg",    "audio/ogg"],
+    ["/inbox/voice.opus", "audio/opus"],
+    // 동영상
+    ["/inbox/clip.mp4",  "video/mp4"],
+    ["/inbox/clip.mov",  "video/quicktime"],
+    ["/inbox/clip.webm", "video/webm"],
+    ["/inbox/clip.avi",  "video/avi"],
+    ["/inbox/clip.mpeg", "video/mpeg"],
+    ["/inbox/clip.mpg",  "video/mpeg"],
+    ["/inbox/clip.3gp",  "video/3gpp"],
+    ["/inbox/clip.wmv",  "video/wmv"],
+    ["/inbox/clip.flv",  "video/x-flv"],
+  ] as [string, string][])("mimeFromPath(%s) === %s", (path, expected) => {
+    expect(mimeFromPath(path)).toBe(expected);
+  });
+
+  it("지원되지 않는 확장자는 undefined를 반환한다", () => {
+    expect(mimeFromPath("/inbox/archive.zip")).toBeUndefined();
+    expect(mimeFromPath("/inbox/data.bin")).toBeUndefined();
+    expect(mimeFromPath("/inbox/image.gif")).toBeUndefined();
+  });
+
+  it("확장자가 없는 경로는 undefined를 반환한다", () => {
+    expect(mimeFromPath("/inbox/noextension")).toBeUndefined();
+  });
+
+  it("대소문자를 구분하지 않는다 (확장자를 소문자로 정규화)", () => {
+    expect(mimeFromPath("/inbox/PHOTO.JPG")).toBe("image/jpeg");
+    expect(mimeFromPath("/inbox/DOC.PDF")).toBe("application/pdf");
+  });
+});
+
+describe("extractAgyAttachments — fileMessage에서 첨부 파싱", () => {
+  it("표준 fileMessage에서 저장 경로를 추출하고 지원 MIME으로 변환한다", () => {
+    const prompt = [
+      "[첨부 파일]",
+      "종류: 사진",
+      "파일명: test.jpg",
+      "저장 경로: /Users/user/inbox/2026-01-01_test.jpg",
+    ].join("\n");
+
+    const result = extractAgyAttachments(prompt);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ path: "/Users/user/inbox/2026-01-01_test.jpg", mimeType: "image/jpeg" });
+  });
+
+  it("지원되지 않는 형식(zip 등)은 제외하고 빈 배열을 반환한다", () => {
+    const prompt = [
+      "[첨부 파일]",
+      "종류: 문서",
+      "파일명: archive.zip",
+      "저장 경로: /inbox/archive.zip",
+    ].join("\n");
+
+    const result = extractAgyAttachments(prompt);
+    expect(result).toHaveLength(0);
+  });
+
+  it("저장 경로 줄이 없으면 빈 배열을 반환한다", () => {
+    const prompt = "일반 텍스트 메시지입니다.";
+    expect(extractAgyAttachments(prompt)).toHaveLength(0);
+  });
+
+  it("여러 저장 경로 줄이 있으면 모두 파싱한다 (다중 첨부)", () => {
+    const prompt = [
+      "[첨부 파일]",
+      "저장 경로: /inbox/img.png",
+      "저장 경로: /inbox/doc.pdf",
+    ].join("\n");
+
+    const result = extractAgyAttachments(prompt);
+    expect(result).toHaveLength(2);
+    expect(result[0]?.mimeType).toBe("image/png");
+    expect(result[1]?.mimeType).toBe("application/pdf");
+  });
+
+  it("캡션이 있는 fileMessage에서도 정상 파싱된다", () => {
+    const prompt = [
+      "[첨부 파일]",
+      "종류: 문서",
+      "파일명: report.pdf",
+      "저장 경로: /inbox/report.pdf",
+      "캡션: 분기 보고서",
+    ].join("\n");
+
+    const result = extractAgyAttachments(prompt);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ path: "/inbox/report.pdf", mimeType: "application/pdf" });
   });
 });

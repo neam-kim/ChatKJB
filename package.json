@@ -11,6 +11,7 @@
     "launchd:restart": "node scripts/restart-launch-agent.mjs",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "test:agy-live": "vitest run tests/agy-live.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

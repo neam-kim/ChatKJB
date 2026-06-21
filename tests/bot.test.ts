@@ -29,7 +29,9 @@ function session(status: SessionRecord["status"]): SessionRecord {
     codexReasoning: null,
     codexThreadId: null,
     agyModel: null,
+    agyThinkingLevel: null,
     agyConversationId: null,
+    agyUsage: null,
     handoffSummary: null,
     goalCondition: null,
     leanMode: true,
@@ -66,7 +68,9 @@ function botSetup() {
     longRunningMcpServers: new Set(["codex"]),
     turnIdleTimeoutMs: 120_000,
     claudeCodeExecutable: undefined,
-    agyExecutable: "agy"
+    agyExecutable: "agy",
+    geminiApiKey: "test-gemini-api-key-value-1234567890",
+    agySdkPython: "/usr/bin/python3"
   } satisfies AppConfig;
   const instance = createBot(config, store);
   instance.bot.botInfo = {
@@ -191,6 +195,16 @@ function usageCommand(updateId = 1) {
   };
 }
 
+function effortCommand(text: string, updateId = 1) {
+  return {
+    ...modelCommand(text, updateId),
+    message: {
+      ...modelCommand(text, updateId).message,
+      entities: [{ type: "bot_command" as const, offset: 0, length: 7 }]
+    }
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const item of cleanup.splice(0)) {
@@ -256,6 +270,61 @@ describe("/power command", () => {
     expect(store.getSession("session")?.claudeEffort).toBeNull();
     expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
       .toContain("실행 중에는 바꿀 수 없습니다.");
+  });
+
+  it("persists Codex reasoning through the unified command", async () => {
+    const { bot, store } = botSetup();
+    store.updateSession("session", { provider: "codex", codexModel: "gpt-5.5" });
+
+    await bot.handleUpdate(modelCommand("/power low"));
+
+    expect(store.getSession("session")?.codexReasoning).toBe("low");
+  });
+
+  it("persists agy thinking level through the unified command", async () => {
+    const { bot, store } = botSetup();
+    store.updateSession("session", { provider: "agy" });
+
+    await bot.handleUpdate(modelCommand("/power medium"));
+
+    expect(store.getSession("session")?.agyThinkingLevel).toBe("medium");
+  });
+
+  it("keeps /effort as a compatibility alias and announces /power", async () => {
+    const { bot, store, calls } = botSetup();
+    store.updateSession("session", { provider: "codex", codexModel: "gpt-5.5" });
+
+    await bot.handleUpdate(effortCommand("/effort xhigh"));
+
+    expect(store.getSession("session")?.codexReasoning).toBe("xhigh");
+    expect(calls.filter((call) => call.method === "sendMessage").at(-1)?.payload.text)
+      .toContain("/power로 통합");
+  });
+});
+
+describe("/reset command", () => {
+  it("delegates context reset for the current topic", async () => {
+    const { bot, sessions, calls } = botSetup();
+    const reset = vi.spyOn(sessions, "resetContext").mockResolvedValue({ ok: true });
+
+    await bot.handleUpdate(modelCommand("/reset"));
+
+    expect(reset).toHaveBeenCalledWith("session");
+    expect(calls.filter((call) => call.method === "sendMessage").at(-1)?.payload.text)
+      .toContain("다음 메시지부터 새 문맥");
+  });
+
+  it("preserves the failure reason returned by the session manager", async () => {
+    const { bot, sessions, calls } = botSetup();
+    vi.spyOn(sessions, "resetContext").mockResolvedValue({
+      ok: false,
+      reason: "대화 파일을 정리하지 못했습니다."
+    });
+
+    await bot.handleUpdate(modelCommand("/reset"));
+
+    expect(calls.filter((call) => call.method === "sendMessage").at(-1)?.payload.text)
+      .toContain("대화 파일을 정리하지 못했습니다.");
   });
 });
 
@@ -336,6 +405,28 @@ describe("/new defaults fast path", () => {
     expect(created?.provider).toBe("codex");
     expect(created?.codexModel).toBe("gpt-5.5");
     expect(created?.codexReasoning).toBe("high");
+  });
+
+  it("applies agy model and thinking defaults to a new session", async () => {
+    const { bot, store, sessions } = botSetup();
+    vi.spyOn(sessions as unknown as { executeAgy: () => Promise<void> }, "executeAgy")
+      .mockResolvedValue();
+    store.updateSessionDefaults({
+      provider: "agy",
+      agyModel: "gemini-3.5-flash",
+      agyThinkingLevel: "high"
+    });
+
+    await bot.handleUpdate(newCommand());
+    await bot.handleUpdate(callbackUpdate("newp:0", 2));
+    await bot.handleUpdate(textMessage("agy로 작업", 3));
+
+    const created = store
+      .listSessions(10)
+      .find((item) => item.topicId === 7777);
+    expect(created?.provider).toBe("agy");
+    expect(created?.agyModel).toBe("gemini-3.5-flash");
+    expect(created?.agyThinkingLevel).toBe("high");
   });
 
   it("asks for the task prompt right after the project is picked", async () => {

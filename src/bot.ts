@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { Bot, InlineKeyboard, Keyboard } from "grammy";
@@ -8,12 +10,15 @@ import { addProject, removeProject, resolveProject, type AppConfig } from "./con
 import { runDoctor } from "./doctor.js";
 import {
   agyModelLabel,
+  agyThinkingLabel,
+  agyThinkingOptions,
   claudeEffortLabel,
   claudeEffortOptionsForModel,
   codexModelLabel,
   codexReasoningLabel,
   codexReasoningOptionsForModel,
   DEFAULT_AGY_MODEL,
+  DEFAULT_AGY_THINKING_LEVEL,
   DEFAULT_CLAUDE_EFFORT,
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CODEX_MODEL,
@@ -24,6 +29,7 @@ import {
   modelLabel,
   normalizeThinkingForModel,
   resolveAgyModel,
+  resolveAgyThinkingLevel,
   resolveCodexModel,
   resolveModel,
   thinkingLabel,
@@ -38,7 +44,7 @@ import {
 import { StateStore } from "./store.js";
 import { safeErrorMessage, TelegramTransport } from "./telegram-transport.js";
 import type { ProjectConfig, ProviderKind, SessionDefaults, SessionRecord } from "./types.js";
-import { formatUsageSnapshot } from "./usage.js";
+import { formatAgyUsage, formatUsageSnapshot, parseStoredAgyUsage } from "./usage.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -52,6 +58,7 @@ interface PendingStart {
   claudeEffort?: string | undefined;
   codexModel?: string | undefined;
   codexReasoning?: string | undefined;
+  agyThinkingLevel?: string | undefined;
   agyModel?: string | undefined;
   handoffSummary?: string | undefined;
   leanMode?: boolean | undefined;
@@ -118,6 +125,7 @@ export function formatSessionStatus(
     ? [
         "제공자: agy (Antigravity CLI)",
         `agy 모델: ${agyModelLabel(catalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`,
+        `agy 추론 강도: ${agyThinkingLabel(session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL)}`,
         "MCP: ~/.gemini/config/mcp_config.json"
       ]
     : [
@@ -157,7 +165,7 @@ function defaultsKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): Key
   const fourth = defaults.provider === "codex"
     ? `💭 추론: ${codexReasoningLabel(defaults.codexReasoning)}`
     : defaults.provider === "agy"
-    ? "💭 추론: 모델 내장"
+    ? `💭 추론: ${agyThinkingLabel(defaults.agyThinkingLevel)}`
     : `💭 thinking: ${defaults.thinking === "off" ? "off" : "on"}`;
   return new Keyboard()
     .text("⚙️ 새 세션 기본값")
@@ -189,7 +197,7 @@ function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): stri
     return `Codex · ${codexModelLabel(catalog, defaults.codexModel)} · reasoning ${codexReasoningLabel(defaults.codexReasoning)}`;
   }
   if (defaults.provider === "agy") {
-    return `agy · ${agyModelLabel(catalog, defaults.agyModel)}`;
+    return `agy · ${agyModelLabel(catalog, defaults.agyModel)} · 추론 ${agyThinkingLabel(defaults.agyThinkingLevel)}`;
   }
   return `Claude · ${modelLabel(catalog, defaults.claudeModel)} · thinking ${defaults.thinking === "off" ? "off" : "on"}`;
 }
@@ -207,6 +215,7 @@ function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<PendingSt
   if (defaults.provider === "agy") {
     return {
       provider: "agy",
+      agyThinkingLevel: defaults.agyThinkingLevel,
       agyModel: defaults.agyModel,
       leanMode: true
     };
@@ -247,11 +256,28 @@ function thinkingKeyboard(catalog: ModelCatalog, modelId: string | null | undefi
   return keyboard;
 }
 
-function powerKeyboard(catalog: ModelCatalog, modelId: string | null | undefined): InlineKeyboard {
+function powerKeyboardForSession(session: SessionRecord, catalog: ModelCatalog): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  const options = claudeEffortOptionsForModel(catalog, modelId);
+  const options = session.provider === "codex"
+    ? codexReasoningOptionsForModel(catalog, session.codexModel ?? DEFAULT_CODEX_MODEL)
+      .map((option) => ({ callback: `power:codex:${option.id}`, label: option.label }))
+    : session.provider === "agy"
+    ? agyThinkingOptions()
+      .map((option) => ({ callback: `power:agy:${option.id}`, label: option.label }))
+    : claudeEffortOptionsForModel(catalog, session.model ?? DEFAULT_CLAUDE_MODEL)
+      .map((option) => ({ callback: `power:claude:${option.id}`, label: option.label }));
   for (const [index, option] of options.entries()) {
-    keyboard.text(option.label, `power:${option.id}`);
+    keyboard.text(option.label, option.callback);
+    if (index < options.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+function agyThinkingKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const options = agyThinkingOptions();
+  for (const [index, option] of options.entries()) {
+    keyboard.text(option.label, `power:agy:${option.id}`);
     if (index < options.length - 1) keyboard.row();
   }
   return keyboard;
@@ -351,6 +377,8 @@ export function createBot(config: AppConfig, store: StateStore) {
     longRunningMcpServers: config.longRunningMcpServers,
     turnIdleTimeoutMs: config.turnIdleTimeoutMs,
     claudeMemoryDir: config.claudeMemoryDir,
+    geminiApiKey: config.geminiApiKey,
+    agySdkPython: config.agySdkPython,
     modelCatalog: config.modelCatalog,
     ...(config.claudeCodeExecutable
       ? { claudeCodeExecutable: config.claudeCodeExecutable }
@@ -456,7 +484,7 @@ export function createBot(config: AppConfig, store: StateStore) {
         pending.model ?? null, pending.thinking ?? null,
         pending.claudeEffort ?? null, pending.leanMode ?? true,
         pending.provider ?? "claude", pending.codexModel ?? null,
-        pending.codexReasoning ?? null, pending.agyModel ?? null,
+        pending.codexReasoning ?? null, pending.agyThinkingLevel ?? null, pending.agyModel ?? null,
         pending.handoffSummary ?? null
       );
       await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
@@ -484,7 +512,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   bot.command("start", async (ctx) => {
     const defaults = store.getSessionDefaults();
     await ctx.reply(
-      "Claude/Codex/agy 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /fork, /compact, /memory, /mode, /model, /thinking, /power, /effort, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking)을 클릭만으로 바꿀 수 있습니다.",
+      "Claude/Codex/agy 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /reset, /fork, /compact, /memory, /mode, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론)을 클릭만으로 바꿀 수 있습니다.",
       { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
     );
   });
@@ -564,6 +592,11 @@ export function createBot(config: AppConfig, store: StateStore) {
     });
   });
 
+  // agy 영속 대화 파일(.db)이 존재하는지 확인하는 헬퍼.
+  // save_dir은 scripts/agy-sdk-bridge.py의 LocalAgentConfig(save_dir=...) 값과 동기화.
+  const agyConvDbPath = (convId: string) =>
+    join(homedir(), ".local", "share", "telegram-claude-orchestrator", "agy-conversations", convId + ".db");
+
   bot.command("sessions", async (ctx) => {
     const recent = store.listSessions(15);
     if (recent.length === 0) {
@@ -571,9 +604,15 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     const text = recent
-      .map((session) =>
-        `${session.title}\n${statusLabel(session)} | ${session.projectName}\n${topicLink(session.chatId, session.topicId)}`
-      )
+      .map((session) => {
+        // agy 세션이고 conversation_id가 있으면 재개 가능 여부를 힌트로 표시한다.
+        let agyHint = "";
+        if (session.provider === "agy" && session.agyConversationId) {
+          const resumable = existsSync(agyConvDbPath(session.agyConversationId));
+          agyHint = resumable ? " · 재개 가능" : " · 대화 파일 없음";
+        }
+        return `${session.title}\n${statusLabel(session)}${agyHint} | ${session.projectName}\n${topicLink(session.chatId, session.topicId)}`;
+      })
       .join("\n\n");
     const latestUsage = recent.find((session) => session.usageSnapshot)?.usageSnapshot;
     const usage = latestUsage ? `현재 한도\n${formatUsageSnapshot(latestUsage)}\n\n` : "";
@@ -592,9 +631,32 @@ export function createBot(config: AppConfig, store: StateStore) {
       const codex = inspection?.codexInFlight && inspection.codexElapsedMs !== null
         ? `\nCodex: 실행 중 ${formatDuration(inspection.codexElapsedMs)}`
         : "";
+      // agy 세션이면 저장된 누적 사용량과 라이브 상태를 함께 덧붙인다.
+      let agyUsageText = "";
+      let agyLiveText = "";
+      if (session.provider === "agy") {
+        const stored = parseStoredAgyUsage(session.agyUsage);
+        agyUsageText = stored
+          ? `\n\n${formatAgyUsage(stored)}`
+          : "\n\nagy 토큰 사용량: 측정 전 (아직 턴이 실행되지 않았습니다)";
+        const live = await sessions.getAgyLiveStatus(session.id);
+        if (live.status) {
+          const idleLabel = live.status.isIdle === null
+            ? "유휴 여부 알 수 없음"
+            : live.status.isIdle
+              ? "유휴"
+              : "작업 중";
+          const turnLabel = live.status.turnCount === null
+            ? "대화 턴 수 알 수 없음"
+            : `대화 턴 ${live.status.turnCount}회`;
+          agyLiveText = `\nagy 라이브: ${idleLabel} · ${turnLabel}`;
+        } else {
+          agyLiveText = `\nagy 라이브: 조회 실패 (${live.error ?? "알 수 없는 원인"})`;
+        }
+      }
       await ctx.reply(
         `${formatSessionStatus(session, sessions.isActive(session.id), config.modelCatalog)}`
-        + `${codex}`
+        + `${codex}${agyUsageText}${agyLiveText}`
       );
       return;
     }
@@ -638,6 +700,26 @@ export function createBot(config: AppConfig, store: StateStore) {
   });
 
   bot.command("usage", async (ctx) => {
+    // 토픽 안에서 호출되고 해당 세션이 agy이면 네이티브 토큰 사용량을 먼저 보여준다.
+    const topicId = ctx.message?.message_thread_id;
+    const topicSession = topicId
+      ? store.getSessionByTopic(config.chatId, topicId)
+      : undefined;
+    if (topicSession?.provider === "agy") {
+      const stored = parseStoredAgyUsage(topicSession.agyUsage);
+      if (stored) {
+        await ctx.reply(formatAgyUsage(stored) + "\n원천: agy SDK 네이티브 (대화 누적)");
+      } else {
+        await ctx.reply(
+          "agy 토큰 사용량: 측정 전\n"
+          + "(이 세션에서 아직 턴이 실행되지 않았습니다. 첫 턴 완료 후 다시 확인하세요.)"
+        );
+      }
+      return;
+    }
+    // 토픽 밖 전역 호출에서는 agy 토큰 사용량(대화 단위)을 임의 세션으로 보여주지 않고,
+    // 기존대로 Claude/Codex 한도(rate-limit) 스냅샷을 보여준다. agy 네이티브 토큰은
+    // 해당 agy 토픽 안에서 /usage를 호출할 때만 표시한다.
     const liveResults = await sessions.fetchCurrentUsageSnapshots(
       config.projects[0]?.cwd ?? process.cwd()
     );
@@ -698,6 +780,29 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     await ctx.reply("중단 요청을 보냈습니다.");
+  });
+
+  bot.command("reset", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    if (!topicId) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const session = store.getSessionByTopic(config.chatId, topicId);
+    if (!session) {
+      await ctx.reply("이 토픽에 연결된 세션이 없습니다.");
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.reply("실행 중에는 문맥을 초기화할 수 없습니다. /stop 후 다시 시도하세요.");
+      return;
+    }
+    const result = await sessions.resetContext(session.id);
+    if (!result.ok) {
+      await ctx.reply(result.reason ?? "문맥을 초기화하지 못했습니다.");
+      return;
+    }
+    await ctx.reply("대화 문맥을 초기화했습니다. 다음 메시지부터 새 문맥으로 시작합니다.");
   });
 
   bot.command("steer", async (ctx) => {
@@ -867,6 +972,18 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     store.updateSession(session.id, { permissionMode: mode });
+    if (session.provider === "agy") {
+      // agy는 런타임 setMode API가 없으므로, 다음 턴에 같은 conversation_id로
+      // 브리지를 재구성하여 새 CapabilitiesConfig+policies를 적용한다.
+      // 대화 문맥(conversation_id)은 그대로 유지된다.
+      const hasConv = !!session.agyConversationId;
+      await ctx.reply(
+        `권한 모드를 ${mode}(으)로 변경했습니다.\n`
+        + `agy는 다음 메시지부터 같은 대화${hasConv ? `(${session.agyConversationId!.slice(0, 8)}…)` : ""}를 `
+        + `유지한 채 새 모드로 재구성됩니다.`
+      );
+      return;
+    }
     await ctx.reply(`다음 실행부터 권한 모드를 ${mode}(으)로 사용합니다.`);
   });
 
@@ -923,7 +1040,14 @@ export function createBot(config: AppConfig, store: StateStore) {
         return;
       }
       store.updateSession(session.id, { agyModel });
-      await ctx.reply(`다음 실행부터 agy ${agyModelLabel(config.modelCatalog, agyModel)} 모델을 사용합니다.`);
+      // agy는 런타임 setModel API가 없으므로, 다음 턴에 같은 conversation_id로
+      // 브리지를 재구성하여 새 ModelTarget을 적용한다. 대화 문맥은 유지된다.
+      const hasConv = !!session.agyConversationId;
+      await ctx.reply(
+        `agy 모델을 ${agyModelLabel(config.modelCatalog, agyModel)}(으)로 변경했습니다.\n`
+        + `다음 메시지부터 같은 대화${hasConv ? `(${session.agyConversationId!.slice(0, 8)}…)` : ""}를 `
+        + `유지한 채 새 모델로 재구성됩니다.`
+      );
       return;
     }
     const model = resolveModel(config.modelCatalog, input);
@@ -947,7 +1071,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     if (session.provider !== "claude") {
-      await ctx.reply("/thinking은 Claude 전용입니다. Codex는 /effort, agy는 /model을 사용하세요.");
+      await ctx.reply("/thinking은 Claude 전용입니다. Codex·agy는 /power를 사용하세요.");
       return;
     }
     const input = ctx.match.trim().toLowerCase();
@@ -974,68 +1098,103 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply(`다음 실행부터 thinking을 ${option.label}(으)로 사용합니다.`);
   });
 
-  bot.command("power", async (ctx) => {
+  async function handlePowerCommand(
+    ctx: {
+      reply: (
+        text: string,
+        options?: { reply_markup?: InlineKeyboard }
+      ) => Promise<unknown>;
+      message?: { message_thread_id?: number } | undefined;
+      match: string;
+    },
+    legacyAlias = false
+  ): Promise<void> {
     const topicId = ctx.message?.message_thread_id;
     const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
     if (!session) {
       await ctx.reply("세션 토픽 안에서 사용하세요.");
       return;
     }
-    if (session.provider !== "claude") {
-      await ctx.reply("/power는 Claude 전용입니다. Codex는 /effort, agy는 /model을 사용하세요.");
-      return;
-    }
     const input = ctx.match.trim().toLowerCase();
+    const aliasSuffix = legacyAlias ? "\n이 명령은 /power로 통합되었습니다." : "";
+
     if (!input) {
+      const currentText = session.provider === "claude"
+        ? `현재 Claude 작업량: ${claudeEffortLabel(session.claudeEffort ?? DEFAULT_CLAUDE_EFFORT)}`
+        : session.provider === "codex"
+          ? `현재 Codex 추론 강도: ${codexReasoningLabel(session.codexReasoning ?? DEFAULT_CODEX_REASONING)}`
+          : `현재 agy 추론 강도: ${agyThinkingLabel(session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL)}`;
       await ctx.reply(
-        `현재 Claude 작업량: ${claudeEffortLabel(session.claudeEffort ?? DEFAULT_CLAUDE_EFFORT)}`,
-        { reply_markup: powerKeyboard(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL) }
+        `${currentText}${aliasSuffix}`,
+        { reply_markup: powerKeyboardForSession(session, config.modelCatalog) }
       );
       return;
     }
-    const option = claudeEffortOptionsForModel(
-      config.modelCatalog,
-      session.model ?? DEFAULT_CLAUDE_MODEL
-    ).find((item) => item.id === input);
-    if (!option) {
-      await ctx.reply("지원하지 않는 작업량입니다.\n사용 가능: low, medium, high, xhigh, max");
+
+    if (session.provider === "claude") {
+      const option = claudeEffortOptionsForModel(
+        config.modelCatalog,
+        session.model ?? DEFAULT_CLAUDE_MODEL
+      ).find((item) => item.id === input);
+      if (!option) {
+        await ctx.reply(`지원하지 않는 작업량입니다.\n사용 가능: low, medium, high, xhigh, max${aliasSuffix}`);
+        return;
+      }
+      if (sessions.isActive(session.id)) {
+        await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
+        return;
+      }
+      store.updateSession(session.id, { claudeEffort: option.id });
+      await ctx.reply(`다음 실행부터 Claude 작업량을 ${option.label}(으)로 사용합니다.${aliasSuffix}`);
+      return;
+    }
+
+    if (session.provider === "codex") {
+      const option = codexReasoningOptionsForModel(
+        config.modelCatalog,
+        session.codexModel ?? DEFAULT_CODEX_MODEL
+      ).find((item) => item.id === input);
+      if (!option) {
+        await ctx.reply(`지원하지 않는 추론 강도입니다.\n사용 가능: minimal, low, medium, high, xhigh${aliasSuffix}`);
+        return;
+      }
+      if (sessions.isActive(session.id)) {
+        await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
+        return;
+      }
+      store.updateSession(session.id, { codexReasoning: option.id });
+      await ctx.reply(`다음 실행부터 Codex 추론 강도를 ${option.label}(으)로 사용합니다.${aliasSuffix}`);
+      return;
+    }
+
+    if (input === "reset" || input === "default") {
+      if (sessions.isActive(session.id)) {
+        await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
+        return;
+      }
+      store.updateSession(session.id, { agyThinkingLevel: null });
+      await ctx.reply(`agy 추론 강도를 API 기본(레벨 미지정)으로 초기화했습니다. 다음 실행부터 적용됩니다.${aliasSuffix}`);
+      return;
+    }
+    const resolved = resolveAgyThinkingLevel(input);
+    if (!resolved) {
+      await ctx.reply(`지원하지 않는 추론 강도입니다.\n사용 가능: minimal, low, medium, high (또는 reset)${aliasSuffix}`);
       return;
     }
     if (sessions.isActive(session.id)) {
       await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
       return;
     }
-    store.updateSession(session.id, { claudeEffort: option.id });
-    await ctx.reply(`다음 실행부터 Claude 작업량을 ${option.label}(으)로 사용합니다.`);
+    store.updateSession(session.id, { agyThinkingLevel: resolved });
+    await ctx.reply(`다음 실행부터 agy 추론 강도를 ${agyThinkingLabel(resolved)}(으)로 사용합니다.${aliasSuffix}`);
+  }
+
+  bot.command("power", async (ctx) => {
+    await handlePowerCommand(ctx);
   });
 
   bot.command("effort", async (ctx) => {
-    const topicId = ctx.message?.message_thread_id;
-    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
-    if (!session) {
-      await ctx.reply("세션 토픽 안에서 사용하세요.");
-      return;
-    }
-    if (session.provider !== "codex") {
-      await ctx.reply("/effort는 Codex 전용입니다. Claude는 /power, agy는 /model을 사용하세요.");
-      return;
-    }
-    const input = ctx.match.trim().toLowerCase();
-    if (!input) {
-      await ctx.reply(
-        `현재 Codex 작업량: ${codexReasoningLabel(session.codexReasoning ?? DEFAULT_CODEX_REASONING)}`,
-        { reply_markup: effortKeyboard(config.modelCatalog) }
-      );
-      return;
-    }
-    const options = codexReasoningOptionsForModel(config.modelCatalog, DEFAULT_CODEX_MODEL);
-    const option = options.find((item) => item.id === input);
-    if (!option) {
-      await ctx.reply("지원하지 않는 작업량입니다.\n사용 가능: minimal, low, medium, high, xhigh");
-      return;
-    }
-    store.updateSession(session.id, { codexReasoning: option.id });
-    await ctx.reply(`다음 실행부터 Codex 작업량을 ${option.label}(으)로 사용합니다.`);
+    await handlePowerCommand(ctx, true);
   });
 
   bot.command("lean", async (ctx) => {
@@ -1231,8 +1390,15 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply(`다음 실행부터 thinking을 ${option.label}(으)로 사용합니다.`);
   });
 
-  bot.callbackQuery(/^power:/, async (ctx) => {
-    const effortId = ctx.callbackQuery.data.slice("power:".length);
+  async function applyPowerSelection(
+    ctx: {
+      answerCallbackQuery: (args?: { text?: string; show_alert?: boolean }) => Promise<unknown>;
+      reply: (text: string) => Promise<unknown>;
+      callbackQuery: { data: string; message?: { message_thread_id?: number } };
+    },
+    provider: ProviderKind,
+    optionId: string
+  ): Promise<void> {
     const topicId = ctx.callbackQuery.message?.message_thread_id;
     const session = topicId
       ? store.getSessionByTopic(config.chatId, topicId)
@@ -1241,24 +1407,90 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
       return;
     }
-    const option = claudeEffortOptionsForModel(
-      config.modelCatalog,
-      session.model ?? DEFAULT_CLAUDE_MODEL
-    ).find((item) => item.id === effortId);
-    if (!option) {
-      await ctx.answerCallbackQuery({ text: "지원하지 않는 작업량입니다.", show_alert: true });
+    if (provider === "claude") {
+      const option = claudeEffortOptionsForModel(
+        config.modelCatalog,
+        session.model ?? DEFAULT_CLAUDE_MODEL
+      ).find((item) => item.id === optionId);
+      if (!option) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 작업량입니다.", show_alert: true });
+        return;
+      }
+      if (sessions.isActive(session.id)) {
+        await ctx.answerCallbackQuery({
+          text: "실행 중에는 작업량을 바꿀 수 없습니다.",
+          show_alert: true
+        });
+        return;
+      }
+      store.updateSession(session.id, { claudeEffort: option.id });
+      await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+      await ctx.reply(`다음 실행부터 Claude 작업량을 ${option.label}(으)로 사용합니다.`);
+      return;
+    }
+
+    if (provider === "codex") {
+      const option = codexReasoningOptionsForModel(
+        config.modelCatalog,
+        session.codexModel ?? DEFAULT_CODEX_MODEL
+      ).find((item) => item.id === optionId);
+      if (!option) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 추론 강도입니다.", show_alert: true });
+        return;
+      }
+      if (sessions.isActive(session.id)) {
+        await ctx.answerCallbackQuery({
+          text: "실행 중에는 바꿀 수 없습니다.",
+          show_alert: true
+        });
+        return;
+      }
+      store.updateSession(session.id, { codexReasoning: option.id });
+      await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+      await ctx.reply(`다음 실행부터 Codex 추론 강도를 ${option.label}(으)로 사용합니다.`);
+      return;
+    }
+
+    const resolved = optionId === "reset" || optionId === "default"
+      ? null
+      : resolveAgyThinkingLevel(optionId);
+    if (resolved === undefined) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 추론 강도입니다.", show_alert: true });
       return;
     }
     if (sessions.isActive(session.id)) {
-      await ctx.answerCallbackQuery({
-        text: "실행 중에는 작업량을 바꿀 수 없습니다.",
-        show_alert: true
-      });
+      await ctx.answerCallbackQuery({ text: "실행 중에는 바꿀 수 없습니다.", show_alert: true });
       return;
     }
-    store.updateSession(session.id, { claudeEffort: option.id });
-    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    await ctx.reply(`다음 실행부터 Claude 작업량을 ${option.label}(으)로 사용합니다.`);
+    store.updateSession(session.id, { agyThinkingLevel: resolved });
+    await ctx.answerCallbackQuery({
+      text: resolved ? `${agyThinkingLabel(resolved)} 선택` : "API 기본 선택"
+    });
+    await ctx.reply(
+      resolved
+        ? `다음 실행부터 agy 추론 강도를 ${agyThinkingLabel(resolved)}(으)로 사용합니다.`
+        : "agy 추론 강도를 API 기본(레벨 미지정)으로 초기화했습니다. 다음 실행부터 적용됩니다."
+    );
+  }
+
+  bot.callbackQuery(/^power:/, async (ctx) => {
+    const payload = ctx.callbackQuery.data.slice("power:".length);
+    const topicId = ctx.callbackQuery.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    const [first, second, ...rest] = payload.split(":");
+    if ((first === "claude" || first === "codex" || first === "agy") && second && rest.length === 0) {
+      await applyPowerSelection(ctx, first, second);
+      return;
+    }
+    if (!first) {
+      await ctx.answerCallbackQuery({ text: "알 수 없는 작업량입니다.", show_alert: true });
+      return;
+    }
+    await applyPowerSelection(ctx, session.provider, payload);
   });
 
   bot.callbackQuery(/^effort:/, async (ctx) => {
@@ -1269,15 +1501,18 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
       return;
     }
-    const options = codexReasoningOptionsForModel(config.modelCatalog, DEFAULT_CODEX_MODEL);
-    const option = options.find((item) => item.id === reasoningId);
-    if (!option) {
-      await ctx.answerCallbackQuery({ text: "지원하지 않는 작업량입니다.", show_alert: true });
+    await applyPowerSelection(ctx, session.provider, reasoningId);
+  });
+
+  bot.callbackQuery(/^agythink:/, async (ctx) => {
+    const levelId = ctx.callbackQuery.data.slice("agythink:".length);
+    const topicId = ctx.callbackQuery.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
       return;
     }
-    store.updateSession(session.id, { codexReasoning: option.id });
-    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    await ctx.reply(`다음 실행부터 Codex 작업량을 ${option.label}(으)로 사용합니다.`);
+    await applyPowerSelection(ctx, session.provider, levelId);
   });
 
   // /model 제공자 전환. 직전 provider의 요약을 새 provider로 인계한다(요약 생성에 시간이
@@ -1378,7 +1613,14 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
     store.updateSession(session.id, { agyModel: option.id });
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
-    await ctx.reply(`다음 실행부터 agy ${option.label} 모델을 사용합니다.`);
+    // agy는 런타임 setModel API가 없으므로, 다음 턴에 같은 conversation_id로
+    // 브리지를 재구성하여 새 ModelTarget을 적용한다. 대화 문맥은 유지된다.
+    const hasConv = !!session.agyConversationId;
+    await ctx.reply(
+      `agy 모델을 ${option.label}(으)로 변경했습니다.\n`
+      + `다음 메시지부터 같은 대화${hasConv ? `(${session.agyConversationId!.slice(0, 8)}…)` : ""}를 `
+      + `유지한 채 새 모델로 재구성됩니다.`
+    );
   });
 
   bot.callbackQuery(/^agygo:/, async (ctx) => {
@@ -1565,11 +1807,6 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.hears(/^💭 /, async (ctx) => {
     const current = store.getSessionDefaults();
-    if (current.provider === "agy") {
-      // agy는 추론 강도가 모델 이름에 포함되어 별도 축이 없다. 모델 버튼으로 바꾼다.
-      await ctx.reply("agy는 추론 강도가 모델에 포함됩니다. 🧠 모델 버튼에서 모델을 선택하세요.");
-      return;
-    }
     if (current.provider === "codex") {
       // Codex: 추론 강도를 다음 단계로 순환한다.
       const options = codexReasoningOptionsForModel(config.modelCatalog, current.codexModel);
@@ -1578,6 +1815,17 @@ export function createBot(config: AppConfig, store: StateStore) {
       if (!nextOption) return;
       const defaults = store.updateSessionDefaults({ codexReasoning: nextOption.id });
       await ctx.reply(`새 세션 기본 Codex 추론 강도: ${nextOption.label}`, {
+        reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+      });
+      return;
+    }
+    if (current.provider === "agy") {
+      const options = agyThinkingOptions();
+      const index = options.findIndex((option) => option.id === current.agyThinkingLevel);
+      const nextOption = options[(index + 1) % options.length] ?? options[0];
+      if (!nextOption) return;
+      const defaults = store.updateSessionDefaults({ agyThinkingLevel: nextOption.id });
+      await ctx.reply(`새 세션 기본 agy 추론 강도: ${nextOption.label}`, {
         reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
       });
       return;
@@ -1632,6 +1880,7 @@ export function createBot(config: AppConfig, store: StateStore) {
         pending.provider ?? "claude",
         pending.codexModel ?? null,
         pending.codexReasoning ?? null,
+        pending.agyThinkingLevel ?? null,
         pending.agyModel ?? null,
         pending.handoffSummary ?? null
       );

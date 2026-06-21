@@ -25,11 +25,12 @@ async function main(): Promise<void> {
       oauthToken: config.claudeCodeOauthToken,
       claudeCodeExecutable: config.claudeCodeExecutable,
       agyExecutable: config.agyExecutable,
+      geminiApiKey: config.geminiApiKey,
       mcpToolTimeoutMs: config.mcpToolTimeoutMs
     }).catch(() => FALLBACK_MODEL_CATALOG);
     const claudeDynamic = config.modelCatalog.claudeModels.some((m) => m.source === "api");
     const codexDynamic = config.modelCatalog.codexModels.some((m) => m.source === "cli");
-    const agyDynamic = config.modelCatalog.agyModels.some((m) => m.source === "cli");
+    const agyDynamic = config.modelCatalog.agyModels.some((m) => m.source === "api");
     console.log(
       `Model catalog → Claude: ${claudeDynamic ? "동적" : "기본값"}, `
       + `Codex: ${codexDynamic ? "동적" : "기본값"}, `
@@ -58,9 +59,9 @@ async function main(): Promise<void> {
     { command: "mode", description: "권한 모드 확인 또는 변경" },
     { command: "model", description: "제공자(Claude/Codex/agy)·모델 확인 또는 변경" },
     { command: "thinking", description: "Claude 확장적 사고 on/off 확인 또는 변경" },
-    { command: "power", description: "Claude 작업량(effort) 확인 또는 변경" },
-    { command: "effort", description: "Codex 추론 작업량 확인 또는 변경" },
+    { command: "power", description: "현재 AI 작업량/추론 강도 확인 또는 변경" },
     { command: "lean", description: "최소 구현 원칙 확인 또는 변경" },
+    { command: "reset", description: "세션 문맥만 초기화" },
     { command: "diff", description: "프로젝트 git diff 요약" },
     { command: "delete", description: "토픽과 로컬 세션 삭제" }
   ]);

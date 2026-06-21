@@ -30,6 +30,7 @@ export interface SessionDefaults {
   thinking: string;
   claudeEffort: string;
   codexReasoning: string;
+  agyThinkingLevel: string;
 }
 
 export interface UsageWindow {
@@ -82,8 +83,12 @@ export interface SessionRecord {
   codexThreadId: string | null;
   // agy 전용 설정. provider="agy"일 때 사용한다.
   agyModel: string | null;
-  // agy 대화 재개 id(`~/.gemini/antigravity-cli/conversations/<id>.db`). codexThreadId에 대응한다.
+  // GeminiModelOptions.thinking_level(minimal/low/medium/high). null이면 API 기본(레벨 미지정).
+  agyThinkingLevel: string | null;
+  // Antigravity SDK가 저장하는 대화 재개 id. codexThreadId에 대응한다.
   agyConversationId: string | null;
+  // agy 대화 누적 토큰 사용량(JSON 문자열로 저장). 첫 턴 실행 전에는 null.
+  agyUsage: string | null;
   // 제공사 전환 시 직전 provider가 만든 인계 요약. 다음 턴 프롬프트에 1회 주입 후 비운다.
   handoffSummary: string | null;
   // 활성 목표 조건. 설정되면 한 턴이 끝날 때마다 충족 여부를 평가하고, 미충족이면

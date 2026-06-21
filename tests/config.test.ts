@@ -36,6 +36,7 @@ async function setup(token?: string, extra?: { token2?: string; token3?: string 
     TELEGRAM_CHAT_ID: "-1001",
     PROJECTS_PATH: projectsPath,
     CLAUDE_CODE_OAUTH_TOKEN: token ?? "",
+    GEMINI_API_KEY: "test.gemini-api-key-value-12345678901234567890",
     ...(extra?.token2 !== undefined ? { CLAUDE_CODE_OAUTH_TOKEN_2: extra.token2 } : {}),
     ...(extra?.token3 !== undefined ? { CLAUDE_CODE_OAUTH_TOKEN_3: extra.token3 } : {})
   };

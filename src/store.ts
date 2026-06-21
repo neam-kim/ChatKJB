@@ -8,7 +8,8 @@ import {
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING,
-  DEFAULT_THINKING_LEVEL
+  DEFAULT_THINKING_LEVEL,
+  resolveAgyThinkingLevel
 } from "./model-catalog.js";
 import type {
   ApprovalRecord,
@@ -31,8 +32,13 @@ const SESSION_DEFAULT_SEED: SessionDefaults = {
   agyModel: DEFAULT_AGY_MODEL,
   thinking: DEFAULT_THINKING_LEVEL,
   claudeEffort: DEFAULT_CLAUDE_EFFORT,
-  codexReasoning: DEFAULT_CODEX_REASONING
+  codexReasoning: DEFAULT_CODEX_REASONING,
+  agyThinkingLevel: "minimal"
 };
+
+function normalizeDefaultAgyThinkingLevel(value: string | null | undefined): string {
+  return resolveAgyThinkingLevel(value ?? "") ?? SESSION_DEFAULT_SEED.agyThinkingLevel;
+}
 
 interface SessionRow {
   id: string;
@@ -52,7 +58,9 @@ interface SessionRow {
   codex_reasoning: string | null;
   codex_thread_id: string | null;
   agy_model: string | null;
+  agy_thinking_level: string | null;
   agy_conversation_id: string | null;
+  agy_usage: string | null;
   handoff_summary: string | null;
   goal_condition: string | null;
   lean_mode: number;
@@ -193,6 +201,14 @@ export class StateStore {
     if (!sessionColumns.some((column) => column.name === "agy_conversation_id")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN agy_conversation_id TEXT");
     }
+    // agy thinking_level 축 신설(Phase 2). 기존 행은 null(API 기본) 기본값.
+    if (!sessionColumns.some((column) => column.name === "agy_thinking_level")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN agy_thinking_level TEXT");
+    }
+    // agy 네이티브 토큰 사용량(Phase 3). JSON 문자열 또는 null. 기존 행은 null.
+    if (!sessionColumns.some((column) => column.name === "agy_usage")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN agy_usage TEXT");
+    }
     this.db.exec(`
       UPDATE sessions
       SET provider = 'claude'
@@ -203,6 +219,35 @@ export class StateStore {
       WHERE key = 'default.provider'
         AND value NOT IN ('claude', 'codex', 'agy');
     `);
+    const agyThinkingDefault = this.db
+      .prepare("SELECT value FROM app_settings WHERE key = 'default.agyThinkingLevel'")
+      .get() as { value: string } | undefined;
+    if (agyThinkingDefault && !resolveAgyThinkingLevel(agyThinkingDefault.value)) {
+      this.db.prepare(
+        "INSERT INTO app_settings(key, value) VALUES ('default.agyThinkingLevel', ?) "
+        + "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+      ).run(SESSION_DEFAULT_SEED.agyThinkingLevel);
+    }
+    const agyBackend = this.db
+      .prepare("SELECT value FROM app_settings WHERE key = 'agy.backend'")
+      .get() as { value: string } | undefined;
+    if (agyBackend?.value !== "antigravity-sdk-v1") {
+      this.db.transaction(() => {
+        // Antigravity CLI conversation DB ids are not resumable by the API-key SDK runtime.
+        // Reset only once during the backend cutover; subsequent SDK conversation ids remain intact.
+        this.db.prepare(
+          "UPDATE sessions SET agy_model = ?, agy_conversation_id = NULL WHERE provider = 'agy'"
+        ).run(DEFAULT_AGY_MODEL);
+        this.db.prepare(
+          "INSERT INTO app_settings(key, value) VALUES ('default.agyModel', ?) "
+          + "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        ).run(DEFAULT_AGY_MODEL);
+        this.db.prepare(
+          "INSERT INTO app_settings(key, value) VALUES ('agy.backend', 'antigravity-sdk-v1') "
+          + "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        ).run();
+      })();
+    }
   }
 
   syncProjects(projects: ProjectConfig[]): void {
@@ -239,10 +284,10 @@ export class StateStore {
       INSERT INTO sessions(
         id, sdk_session_id, chat_id, topic_id, project_name, cwd, title,
         status, permission_mode, provider, model, thinking, claude_effort,
-        codex_model, codex_reasoning, codex_thread_id, agy_model, agy_conversation_id,
-        handoff_summary, goal_condition, lean_mode, usage_snapshot,
+        codex_model, codex_reasoning, codex_thread_id, agy_model, agy_thinking_level,
+        agy_conversation_id, agy_usage, handoff_summary, goal_condition, lean_mode, usage_snapshot,
         always_allowed_tools, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.sdkSessionId,
@@ -261,7 +306,9 @@ export class StateStore {
       session.codexReasoning ?? null,
       session.codexThreadId ?? null,
       session.agyModel ?? null,
+      session.agyThinkingLevel ?? null,
       session.agyConversationId ?? null,
+      session.agyUsage ?? null,
       session.handoffSummary ?? null,
       session.goalCondition ?? null,
       session.leanMode ? 1 : 0,
@@ -302,7 +349,7 @@ export class StateStore {
     id: string,
     fields: Partial<Pick<
       SessionRecord,
-      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "codexModel" | "codexReasoning" | "codexThreadId" | "agyModel" | "agyConversationId" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
+      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "codexModel" | "codexReasoning" | "codexThreadId" | "agyModel" | "agyThinkingLevel" | "agyConversationId" | "agyUsage" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
     >>
   ): void {
     const entries: Array<[string, unknown]> = [];
@@ -318,7 +365,9 @@ export class StateStore {
     if ("codexReasoning" in fields) entries.push(["codex_reasoning", fields.codexReasoning]);
     if ("codexThreadId" in fields) entries.push(["codex_thread_id", fields.codexThreadId]);
     if ("agyModel" in fields) entries.push(["agy_model", fields.agyModel]);
+    if ("agyThinkingLevel" in fields) entries.push(["agy_thinking_level", fields.agyThinkingLevel]);
     if ("agyConversationId" in fields) entries.push(["agy_conversation_id", fields.agyConversationId]);
+    if ("agyUsage" in fields) entries.push(["agy_usage", fields.agyUsage ?? null]);
     if ("handoffSummary" in fields) entries.push(["handoff_summary", fields.handoffSummary]);
     if ("goalCondition" in fields) entries.push(["goal_condition", fields.goalCondition]);
     if ("leanMode" in fields) entries.push(["lean_mode", fields.leanMode ? 1 : 0]);
@@ -356,7 +405,8 @@ export class StateStore {
       agyModel: stored.get("agyModel") ?? SESSION_DEFAULT_SEED.agyModel,
       thinking: stored.get("thinking") ?? SESSION_DEFAULT_SEED.thinking,
       claudeEffort: stored.get("claudeEffort") ?? SESSION_DEFAULT_SEED.claudeEffort,
-      codexReasoning: stored.get("codexReasoning") ?? SESSION_DEFAULT_SEED.codexReasoning
+      codexReasoning: stored.get("codexReasoning") ?? SESSION_DEFAULT_SEED.codexReasoning,
+      agyThinkingLevel: normalizeDefaultAgyThinkingLevel(stored.get("agyThinkingLevel"))
     };
   }
 
@@ -368,7 +418,10 @@ export class StateStore {
     this.db.transaction(() => {
       for (const [key, value] of Object.entries(fields)) {
         if (value === undefined) continue;
-        statement.run(`default.${key}`, String(value));
+        const normalized = key === "agyThinkingLevel"
+          ? normalizeDefaultAgyThinkingLevel(String(value))
+          : String(value);
+        statement.run(`default.${key}`, normalized);
       }
     })();
     return this.getSessionDefaults();
@@ -454,7 +507,9 @@ export class StateStore {
       codexReasoning: row.codex_reasoning,
       codexThreadId: row.codex_thread_id,
       agyModel: row.agy_model,
+      agyThinkingLevel: row.agy_thinking_level,
       agyConversationId: row.agy_conversation_id,
+      agyUsage: row.agy_usage,
       handoffSummary: row.handoff_summary,
       goalCondition: row.goal_condition,
       leanMode: row.lean_mode !== 0,

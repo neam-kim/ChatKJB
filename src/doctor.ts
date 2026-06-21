@@ -171,6 +171,19 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
       requireCodexSubscriptionAuth();
       return ["✅ Codex 구독 인증: ChatGPT 로그인 확인"];
     }),
+    check("agy SDK", 5000, async () => {
+      if (!deps.config.geminiApiKey || deps.config.geminiApiKey.length < 30) {
+        return ["❌ agy SDK: GEMINI_API_KEY 형식 오류"];
+      }
+      const { stdout } = await execFileAsync(
+        deps.config.agySdkPython,
+        ["-c", "import google.antigravity; print('ok')"],
+        { timeout: 4000, maxBuffer: 64 * 1024 }
+      );
+      return stdout.trim() === "ok"
+        ? ["✅ agy SDK: Gemini API 키 설정 · Antigravity SDK 로드 가능"]
+        : ["❌ agy SDK: Antigravity SDK 로드 결과 이상"];
+    }),
     check("launchd", 3000, async () => {
       const uid = process.getuid?.();
       if (uid === undefined) return ["⚠️ launchd: 현재 사용자 ID 확인 불가"];
@@ -227,7 +240,11 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
     check("최근 stderr", 2000, async () => recentStderr(
       // launchd 로그는 CloudStorage 밖(~/Library/Logs/<label>/)에 둔다 — install-launch-agent.mjs 참고.
       join(homedir(), "Library", "Logs", localLaunchAgentLabel, "stderr.log"),
-      [deps.config.telegramBotToken, ...deps.config.claudeCodeOauthTokens]
+      [
+        deps.config.telegramBotToken,
+        deps.config.geminiApiKey,
+        ...deps.config.claudeCodeOauthTokens
+      ]
     ))
   ]);
 

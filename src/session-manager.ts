@@ -1,9 +1,7 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
-import { StringDecoder } from "node:string_decoder";
+import { readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   deleteSession as deleteClaudeSession,
   query,
@@ -41,6 +39,7 @@ import {
   codexModelLabel,
   codexReasoningLabel,
   DEFAULT_AGY_MODEL,
+  DEFAULT_AGY_THINKING_LEVEL,
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING,
@@ -63,6 +62,7 @@ import {
   snapshotFromRateLimitInfo,
   snapshotFromUsageResponse
 } from "./usage.js";
+import { AgyInteractiveSession, type AgyAttachment, type AgyLiveStatus } from "./agy-interactive.js";
 
 // 일시적 과부하(Overloaded/5xx) 자동 재시도 상한과 백오프(지수, 상한 60초).
 const MAX_OVERLOAD_RETRIES = 5;
@@ -106,6 +106,91 @@ export function resolveClaudeEffort(level: string | null | undefined): EffortLev
     default:
       return undefined;
   }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 6: agy 네이티브 멀티모달 첨부 헬퍼
+//
+// handleFile(bot.ts)이 생성하는 fileMessage 형식:
+//   [첨부 파일]
+//   종류: <type>
+//   파일명: <name>
+//   저장 경로: <absolutePath>
+//   캡션: <caption>   (선택)
+//
+// 이 형식은 우리 코드가 통제하는 안정적 계약이다. MessageQueue 리팩토링 없이
+// executeAgy에서 turnPrompt를 파싱해 첨부 목록을 도출한다(side-channel 불필요).
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** 확장자 → MIME 타입 테이블. agy SDK의 SUPPORTED_*_MIMES 집합만 포함한다. */
+const EXT_TO_MIME: ReadonlyMap<string, string> = new Map([
+  // 이미지 (SUPPORTED_IMAGE_MIMES)
+  ["jpg",  "image/jpeg"],
+  ["jpeg", "image/jpeg"],
+  ["png",  "image/png"],
+  ["webp", "image/webp"],
+  ["bmp",  "image/bmp"],
+  // 문서 (SUPPORTED_DOCUMENT_MIMES)
+  ["pdf",  "application/pdf"],
+  ["txt",  "text/plain"],
+  ["csv",  "text/csv"],
+  ["json", "application/json"],
+  ["html", "text/html"],
+  ["htm",  "text/html"],
+  ["xml",  "text/xml"],
+  ["css",  "text/css"],
+  ["js",   "text/javascript"],
+  ["rtf",  "text/rtf"],
+  // 오디오 (SUPPORTED_AUDIO_MIMES)
+  ["mp3",  "audio/mpeg"],
+  ["m4a",  "audio/m4a"],
+  ["wav",  "audio/wav"],
+  ["aac",  "audio/aac"],
+  ["flac", "audio/flac"],
+  ["ogg",  "audio/ogg"],
+  ["opus", "audio/opus"],
+  // 동영상 (SUPPORTED_VIDEO_MIMES)
+  ["mp4",  "video/mp4"],
+  ["mov",  "video/quicktime"],
+  ["webm", "video/webm"],
+  ["avi",  "video/avi"],
+  ["mpeg", "video/mpeg"],
+  ["mpg",  "video/mpeg"],
+  ["3gp",  "video/3gpp"],
+  ["wmv",  "video/wmv"],
+  ["flv",  "video/x-flv"],
+]);
+
+/**
+ * 파일 경로의 확장자로 MIME 타입을 반환한다.
+ * 알 수 없는 확장자이거나 agy가 지원하지 않는 형식이면 undefined를 반환한다.
+ */
+export function mimeFromPath(filePath: string): string | undefined {
+  const dot = filePath.lastIndexOf(".");
+  if (dot < 0) return undefined;
+  const ext = filePath.slice(dot + 1).toLowerCase();
+  return EXT_TO_MIME.get(ext);
+}
+
+/**
+ * agy fileMessage 텍스트에서 '저장 경로: <path>' 줄을 파싱해
+ * AgyAttachment 배열을 반환한다. 지원 MIME이 없는 경로는 제외한다.
+ *
+ * 텍스트 프롬프트는 변경하지 않는다(모델이 파일명·캡션 문맥을 볼 수 있도록).
+ * 이 함수는 executeAgy 전용이다. Claude/Codex turn에서는 호출하지 않는다.
+ */
+export function extractAgyAttachments(prompt: string): AgyAttachment[] {
+  const attachments: AgyAttachment[] = [];
+  for (const line of prompt.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("저장 경로: ")) continue;
+    const filePath = trimmed.slice("저장 경로: ".length).trim();
+    if (!filePath) continue;
+    const mimeType = mimeFromPath(filePath);
+    if (!mimeType) continue; // 지원되지 않는 형식 — 텍스트 폴백 유지
+    attachments.push({ path: filePath, mimeType });
+  }
+  return attachments;
 }
 
 export function buildLeanInstructions(enabled: boolean): string {
@@ -208,6 +293,10 @@ export function agyRequestsProceed(text: string): boolean {
 }
 
 export function agyFailureFromLog(log: string): string | null {
+  const retry = log.match(/Please retry in ([0-9.]+s)/i)?.[1];
+  if (retry) {
+    return `Gemini API 무료 분당 한도에 도달했습니다. 약 ${retry} 후 다시 시도하십시오.`;
+  }
   const lines = log.split(/\r?\n/).filter((line) =>
     /RESOURCE_EXHAUSTED|Individual quota reached|model unreachable/i.test(line)
   );
@@ -238,6 +327,8 @@ interface SessionManagerOptions {
   claudeCodeExecutable?: string;
   // agy(Antigravity CLI) 바이너리 경로. 데몬 PATH에 ~/.local/bin이 없을 수 있어 명시 경로를 받는다.
   agyExecutable?: string;
+  geminiApiKey?: string;
+  agySdkPython?: string;
   mcpToolTimeoutMs: number;
   mcpMaxAttempts: number;
   codexMcpTimeoutMs: number;
@@ -247,6 +338,8 @@ interface SessionManagerOptions {
   claudeMemoryDir: string;
   modelCatalog: ModelCatalog;
   deleteClaudeSession?: typeof deleteClaudeSession;
+  // 테스트 주입용: agy 영속 대화 save_dir 경로. 기본값은 브리지 설정과 동일한 경로.
+  agyConvSaveDir?: string;
 }
 
 interface ActiveRun {
@@ -268,6 +361,16 @@ export interface SessionInspection {
   pendingTurns: number;
   codexInFlight: boolean;
   codexElapsedMs: number | null;
+}
+
+export interface AgyLiveStatusResult {
+  status: AgyLiveStatus | null;
+  error: string | null;
+}
+
+export interface ResetContextResult {
+  ok: boolean;
+  reason?: string;
 }
 
 function assistantBlocks(message: SDKMessage): Array<Record<string, unknown>> {
@@ -781,6 +884,10 @@ export class SessionManager {
   private readonly limitWaiters = new Map<string, NodeJS.Timeout>();
   // /goal 자동 진행이 한 목표에서 돈 턴 수(MAX_GOAL_ROUNDS 상한 적용).
   private readonly goalRounds = new Map<string, number>();
+  private readonly agyInteractiveSessions = new Map<
+    string,
+    { client: AgyInteractiveSession; signature: string }
+  >();
   private readonly tokenPool: TokenPool;
   private readonly oauthTokens: string[];
 
@@ -812,6 +919,7 @@ export class SessionManager {
     provider: ProviderKind = "claude",
     codexModel?: string | null,
     codexReasoning?: string | null,
+    agyThinkingLevel?: string | null,
     agyModel?: string | null,
     handoffSummary?: string | null
   ): SessionRecord {
@@ -834,7 +942,9 @@ export class SessionManager {
       codexReasoning: codexReasoning ?? null,
       codexThreadId: null,
       agyModel: agyModel ?? null,
+      agyThinkingLevel: agyThinkingLevel ?? null,
       agyConversationId: null,
+      agyUsage: null,
       handoffSummary: handoffSummary ?? null,
       goalCondition: null,
       leanMode,
@@ -951,6 +1061,7 @@ export class SessionManager {
     if (!run) return false;
     run.input.close();
     run.controller.abort();
+    this.agyInteractiveSessions.get(sessionId)?.client.interrupt();
     // close()는 hang된 for-await가 풀리길 기다리지 않고 CLI 서브프로세스를 즉시
     // 강제 종료한다 — in-flight MCP 호출/transport와 서브에이전트까지 함께 정리되어
     // 종료 후 MCP 호출이 남아 가로막는 문제를 막는다. finally의 close()는 멱등 백업.
@@ -1085,6 +1196,7 @@ export class SessionManager {
     } catch (error) {
       console.error("Handoff summary failed:", safeErrorMessage(error, this.oauthTokens));
     }
+    if (session.provider === "agy") this.closeAgyInteractiveSession(session.id);
 
     if (target === "codex") {
       // 대상=Codex: 새 스레드에서 요약을 받아 시작한다.
@@ -1111,6 +1223,82 @@ export class SessionManager {
     return { ok: true };
   }
 
+  async resetContext(sessionId: string): Promise<ResetContextResult> {
+    const session = this.store.getSession(sessionId);
+    if (!session) return { ok: false, reason: "세션을 찾을 수 없습니다." };
+    if (this.active.has(sessionId) || this.sessionTasks.has(sessionId)) {
+      return { ok: false, reason: "실행 중에는 문맥을 초기화할 수 없습니다. /stop 후 다시 시도하세요." };
+    }
+
+    try {
+      if (session.provider === "claude") {
+        await this.resetClaudeContext(session);
+        this.store.updateSession(session.id, {
+          sdkSessionId: null,
+          handoffSummary: null,
+          usageSnapshot: null
+        });
+      } else if (session.provider === "codex") {
+        this.resetCodexContext(session);
+        this.store.updateSession(session.id, {
+          codexThreadId: null,
+          handoffSummary: null
+        });
+      } else {
+        await this.resetAgyContext(session);
+        this.store.updateSession(session.id, {
+          agyConversationId: null,
+          agyUsage: null,
+          handoffSummary: null
+        });
+      }
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: safeErrorMessage(error, this.oauthTokens) };
+    }
+  }
+
+  async getAgyLiveStatus(sessionId: string): Promise<AgyLiveStatusResult> {
+    const session = this.store.getSession(sessionId);
+    if (!session) {
+      return { status: null, error: "세션을 찾을 수 없습니다." };
+    }
+    if (session.provider !== "agy") {
+      return { status: null, error: "agy 세션이 아닙니다." };
+    }
+    const existing = this.agyInteractiveSessions.get(session.id)?.client;
+    if (existing) {
+      try {
+        return { status: await existing.getStatus(), error: null };
+      } catch (error) {
+        return { status: null, error: safeErrorMessage(error, this.oauthTokens) };
+      }
+    }
+    if (!session.agyConversationId) {
+      return {
+        status: {
+          isIdle: true,
+          turnCount: 0,
+          conversationId: null
+        },
+        error: null
+      };
+    }
+
+    try {
+      const client = this.getAgyInteractiveSession(
+        session,
+        session.agyModel ?? DEFAULT_AGY_MODEL,
+        session.permissionMode,
+        session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL
+      );
+      const status = await client.getStatus();
+      return { status, error: null };
+    } catch (error) {
+      return { status: null, error: safeErrorMessage(error, this.oauthTokens) };
+    }
+  }
+
   // 현재 provider에게 다음 어시스턴트가 이어받을 인계 요약을 만들게 한다. 한 번도 실행된 적이
   // 없는 세션(재개 핸들 없음)은 인계할 맥락이 없으므로 빈 문자열을 돌려준다.
   private async summarizeForHandoff(session: SessionRecord): Promise<string> {
@@ -1133,17 +1321,15 @@ export class SessionManager {
       return this.runReadOnlyClaude(session, controller, run, prompt, this.tokenPool.select());
     }
     if (session.provider === "agy") {
-      // agy: 직전 대화를 재개해 요약 한 턴을 받는다(요약 프롬프트는 읽기 전용 의도).
+      // agy: 영속 대화식 세션을 읽기 전용 권한으로 재개해 요약 한 턴을 받는다.
       if (!session.agyConversationId) return "";
-      const { stdout } = await this.runAgy(
-        [
-          "--print", prompt,
-          ...agyPermissionArgs("plan"),
-          "--conversation", session.agyConversationId
-        ],
-        session.cwd
+      const client = this.getAgyInteractiveSession(
+        session,
+        session.agyModel ?? DEFAULT_AGY_MODEL,
+        "plan"
       );
-      return this.stripAgyWarning(stdout).trim();
+      const result = await client.runTurn(prompt);
+      return result.response.trim();
     }
     // Codex: 직전 스레드를 재개해 비스트리밍으로 요약 한 턴을 받는다.
     if (!session.codexThreadId) return "";
@@ -1162,21 +1348,69 @@ export class SessionManager {
     return result.finalResponse.trim();
   }
 
+  private async resetClaudeContext(session: SessionRecord): Promise<void> {
+    if (!session.sdkSessionId) return;
+    const removeClaudeSession = this.options.deleteClaudeSession ?? deleteClaudeSession;
+    await removeClaudeSession(session.sdkSessionId, { dir: session.cwd });
+  }
+
+  private resetCodexContext(session: SessionRecord): void {
+    void session;
+  }
+
+  private async resetAgyContext(session: SessionRecord): Promise<void> {
+    const client = this.agyInteractiveSessions.get(session.id)?.client;
+    if (client) {
+      try {
+        await client.clearHistory();
+        this.closeAgyInteractiveSession(session.id);
+        return;
+      } catch (error) {
+        console.error("agy clear_history failed, falling back to file cleanup:", safeErrorMessage(error));
+      }
+    }
+    this.closeAgyInteractiveSession(session.id);
+    if (session.agyConversationId) {
+      this.removeAgyConversationArtifacts(session.agyConversationId);
+    }
+  }
+
+  private removeAgyConversationArtifacts(conversationId: string): void {
+    if (!/^[0-9a-f]{32}$/i.test(conversationId)) {
+      console.error(`agy conversation file removal skipped: invalid conversation_id format — "${conversationId}"`);
+      return;
+    }
+    const saveDir = this.options.agyConvSaveDir
+      ?? join(homedir(), ".local", "share", "telegram-claude-orchestrator", "agy-conversations");
+    for (const suffix of [".db", ".db-shm", ".db-wal"]) {
+      try {
+        rmSync(join(saveDir, conversationId + suffix), { force: true });
+      } catch (error) {
+        console.error(`agy conversation file removal failed (${suffix}):`, safeErrorMessage(error));
+      }
+    }
+  }
+
   async deleteSession(session: SessionRecord): Promise<void> {
     this.deleting.add(session.id);
     const wasActive = this.active.has(session.id);
     this.stop(session.id);
+    this.closeAgyInteractiveSession(session.id);
     this.store.deleteSession(session.id);
 
     const task = this.sessionTasks.get(session.id);
     if (wasActive && task) await task.catch(() => undefined);
 
     if (session.sdkSessionId) {
-      const removeClaudeSession = this.options.deleteClaudeSession ?? deleteClaudeSession;
-      await removeClaudeSession(session.sdkSessionId, { dir: session.cwd }).catch((error) => {
+      await this.resetClaudeContext(session).catch((error) => {
         console.error("Claude session deletion failed:", safeErrorMessage(error));
       });
     }
+
+    if (session.provider === "agy" && session.agyConversationId) {
+      this.removeAgyConversationArtifacts(session.agyConversationId);
+    }
+
     if (!task || wasActive) this.deleting.delete(session.id);
   }
 
@@ -1965,100 +2199,65 @@ export class SessionManager {
     }
   }
 
-  private agyBinary(): string {
-    return this.options.agyExecutable ?? "agy";
-  }
-
-  private agyConversationsDir(): string {
-    return join(homedir(), ".gemini", "antigravity-cli", "conversations");
-  }
-
-  // 현재 존재하는 agy 대화 id 집합(파일명에서 .db 제거). 디렉터리가 없으면 빈 집합.
-  private listAgyConversationIds(): Set<string> {
-    try {
-      return new Set(
-        readdirSync(this.agyConversationsDir())
-          .filter((name) => name.endsWith(".db"))
-          .map((name) => name.slice(0, -3))
-      );
-    } catch {
-      return new Set();
+  private getAgyInteractiveSession(
+    session: SessionRecord,
+    model: string,
+    permissionMode: SessionRecord["permissionMode"] = session.permissionMode,
+    thinkingLevel: string | null = session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL
+  ): AgyInteractiveSession {
+    const geminiApiKey = this.options.geminiApiKey ?? process.env["GEMINI_API_KEY"];
+    if (!geminiApiKey) {
+      throw new Error("GEMINI_API_KEY가 설정되지 않았습니다.");
     }
-  }
-
-  // 첫 턴 실행 전후 대화 파일 차집합으로 새 대화 id를 잡는다. agy가 id를 지정하게 두지 않아
-  // 직접 잡아야 한다. 동시 생성이 겹치면 가장 최근 mtime을 고른다.
-  private captureNewAgyConversationId(before: Set<string>): string | null {
-    const dir = this.agyConversationsDir();
-    let ids: string[];
-    try {
-      ids = readdirSync(dir).filter((name) => name.endsWith(".db")).map((name) => name.slice(0, -3));
-    } catch {
-      return null;
-    }
-    let newest: { id: string; mtimeMs: number } | null = null;
-    for (const id of ids) {
-      if (before.has(id)) continue;
-      let mtimeMs = 0;
-      try {
-        mtimeMs = statSync(join(dir, `${id}.db`)).mtimeMs;
-      } catch {
-        continue;
-      }
-      if (!newest || mtimeMs > newest.mtimeMs) newest = { id, mtimeMs };
-    }
-    return newest?.id ?? null;
-  }
-
-  // agy stdout 선두의 "Warning: conversation ... not found." 한 줄을 제거한다.
-  private stripAgyWarning(text: string): string {
-    return text.replace(/^Warning: conversation .*not found\.\s*\n?/, "");
-  }
-
-  // agy를 한 번 실행한다. signal로 중단하면 SIGTERM 후 잠시 뒤 SIGKILL.
-  private runAgy(
-    args: string[],
-    cwd: string,
-    signal?: AbortSignal,
-    onProgress?: (stdoutSoFar: string) => void
-  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
-    return new Promise((resolve, reject) => {
-      // stdin을 ignore(=/dev/null)로 줘야 한다. 안 그러면 agy가 stdin EOF를 기다리며 멈춘다.
-      const child = spawn(this.agyBinary(), args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
-      let stdout = "";
-      let stderr = "";
-      const stdoutDecoder = new StringDecoder("utf8");
-      const stderrDecoder = new StringDecoder("utf8");
-      let killTimer: NodeJS.Timeout | undefined;
-      const onAbort = () => {
-        child.kill("SIGTERM");
-        killTimer = setTimeout(() => child.kill("SIGKILL"), 3000);
-        killTimer.unref();
-      };
-      const cleanup = () => {
-        if (signal) signal.removeEventListener("abort", onAbort);
-        if (killTimer) clearTimeout(killTimer);
-      };
-      if (signal) {
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
-      }
-      child.stdout.on("data", (chunk: Buffer) => {
-        stdout += stdoutDecoder.write(chunk);
-        if (onProgress) onProgress(stdout);
-      });
-      child.stderr.on("data", (chunk: Buffer) => { stderr += stderrDecoder.write(chunk); });
-      child.on("error", (error) => {
-        cleanup();
-        reject(error);
-      });
-      child.on("close", (code) => {
-        stdout += stdoutDecoder.end();
-        stderr += stderrDecoder.end();
-        cleanup();
-        resolve({ stdout, stderr, code });
-      });
+    // thinkingLevel이 변경되면 세션을 재구성한다(새 ModelTarget으로 init).
+    const signature = JSON.stringify({
+      cwd: session.cwd,
+      model,
+      permissionMode,
+      thinkingLevel
     });
+    const existing = this.agyInteractiveSessions.get(session.id);
+    if (existing?.signature === signature && existing.client.alive) return existing.client;
+    if (existing) this.closeAgyInteractiveSession(session.id);
+
+    const client = new AgyInteractiveSession({
+      pythonPath: this.options.agySdkPython ?? join(
+        homedir(),
+        ".local",
+        "share",
+        "telegram-claude-orchestrator",
+        "agy-sdk",
+        "bin",
+        "python"
+      ),
+      bridgePath: resolve(process.cwd(), "scripts", "agy-sdk-bridge.py"),
+      cwd: session.cwd,
+      model,
+      thinkingLevel,
+      permissionMode,
+      conversationId: session.agyConversationId,
+      systemInstructions: buildProviderBootstrap(session, this.options.claudeMemoryDir),
+      connectorRegistry: join(homedir(), ".claude", "shared-resources", "connectors.json"),
+      skillsPaths: [
+        join(homedir(), ".claude", "skills"),
+        join(homedir(), ".codex", "skills"),
+        join(homedir(), ".gemini", "config", "skills")
+      ],
+      env: {
+        ...process.env,
+        GEMINI_API_KEY: geminiApiKey,
+        PYTHONUNBUFFERED: "1"
+      }
+    });
+    this.agyInteractiveSessions.set(session.id, { client, signature });
+    return client;
+  }
+
+  private closeAgyInteractiveSession(sessionId: string): void {
+    const existing = this.agyInteractiveSessions.get(sessionId);
+    if (!existing) return;
+    this.agyInteractiveSessions.delete(sessionId);
+    existing.client.close();
   }
 
   private async executeAgy(request: RunRequest): Promise<void> {
@@ -2104,19 +2303,21 @@ export class SessionManager {
         );
       }
       renderer.note(
-        `agy 실행 (${agyModelLabel(this.options.modelCatalog, agyModel)})`
-        + ` · 커넥터 ${agyConnectorCount}개 동기화(~/.gemini/config/mcp_config.json)`
+        `agy SDK 대화식 실행 (${agyModelLabel(this.options.modelCatalog, agyModel)})`
+        + ` · 커넥터 ${agyConnectorCount}개 공유`
       );
 
-      const bootstrap = buildProviderBootstrap(session, this.options.claudeMemoryDir);
+      const client = this.getAgyInteractiveSession(session, agyModel);
       const iterator = input[Symbol.asyncIterator]();
       let pending = await iterator.next();
-      let firstTurn = true;
       while (!pending.done) {
         const content = pending.value.message.content;
         const turnPrompt = typeof content === "string" ? content : request.prompt;
-        const memoryPrefix = firstTurn ? `${bootstrap}\n\n` : "";
-        const finalPrompt = `${memoryPrefix}${turnPrompt}`;
+
+        // Phase 6: turnPrompt에서 '저장 경로:' 줄을 파싱해 agy 네이티브 첨부를 구성한다.
+        // 텍스트 프롬프트는 그대로 유지해 모델이 파일명·캡션 문맥을 볼 수 있게 한다.
+        // 지원 MIME이 없거나 파싱 불가 시 첨부는 빈 배열이 되고 기존 텍스트 경로 폴백이 작동한다.
+        const turnAttachments = extractAgyAttachments(turnPrompt);
 
         if (turnTimeout) clearTimeout(turnTimeout);
         turnTimeout = setTimeout(() => {
@@ -2124,75 +2325,39 @@ export class SessionManager {
           controller.abort();
         }, this.options.codexMcpTimeoutMs);
 
-        // agy --print-timeout 기본값은 5분이라, 이를 넘기면 우리 턴 타임아웃(기본 30분)이
-        // 작동하기 전에 agy가 스스로 print 대기를 끊는다. 우리 타임아웃보다 넉넉히 크게 줘서
-        // 종료 판정·메시지를 우리 쪽(turnTimeout)이 일관되게 담당하도록 한다.
-        const printTimeoutArg = `${Math.ceil(this.options.codexMcpTimeoutMs / 1000) + 60}s`;
-        const agyLogPath = join(tmpdir(), `telegram-agy-${session.id}-${randomUUID()}.log`);
-        const args = [
-          "--print", finalPrompt,
-          ...agyPermissionArgs(session.permissionMode),
-          "--model", agyModel,
-          "--print-timeout", printTimeoutArg,
-          "--log-file", agyLogPath
-        ];
-        if (agyConversationId) args.push("--conversation", agyConversationId);
-
-        // 첫 턴(대화 id 미보유)에는 새로 생기는 대화 id를 잡기 위해 실행 전 목록을 스냅샷한다.
-        const before = agyConversationId ? null : this.listAgyConversationIds();
-        let result!: { stdout: string; stderr: string; code: number | null };
-        let agyLog = "";
         const progress = new ProgressiveParagraphCollector();
         let progressDelivery = Promise.resolve();
+        let result!: Awaited<ReturnType<AgyInteractiveSession["runTurn"]>>;
         try {
-          result = await this.runAgy(args, session.cwd, controller.signal, (soFar) => {
-            // agy --print stdout이 토막으로 도착하면 완성된 공개 문단만 정식 메시지로 보내고,
-            // 아직 끝나지 않은 문단은 상태 메시지 미리보기로만 표시한다.
-            const visible = this.stripAgyWarning(soFar);
-            renderer.partial(visible);
-            for (const paragraph of progress.accept(visible)) {
-              progressDelivery = progressDelivery.then(() => renderer.text(paragraph));
-            }
-          });
+          result = await client.runTurn(
+            turnPrompt,
+            controller.signal,
+            (soFar) => {
+              renderer.partial(soFar);
+              for (const paragraph of progress.accept(soFar)) {
+                progressDelivery = progressDelivery.then(() => renderer.text(paragraph));
+              }
+            },
+            turnAttachments.length > 0 ? turnAttachments : undefined
+          );
         } finally {
           if (turnTimeout) clearTimeout(turnTimeout);
-          try {
-            agyLog = readFileSync(agyLogPath, "utf8");
-          } catch {
-            // agy가 로그 파일을 만들지 못한 경우에는 stdout/stderr만으로 판정한다.
-          }
-          try {
-            unlinkSync(agyLogPath);
-          } catch {
-            // 이미 없거나 제거할 수 없는 임시 로그는 다음 OS 정리 주기에 맡긴다.
-          }
         }
         if (timedOut || controller.signal.aborted) throw new Error("turn aborted");
-        if (result.code !== 0) {
-          const loggedFailure = agyFailureFromLog(agyLog);
-          if (loggedFailure) throw new Error(loggedFailure);
-          const detail = this.stripAgyWarning(result.stderr || result.stdout).trim();
-          throw new Error(`agy 실행 실패 (코드 ${result.code}): ${detail.slice(0, 500)}`);
+        if (result.conversationId && result.conversationId !== agyConversationId) {
+          agyConversationId = result.conversationId;
+          this.store.updateSession(session.id, { agyConversationId });
+        }
+        // 대화 누적 사용량을 JSON 문자열로 저장한다(없으면 null 유지).
+        if (result.totalUsage) {
+          this.store.updateSession(session.id, {
+            agyUsage: JSON.stringify(result.totalUsage)
+          });
         }
 
-        if (before) {
-          const newId = this.captureNewAgyConversationId(before);
-          if (newId && newId !== agyConversationId) {
-            agyConversationId = newId;
-            this.store.updateSession(session.id, { agyConversationId });
-          }
-        }
-
-        const attemptResponse = this.stripAgyWarning(result.stdout).trim();
+        const attemptResponse = result.response.trim();
         if (!attemptResponse) {
-          const loggedFailure = agyFailureFromLog(agyLog);
-          if (loggedFailure) throw new Error(loggedFailure);
-          const detail = this.stripAgyWarning(result.stderr).trim();
-          throw new Error(
-            detail
-              ? `agy가 빈 응답을 반환했습니다: ${detail.slice(0, 500)}`
-              : "agy가 성공 종료 코드와 함께 빈 응답을 반환했습니다. 모델 상태와 agy 로그를 확인하십시오."
-          );
+          throw new Error("agy SDK가 성공 종료와 함께 빈 응답을 반환했습니다.");
         }
         for (const paragraph of progress.finish(attemptResponse)) {
           progressDelivery = progressDelivery.then(() => renderer.text(paragraph));
@@ -2207,8 +2372,6 @@ export class SessionManager {
             new InlineKeyboard().text("진행", `agygo:${session.id}`)
           );
         }
-        firstTurn = false;
-
         run.pendingTurns = Math.max(0, run.pendingTurns - 1);
         if (run.pendingTurns === 0) break;
         renderer.note(`예약 메시지 ${run.pendingTurns}개 처리 대기`);
@@ -2216,6 +2379,7 @@ export class SessionManager {
       }
 
       if (request.operation === "compact") {
+        this.closeAgyInteractiveSession(session.id);
         this.store.updateSession(session.id, {
           status: "done",
           agyConversationId: null,
@@ -2248,8 +2412,10 @@ export class SessionManager {
         await renderer.finish("aborted", "사용자가 작업을 중단했습니다.");
         await this.safeRename(session, `[STOP] ${session.title}`);
       } else {
+        const message = safeErrorMessage(error);
+        const agyFailure = agyFailureFromLog(message);
         this.store.updateSession(session.id, { status: "error" });
-        await renderer.finish("error", `agy 실행 실패: ${safeErrorMessage(error)}`);
+        await renderer.finish("error", agyFailure ?? `agy SDK 실행 실패: ${message}`);
         await this.safeRename(session, `[ERROR] ${session.title}`);
       }
     } finally {

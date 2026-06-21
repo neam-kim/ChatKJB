@@ -3,6 +3,7 @@ import type {
   SDKRateLimitInfo
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ExtraUsage, UsageSnapshot, UsageWindow } from "./types.js";
+import type { AgyUsage } from "./agy-interactive.js";
 
 function percentage(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
@@ -143,6 +144,53 @@ function formatExtraUsage(extra: ExtraUsage): string | null {
     ? "사용 중"
     : `${Math.round(extra.utilization)}% 사용`;
   return `추가 사용(overage): ${utilization}${amount}`;
+}
+
+/** agy 네이티브 토큰 사용량을 텔레그램 출력용 문자열로 포맷한다.
+ *  totalUsage: 대화 누적. turnUsage: 마지막 턴(선택). */
+export function formatAgyUsage(totalUsage: AgyUsage, turnUsage?: AgyUsage): string {
+  const lines: string[] = [];
+
+  function tok(count: number | null): string {
+    return count !== null ? count.toLocaleString("ko-KR") : "-";
+  }
+
+  lines.push("agy 누적 토큰 사용량");
+  lines.push(`  전체: ${tok(totalUsage.totalTokenCount)}`);
+  lines.push(`  입력(prompt): ${tok(totalUsage.promptTokenCount)}`);
+  if (totalUsage.cachedContentTokenCount !== null) {
+    lines.push(`  캐시: ${tok(totalUsage.cachedContentTokenCount)}`);
+  }
+  lines.push(`  출력(candidates): ${tok(totalUsage.candidatesTokenCount)}`);
+  if (totalUsage.thoughtsTokenCount !== null) {
+    lines.push(`  추론(thoughts): ${tok(totalUsage.thoughtsTokenCount)}`);
+  }
+
+  if (turnUsage) {
+    lines.push("");
+    lines.push("마지막 턴");
+    lines.push(`  전체: ${tok(turnUsage.totalTokenCount)}`);
+    lines.push(`  입력(prompt): ${tok(turnUsage.promptTokenCount)}`);
+    if (turnUsage.cachedContentTokenCount !== null) {
+      lines.push(`  캐시: ${tok(turnUsage.cachedContentTokenCount)}`);
+    }
+    lines.push(`  출력(candidates): ${tok(turnUsage.candidatesTokenCount)}`);
+    if (turnUsage.thoughtsTokenCount !== null) {
+      lines.push(`  추론(thoughts): ${tok(turnUsage.thoughtsTokenCount)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/** JSON 문자열로 저장된 agyUsage를 AgyUsage로 파싱한다. 실패 시 null. */
+export function parseStoredAgyUsage(value: string | null): AgyUsage | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as AgyUsage;
+  } catch {
+    return null;
+  }
 }
 
 // 한도 윈도우를 항상 같은 순서로, 서버가 실제로 반환한 것만 표시한다.
