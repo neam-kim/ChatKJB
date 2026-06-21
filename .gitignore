@@ -5,8 +5,6 @@ data/
 *.log
 projects.json
 
-# 운영본 전용(공개 미러 제외). migration/ 에는 ~/.claude.json·~/.codex/auth.json 토큰이 들어 있다.
-migration/
 .backup-*/
 .claude/
 .DS_Store

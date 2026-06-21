@@ -3,12 +3,18 @@ import { createBot } from "./bot.js";
 import { FALLBACK_MODEL_CATALOG, loadModelCatalog } from "./model-catalog.js";
 import { StateStore } from "./store.js";
 import { safeErrorMessage } from "./telegram-transport.js";
+import { syncSharedResources } from "./resource-sync.js";
 
 async function main(): Promise<void> {
   const config = await loadConfig();
   const store = new StateStore(config.databasePath);
   store.syncProjects(config.projects);
   const interrupted = store.interruptIncompleteSessions();
+  const shared = syncSharedResources();
+  console.log(
+    `Shared resources → skills: ${shared.skillCount}, connectors: ${shared.connectorCount}, `
+    + `providers: ${shared.providerSkillRoots}`
+  );
 
   // 제공사 카탈로그(Claude=SDK supportedModels, Codex=번들 바이너리 debug models)를 읽어
   // 모델·사고(thinking)·추론(reasoning) 선택지를 동적으로 채운다. 실패하면 정적 fallback 유지.

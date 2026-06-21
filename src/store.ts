@@ -10,13 +10,8 @@ import {
   DEFAULT_CODEX_REASONING,
   DEFAULT_THINKING_LEVEL
 } from "./model-catalog.js";
-import { redactSensitiveText, redactSensitiveValue } from "./redaction.js";
 import type {
   ApprovalRecord,
-  PlanCriterionRecord,
-  PlanCriterionStatus,
-  PlanEvidenceRecord,
-  PlanRunRecord,
   ProjectConfig,
   ProviderKind,
   SessionDefaults,
@@ -26,7 +21,7 @@ import type {
 } from "./types.js";
 
 function normalizeProvider(value: string | null | undefined): ProviderKind {
-  return value === "codex" || value === "agy" || value === "local-llm" ? value : "claude";
+  return value === "codex" || value === "agy" ? value : "claude";
 }
 
 const SESSION_DEFAULT_SEED: SessionDefaults = {
@@ -77,42 +72,6 @@ interface ApprovalRow {
   status: ApprovalRecord["status"];
   expires_at: number;
   message_id: number | null;
-}
-
-interface PlanRunRow {
-  id: string;
-  session_id: string;
-  instruction: string;
-  plan_text: string;
-  status: PlanRunRecord["status"];
-  reviewer_verdict: PlanRunRecord["reviewerVerdict"];
-  review_text: string | null;
-  codex_result: string | null;
-  attempt_count: number;
-  created_at: number;
-  updated_at: number;
-  completed_at: number | null;
-}
-
-interface PlanCriterionRow {
-  id: string;
-  plan_run_id: string;
-  ordinal: number;
-  description: string;
-  status: PlanCriterionStatus;
-  evidence_summary: string | null;
-  updated_at: number;
-}
-
-interface PlanEvidenceRow {
-  id: string;
-  plan_run_id: string;
-  criterion_id: string | null;
-  kind: PlanEvidenceRecord["kind"];
-  source: PlanEvidenceRecord["source"];
-  summary: string;
-  details_json: string;
-  created_at: number;
 }
 
 export class StateStore {
@@ -186,52 +145,11 @@ export class StateStore {
         FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
 
-      CREATE TABLE IF NOT EXISTS plan_runs (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        instruction TEXT NOT NULL,
-        plan_text TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL,
-        reviewer_verdict TEXT,
-        review_text TEXT,
-        codex_result TEXT,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        completed_at INTEGER,
-        FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS plan_runs_session_idx
-        ON plan_runs(session_id, created_at DESC);
-
-      CREATE TABLE IF NOT EXISTS plan_criteria (
-        id TEXT PRIMARY KEY,
-        plan_run_id TEXT NOT NULL,
-        ordinal INTEGER NOT NULL,
-        description TEXT NOT NULL,
-        status TEXT NOT NULL,
-        evidence_summary TEXT,
-        updated_at INTEGER NOT NULL,
-        UNIQUE(plan_run_id, ordinal),
-        FOREIGN KEY(plan_run_id) REFERENCES plan_runs(id) ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS plan_evidence (
-        id TEXT PRIMARY KEY,
-        plan_run_id TEXT NOT NULL,
-        criterion_id TEXT,
-        kind TEXT NOT NULL,
-        source TEXT NOT NULL,
-        summary TEXT NOT NULL,
-        details_json TEXT NOT NULL DEFAULT '{}',
-        created_at INTEGER NOT NULL,
-        FOREIGN KEY(plan_run_id) REFERENCES plan_runs(id) ON DELETE CASCADE,
-        FOREIGN KEY(criterion_id) REFERENCES plan_criteria(id) ON DELETE SET NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS plan_evidence_run_idx
-        ON plan_evidence(plan_run_id, created_at);
+    `);
+    this.db.exec(`
+      DROP TABLE IF EXISTS plan_evidence;
+      DROP TABLE IF EXISTS plan_criteria;
+      DROP TABLE IF EXISTS plan_runs;
     `);
     const sessionColumns = this.db
       .prepare("PRAGMA table_info(sessions)")
@@ -275,12 +193,16 @@ export class StateStore {
     if (!sessionColumns.some((column) => column.name === "agy_conversation_id")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN agy_conversation_id TEXT");
     }
-    const planRunColumns = this.db
-      .prepare("PRAGMA table_info(plan_runs)")
-      .all() as Array<{ name: string }>;
-    if (!planRunColumns.some((column) => column.name === "attempt_count")) {
-      this.db.exec("ALTER TABLE plan_runs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0");
-    }
+    this.db.exec(`
+      UPDATE sessions
+      SET provider = 'claude'
+      WHERE provider IS NULL OR provider NOT IN ('claude', 'codex', 'agy');
+
+      UPDATE app_settings
+      SET value = 'claude'
+      WHERE key = 'default.provider'
+        AND value NOT IN ('claude', 'codex', 'agy');
+    `);
   }
 
   syncProjects(projects: ProjectConfig[]): void {
@@ -463,176 +385,7 @@ export class StateStore {
       SET status = 'expired'
       WHERE status = 'pending'
     `).run();
-    this.db.prepare(`
-      UPDATE plan_runs
-      SET status = 'interrupted', updated_at = ?, completed_at = ?
-      WHERE status IN ('planning', 'awaiting_approval', 'executing', 'reviewing')
-    `).run(Date.now(), Date.now());
     return result.changes;
-  }
-
-  createPlanRun(run: PlanRunRecord): void {
-    this.db.prepare(`
-      INSERT INTO plan_runs(
-        id, session_id, instruction, plan_text, status, reviewer_verdict,
-        review_text, codex_result, attempt_count, created_at, updated_at, completed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      run.id,
-      run.sessionId,
-      redactSensitiveText(run.instruction),
-      redactSensitiveText(run.planText),
-      run.status,
-      run.reviewerVerdict,
-      run.reviewText ? redactSensitiveText(run.reviewText) : null,
-      run.codexResult ? redactSensitiveText(run.codexResult) : null,
-      run.attemptCount,
-      run.createdAt,
-      run.updatedAt,
-      run.completedAt
-    );
-  }
-
-  getPlanRun(id: string): PlanRunRecord | undefined {
-    const row = this.db.prepare("SELECT * FROM plan_runs WHERE id = ?").get(id) as
-      | PlanRunRow
-      | undefined;
-    return row ? this.mapPlanRun(row) : undefined;
-  }
-
-  getLatestPlanRunForSession(sessionId: string): PlanRunRecord | undefined {
-    const row = this.db.prepare(`
-      SELECT * FROM plan_runs
-      WHERE session_id = ?
-      ORDER BY created_at DESC
-      LIMIT 1
-    `).get(sessionId) as PlanRunRow | undefined;
-    return row ? this.mapPlanRun(row) : undefined;
-  }
-
-  updatePlanRun(
-    id: string,
-    fields: Partial<Pick<
-      PlanRunRecord,
-      "planText" | "status" | "reviewerVerdict" | "reviewText" | "codexResult" | "attemptCount" | "completedAt"
-    >>
-  ): void {
-    const entries: Array<[string, unknown]> = [];
-    if ("planText" in fields) {
-      entries.push([
-        "plan_text",
-        fields.planText === undefined ? undefined : redactSensitiveText(fields.planText)
-      ]);
-    }
-    if ("status" in fields) entries.push(["status", fields.status]);
-    if ("reviewerVerdict" in fields) {
-      entries.push(["reviewer_verdict", fields.reviewerVerdict]);
-    }
-    if ("reviewText" in fields) {
-      entries.push([
-        "review_text",
-        fields.reviewText ? redactSensitiveText(fields.reviewText) : fields.reviewText
-      ]);
-    }
-    if ("codexResult" in fields) {
-      entries.push([
-        "codex_result",
-        fields.codexResult ? redactSensitiveText(fields.codexResult) : fields.codexResult
-      ]);
-    }
-    if ("attemptCount" in fields) entries.push(["attempt_count", fields.attemptCount]);
-    if ("completedAt" in fields) entries.push(["completed_at", fields.completedAt]);
-    if (entries.length === 0) return;
-
-    entries.push(["updated_at", Date.now()]);
-    const assignments = entries.map(([column]) => `${column} = ?`).join(", ");
-    this.db.prepare(`UPDATE plan_runs SET ${assignments} WHERE id = ?`).run(
-      ...entries.map(([, value]) => value),
-      id
-    );
-  }
-
-  replacePlanCriteria(planRunId: string, descriptions: string[]): PlanCriterionRecord[] {
-    const now = Date.now();
-    const insert = this.db.prepare(`
-      INSERT INTO plan_criteria(
-        id, plan_run_id, ordinal, description, status, evidence_summary, updated_at
-      ) VALUES (?, ?, ?, ?, 'pending', NULL, ?)
-    `);
-    this.db.transaction(() => {
-      this.db.prepare("DELETE FROM plan_criteria WHERE plan_run_id = ?").run(planRunId);
-      descriptions.forEach((description, index) => {
-        insert.run(
-          `${planRunId}:criterion:${index + 1}`,
-          planRunId,
-          index + 1,
-          redactSensitiveText(description),
-          now
-        );
-      });
-    })();
-    return this.listPlanCriteria(planRunId);
-  }
-
-  listPlanCriteria(planRunId: string): PlanCriterionRecord[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM plan_criteria
-      WHERE plan_run_id = ?
-      ORDER BY ordinal
-    `).all(planRunId) as PlanCriterionRow[];
-    return rows.map((row) => this.mapPlanCriterion(row));
-  }
-
-  updatePlanCriterion(
-    id: string,
-    status: PlanCriterionStatus,
-    evidenceSummary: string | null
-  ): void {
-    this.db.prepare(`
-      UPDATE plan_criteria
-      SET status = ?, evidence_summary = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
-      status,
-      evidenceSummary ? redactSensitiveText(evidenceSummary) : evidenceSummary,
-      Date.now(),
-      id
-    );
-  }
-
-  addPlanEvidence(evidence: PlanEvidenceRecord): void {
-    this.db.prepare(`
-      INSERT INTO plan_evidence(
-        id, plan_run_id, criterion_id, kind, source, summary, details_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      evidence.id,
-      evidence.planRunId,
-      evidence.criterionId,
-      evidence.kind,
-      evidence.source,
-      redactSensitiveText(evidence.summary),
-      JSON.stringify(redactSensitiveValue(evidence.details)),
-      evidence.createdAt
-    );
-  }
-
-  listPlanEvidence(planRunId: string): PlanEvidenceRecord[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM plan_evidence
-      WHERE plan_run_id = ?
-      ORDER BY created_at, id
-    `).all(planRunId) as PlanEvidenceRow[];
-    return rows.map((row) => ({
-      id: row.id,
-      planRunId: row.plan_run_id,
-      criterionId: row.criterion_id,
-      kind: row.kind,
-      source: row.source,
-      summary: row.summary,
-      details: this.parseDetails(row.details_json),
-      createdAt: row.created_at
-    }));
   }
 
   createApproval(approval: ApprovalRecord): void {
@@ -711,35 +464,6 @@ export class StateStore {
     };
   }
 
-  private mapPlanRun(row: PlanRunRow): PlanRunRecord {
-    return {
-      id: row.id,
-      sessionId: row.session_id,
-      instruction: row.instruction,
-      planText: row.plan_text,
-      status: row.status,
-      reviewerVerdict: row.reviewer_verdict,
-      reviewText: row.review_text,
-      codexResult: row.codex_result,
-      attemptCount: row.attempt_count,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      completedAt: row.completed_at
-    };
-  }
-
-  private mapPlanCriterion(row: PlanCriterionRow): PlanCriterionRecord {
-    return {
-      id: row.id,
-      planRunId: row.plan_run_id,
-      ordinal: row.ordinal,
-      description: row.description,
-      status: row.status,
-      evidenceSummary: row.evidence_summary,
-      updatedAt: row.updated_at
-    };
-  }
-
   private parseUsageSnapshot(value: string | null): UsageSnapshot | null {
     if (!value) return null;
     try {
@@ -749,14 +473,4 @@ export class StateStore {
     }
   }
 
-  private parseDetails(value: string): Record<string, unknown> {
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? parsed as Record<string, unknown>
-        : {};
-    } catch {
-      return {};
-    }
-  }
 }

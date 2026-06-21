@@ -53,6 +53,7 @@ interface PendingStart {
   codexModel?: string | undefined;
   codexReasoning?: string | undefined;
   agyModel?: string | undefined;
+  handoffSummary?: string | undefined;
   leanMode?: boolean | undefined;
 }
 
@@ -119,12 +120,6 @@ export function formatSessionStatus(
         `agy 모델: ${agyModelLabel(catalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`,
         "MCP: ~/.gemini/config/mcp_config.json"
       ]
-    : session.provider === "local-llm"
-    ? [
-        "제공자: 로컬LLM (goose + Ollama)",
-        "모델: qwen3.6:35b-a3b",
-        "MCP: ~/.config/goose/config.yaml (notion, google-calendar)"
-      ]
     : [
         "제공자: Claude",
         `모델: ${modelLabel(catalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`,
@@ -137,6 +132,7 @@ export function formatSessionStatus(
     `저장 상태: ${session.status}`,
     `프로젝트: ${session.projectName}`,
     ...providerLines,
+    `권한 모드: ${session.permissionMode}`,
     `lean: ${session.leanMode ? "on" : "off"}`,
     ...(session.goalCondition ? [`목표(자동 진행): ${session.goalCondition}`] : []),
     `마지막 상태 변경: ${formatTimestamp(session.updatedAt)}`
@@ -148,7 +144,6 @@ export function formatSessionStatus(
 function providerDisplayLabel(provider: ProviderKind): string {
   if (provider === "codex") return "Codex";
   if (provider === "agy") return "agy";
-  if (provider === "local-llm") return "로컬LLM";
   return "Claude";
 }
 
@@ -158,15 +153,11 @@ function defaultsKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): Key
     ? codexModelLabel(catalog, defaults.codexModel)
     : defaults.provider === "agy"
     ? agyModelLabel(catalog, defaults.agyModel)
-    : defaults.provider === "local-llm"
-    ? "qwen3 (Ollama)"
     : modelLabel(catalog, defaults.claudeModel);
   const fourth = defaults.provider === "codex"
     ? `💭 추론: ${codexReasoningLabel(defaults.codexReasoning)}`
     : defaults.provider === "agy"
     ? "💭 추론: 모델 내장"
-    : defaults.provider === "local-llm"
-    ? "💭 Ollama 로컬"
     : `💭 thinking: ${defaults.thinking === "off" ? "off" : "on"}`;
   return new Keyboard()
     .text("⚙️ 새 세션 기본값")
@@ -181,9 +172,6 @@ function defaultsKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): Key
 // 기본값 패널의 모델 선택용 인라인 키보드(제공자별). setm:<provider>:<id>
 function defaultsModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  if (defaults.provider === "local-llm") {
-    return new InlineKeyboard().text("qwen3.6:35b-a3b (.env LOCAL_LLM_MODEL로 변경)", "noop:local-llm");
-  }
   const options = defaults.provider === "codex"
     ? catalog.codexModels.map((option) => ({ id: option.id, label: option.label }))
     : defaults.provider === "agy"
@@ -203,9 +191,6 @@ function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): stri
   if (defaults.provider === "agy") {
     return `agy · ${agyModelLabel(catalog, defaults.agyModel)}`;
   }
-  if (defaults.provider === "local-llm") {
-    return "로컬LLM · qwen3 (Ollama)";
-  }
   return `Claude · ${modelLabel(catalog, defaults.claudeModel)} · thinking ${defaults.thinking === "off" ? "off" : "on"}`;
 }
 
@@ -223,12 +208,6 @@ function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<PendingSt
     return {
       provider: "agy",
       agyModel: defaults.agyModel,
-      leanMode: true
-    };
-  }
-  if (defaults.provider === "local-llm") {
-    return {
-      provider: "local-llm",
       leanMode: true
     };
   }
@@ -298,14 +277,13 @@ function agyModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
   return keyboard;
 }
 
-// /model에서 제공자를 고르는 인라인 키보드. mprov:claude|codex|agy|local-llm
+// /model에서 제공자를 고르는 인라인 키보드. mprov:claude|codex|agy
 function providerKeyboard(current: ProviderKind): InlineKeyboard {
   return new InlineKeyboard()
     .text(`${current === "claude" ? "✅ " : ""}Claude`, "mprov:claude")
     .text(`${current === "codex" ? "✅ " : ""}Codex`, "mprov:codex")
     .row()
-    .text(`${current === "agy" ? "✅ " : ""}agy`, "mprov:agy")
-    .text(`${current === "local-llm" ? "✅ " : ""}로컬LLM`, "mprov:local-llm");
+    .text(`${current === "agy" ? "✅ " : ""}agy`, "mprov:agy");
 }
 
 // 기본값 패널: 새 세션 기본 제공자 선택. 콜백 dprov:<provider> (mprov:과 의미 다름 — 요약 인계 없음)
@@ -313,8 +291,7 @@ function defaultsProviderKeyboard(current: ProviderKind): InlineKeyboard {
   const options: Array<[ProviderKind, string]> = [
     ["claude", "Claude"],
     ["codex", "Codex"],
-    ["agy", "agy"],
-    ["local-llm", "로컬LLM"]
+    ["agy", "agy"]
   ];
   const keyboard = new InlineKeyboard();
   for (const [index, [kind, label]] of options.entries()) {
@@ -380,14 +357,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       : {}),
     ...(config.agyExecutable
       ? { agyExecutable: config.agyExecutable }
-      : {}),
-    ...(config.gooseExecutable
-      ? { gooseExecutable: config.gooseExecutable }
-      : {}),
-    localLlmMcpServers: config.localLlmMcpServers,
-    localLlmModel: config.localLlmModel,
-    localLlmProvider: config.localLlmProvider,
-    ollamaHost: config.ollamaHost
+      : {})
   });
   const pendingStarts = new Map<string, PendingStart>();
   const pendingProjectPaths = new Set<string>();
@@ -486,7 +456,8 @@ export function createBot(config: AppConfig, store: StateStore) {
         pending.model ?? null, pending.thinking ?? null,
         pending.claudeEffort ?? null, pending.leanMode ?? true,
         pending.provider ?? "claude", pending.codexModel ?? null,
-        pending.codexReasoning ?? null, pending.agyModel ?? null
+        pending.codexReasoning ?? null, pending.agyModel ?? null,
+        pending.handoffSummary ?? null
       );
       await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;
@@ -504,7 +475,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
 
     if (!sessions.resume(existing, fileMessage)) {
-      await (ctx as { reply: (text: string) => Promise<unknown> }).reply("이 세션은 이미 실행 중이거나 Claude 세션 ID가 없습니다.");
+      await (ctx as { reply: (text: string) => Promise<unknown> }).reply("이 세션은 이미 실행 중이거나 이어 갈 대화 문맥이 없습니다.");
       return;
     }
     await (ctx as { reply: (text: string) => Promise<unknown> }).reply(`파일 저장: ${savedPath}\n파일 정보로 후속 작업을 시작했습니다.`);
@@ -738,14 +709,18 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     if (await permissions.handleTextInput(session.id, prompt)) {
-      await ctx.reply("대기 중인 Claude 질문에 답변을 전달했습니다.");
+      await ctx.reply("대기 중인 질문에 답변을 전달했습니다.");
       return;
     }
     if (!sessions.steer(session.id, prompt)) {
       await ctx.reply("현재 실행 중인 작업이 없습니다. 일반 메시지로 후속 작업을 시작하세요.");
       return;
     }
-    await ctx.reply("현재 실행 중인 작업에 즉시 반영할 메시지를 보냈습니다.");
+    await ctx.reply(
+      session.provider === "claude"
+        ? "현재 실행 중인 작업에 즉시 반영할 메시지를 보냈습니다."
+        : "현재 턴이 끝나는 즉시 최우선으로 반영할 메시지를 보냈습니다."
+    );
   });
 
   bot.command("next", async (ctx) => {
@@ -764,13 +739,22 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("현재 작업이 끝난 상태라 후속 작업을 바로 시작했습니다.");
       return;
     }
-    await ctx.reply("후속 작업을 예약할 수 없습니다. Claude 세션 ID가 아직 생성되지 않았습니다.");
+    await ctx.reply("후속 작업을 예약할 수 없습니다. 이어 갈 대화 문맥이 아직 생성되지 않았습니다.");
   });
 
   bot.command("fork", async (ctx) => {
     const topicId = ctx.message?.message_thread_id;
     const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
-    if (!session?.sdkSessionId) {
+    if (!session) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const hasContext = session.provider === "claude"
+      ? !!session.sdkSessionId
+      : session.provider === "codex"
+      ? !!session.codexThreadId
+      : !!session.agyConversationId;
+    if (!hasContext || sessions.isActive(session.id)) {
       await ctx.reply("분기할 수 있는 완료 세션이 없습니다.");
       return;
     }
@@ -779,12 +763,29 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("프로젝트 설정을 찾을 수 없습니다.");
       return;
     }
+    let handoffSummary: string | undefined;
+    if (session.provider !== "claude") {
+      await ctx.reply("현재 대화 문맥을 새 분기로 인계하기 위해 요약하는 중입니다…");
+      const summary = await sessions.prepareFork(session);
+      if (!summary) {
+        await ctx.reply("분기용 문맥 요약을 만들 수 없습니다.");
+        return;
+      }
+      handoffSummary = summary;
+    }
     pendingStarts.set(pendingStartKey(config.allowedUserId, topicId), {
       project,
-      resumeSessionId: session.sdkSessionId,
-      forkSession: true,
+      ...(session.provider === "claude" && session.sdkSessionId
+        ? { resumeSessionId: session.sdkSessionId, forkSession: true }
+        : {}),
+      provider: session.provider,
       model: session.model ?? undefined,
       thinking: session.thinking ?? undefined,
+      claudeEffort: session.claudeEffort ?? undefined,
+      codexModel: session.codexModel ?? undefined,
+      codexReasoning: session.codexReasoning ?? undefined,
+      agyModel: session.agyModel ?? undefined,
+      ...(handoffSummary ? { handoffSummary } : {}),
       leanMode: session.leanMode
     });
     await ctx.reply("새 분기에서 실행할 지시를 입력하세요.");
@@ -797,8 +798,13 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("세션 토픽 안에서 사용하세요.");
       return;
     }
-    if (!session.sdkSessionId) {
-      await ctx.reply("아직 압축할 Claude 세션 문맥이 없습니다.");
+    const hasContext = session.provider === "claude"
+      ? !!session.sdkSessionId
+      : session.provider === "codex"
+      ? !!session.codexThreadId
+      : !!session.agyConversationId;
+    if (!hasContext) {
+      await ctx.reply(`아직 압축할 ${providerDisplayLabel(session.provider)} 세션 문맥이 없습니다.`);
       return;
     }
     if (!sessions.compact(session, ctx.match)) {
@@ -808,7 +814,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply(
       ctx.match.trim()
         ? `컨텍스트 압축을 시작했습니다.\n보존 초점: ${ctx.match.trim().slice(0, 500)}`
-        : "컨텍스트 압축을 시작했습니다."
+        : `컨텍스트 압축을 시작했습니다. ${providerDisplayLabel(session.provider)} 문맥을 압축한 뒤 새 대화로 이어갑니다.`
     );
   });
 
@@ -850,7 +856,10 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
     const mode = parseMode(ctx.match);
     if (!mode) {
-      await ctx.reply(`현재 모드: ${session.permissionMode}\n사용 가능: default, acceptEdits, plan, dontAsk, auto`);
+      await ctx.reply(
+        `현재 모드: ${session.permissionMode}\n사용 가능: default, acceptEdits, plan, dontAsk, auto\n`
+        + "Claude는 텔레그램 승인 브로커를 사용하고, Codex·agy는 같은 모드를 샌드박스와 실행 지침으로 적용합니다."
+      );
       return;
     }
     if (sessions.isActive(session.id)) {
@@ -861,7 +870,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply(`다음 실행부터 권한 모드를 ${mode}(으)로 사용합니다.`);
   });
 
-  // /model: 제공자(Claude/Codex)와 모델을 확인·변경한다. 제공자 전환은 버튼(mprov:)으로만
+  // /model: 제공자(Claude/Codex/agy)와 모델을 확인·변경한다. 제공자 전환은 버튼(mprov:)으로만
   // 하며, 전환 시 직전 provider가 만든 요약을 새 provider에 인계한다(SessionManager.switchProvider).
   bot.command("model", async (ctx) => {
     const topicId = ctx.message?.message_thread_id;
@@ -876,15 +885,11 @@ export function createBot(config: AppConfig, store: StateStore) {
         ? `현재: Codex · ${codexModelLabel(config.modelCatalog, session.codexModel ?? DEFAULT_CODEX_MODEL)}`
         : session.provider === "agy"
         ? `현재: agy · ${agyModelLabel(config.modelCatalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`
-        : session.provider === "local-llm"
-        ? "현재: 로컬LLM · qwen3 (Ollama)"
         : `현재: Claude · ${modelLabel(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`;
       const modelBoard = session.provider === "codex"
         ? codexModelKeyboard(config.modelCatalog)
         : session.provider === "agy"
         ? agyModelKeyboard(config.modelCatalog)
-        : session.provider === "local-llm"
-        ? new InlineKeyboard().text("qwen3.6:35b-a3b (Ollama)", "noop:local-llm")
         : modelKeyboard(config.modelCatalog);
       await ctx.reply(
         `${current}\n제공자를 바꾸려면 아래에서 선택하세요(직전 대화 요약이 새 제공자로 인계됩니다).`,
@@ -921,10 +926,6 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply(`다음 실행부터 agy ${agyModelLabel(config.modelCatalog, agyModel)} 모델을 사용합니다.`);
       return;
     }
-    if (session.provider === "local-llm") {
-      await ctx.reply("로컬LLM 모델은 .env의 LOCAL_LLM_MODEL로 설정합니다. /model 버튼은 표시 전용입니다.");
-      return;
-    }
     const model = resolveModel(config.modelCatalog, input);
     if (!model) {
       await ctx.reply("지원하지 않는 모델입니다. /model 버튼에 표시되는 모델 ID나 별칭을 사용하세요.");
@@ -943,6 +944,10 @@ export function createBot(config: AppConfig, store: StateStore) {
     const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
     if (!session) {
       await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    if (session.provider !== "claude") {
+      await ctx.reply("/thinking은 Claude 전용입니다. Codex는 /effort, agy는 /model을 사용하세요.");
       return;
     }
     const input = ctx.match.trim().toLowerCase();
@@ -976,6 +981,10 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("세션 토픽 안에서 사용하세요.");
       return;
     }
+    if (session.provider !== "claude") {
+      await ctx.reply("/power는 Claude 전용입니다. Codex는 /effort, agy는 /model을 사용하세요.");
+      return;
+    }
     const input = ctx.match.trim().toLowerCase();
     if (!input) {
       await ctx.reply(
@@ -1005,6 +1014,10 @@ export function createBot(config: AppConfig, store: StateStore) {
     const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
     if (!session) {
       await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    if (session.provider !== "codex") {
+      await ctx.reply("/effort는 Codex 전용입니다. Claude는 /power, agy는 /model을 사용하세요.");
       return;
     }
     const input = ctx.match.trim().toLowerCase();
@@ -1271,7 +1284,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   // 걸릴 수 있어 먼저 안내한다).
   bot.callbackQuery(/^mprov:/, async (ctx) => {
     const target = ctx.callbackQuery.data.slice("mprov:".length) as ProviderKind;
-    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "local-llm") {
+    if (target !== "claude" && target !== "codex" && target !== "agy") {
       await ctx.answerCallbackQuery({ text: "알 수 없는 제공자입니다.", show_alert: true });
       return;
     }
@@ -1301,8 +1314,6 @@ export function createBot(config: AppConfig, store: StateStore) {
       ? `Codex · ${codexModelLabel(config.modelCatalog, updated?.codexModel ?? DEFAULT_CODEX_MODEL)}`
       : target === "agy"
       ? `agy · ${agyModelLabel(config.modelCatalog, updated?.agyModel ?? DEFAULT_AGY_MODEL)}`
-      : target === "local-llm"
-      ? "로컬LLM · qwen3 (Ollama)"
       : `Claude · ${modelLabel(config.modelCatalog, updated?.model ?? DEFAULT_CLAUDE_MODEL)}`;
     await ctx.reply(
       `제공자를 ${label}로 전환했습니다. 다음 메시지부터 새 제공자가 직전 작업 요약을 이어받아 진행합니다.`
@@ -1312,7 +1323,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   // 기본값 패널 제공자 선택. mprov:(세션 전환·요약 인계)와 달리 새 세션 기본값만 바꾼다.
   bot.callbackQuery(/^dprov:/, async (ctx) => {
     const target = ctx.callbackQuery.data.slice("dprov:".length) as ProviderKind;
-    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "local-llm") {
+    if (target !== "claude" && target !== "codex" && target !== "agy") {
       await ctx.answerCallbackQuery();
       return;
     }
@@ -1546,10 +1557,6 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   bot.hears(/^🧠 모델/, async (ctx) => {
     const defaults = store.getSessionDefaults();
-    if (defaults.provider === "local-llm") {
-      await ctx.reply("로컬LLM 모델은 .env의 LOCAL_LLM_MODEL로 설정합니다. 현재 모델: qwen3.6:35b-a3b");
-      return;
-    }
     await ctx.reply(
       `${providerDisplayLabel(defaults.provider)} 모델을 선택하세요.`,
       { reply_markup: defaultsModelKeyboard(defaults, config.modelCatalog) }
@@ -1625,7 +1632,8 @@ export function createBot(config: AppConfig, store: StateStore) {
         pending.provider ?? "claude",
         pending.codexModel ?? null,
         pending.codexReasoning ?? null,
-        pending.agyModel ?? null
+        pending.agyModel ?? null,
+        pending.handoffSummary ?? null
       );
       await ctx.reply(`세션을 시작했습니다.\n${topicLink(config.chatId, session.topicId)}`);
       return;
@@ -1643,7 +1651,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     if (!sessions.resume(existing, ctx.message.text)) {
-      await ctx.reply("이 세션은 이미 실행 중이거나 아직 Claude 세션 ID가 없습니다.");
+      await ctx.reply("이 세션은 이미 실행 중이거나 아직 이어 갈 대화 문맥이 없습니다.");
       return;
     }
     await ctx.reply("후속 작업을 시작했습니다.");

@@ -24,16 +24,18 @@ import {
   mcpServerName
 } from "./mcp-policy.js";
 import {
-  loadClaudeConnectors,
-  loadMergedConnectors,
-  syncAgyMcpConfig,
-  syncGooseMcpConfig
+  loadClaudeConnectors
 } from "./connectors.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { StateStore } from "./store.js";
 import { StreamRenderer } from "./stream-renderer.js";
 import { safeErrorMessage } from "./telegram-transport.js";
 import { TokenPool } from "./token-pool.js";
+import {
+  sharedMemoryBridgePath,
+  sharedResourceGuidePath,
+  syncSharedResources
+} from "./resource-sync.js";
 import {
   agyModelLabel,
   codexModelLabel,
@@ -129,6 +131,38 @@ export function buildPublicProgressInstructions(): string {
   ].join("\n");
 }
 
+export function buildPermissionModeInstructions(mode: SessionRecord["permissionMode"]): string {
+  if (mode === "plan") {
+    return "현재 권한 모드는 plan이다. 파일이나 외부 상태를 변경하지 말고 조사와 실행 계획만 제시한다.";
+  }
+  if (mode === "default") {
+    return "현재 권한 모드는 default이다. 읽기와 안전한 진단은 자율 수행하고, 파괴적 변경·외부 전송·권한 확대가 필요하면 멈추고 사용자 승인을 요청한다.";
+  }
+  if (mode === "acceptEdits") {
+    return "현재 권한 모드는 acceptEdits이다. 프로젝트 내부 파일 편집과 검증은 자율 수행하되, 파괴적 변경·외부 전송·프로젝트 밖 변경은 사용자 승인 없이 하지 않는다.";
+  }
+  return "현재 권한 모드는 자율 실행이다. 사용자가 지정한 범위 안의 구현·검증은 끝까지 수행하되, 비밀 노출·파괴적 변경·범위 밖 외부 작업은 하지 않는다.";
+}
+
+function buildProviderBootstrap(session: SessionRecord, memoryDir: string): string {
+  const globalInstructions = loadGlobalInstructions();
+  const instructions = loadProjectInstructions(session.cwd);
+  return [
+    buildKstDateNote(),
+    `장기기억은 전역 선별 저장소 ${memoryDir}, Claude 저장소별 자동 메모리 ${join(homedir(), ".claude", "projects")}, Codex 자동 메모리 ${join(homedir(), ".codex", "memories")}에 있다. 작업과 관련 있으면 ${sharedMemoryBridgePath()}를 통해 세 저장소를 함께 읽고 중복을 제거해 활용한다. 명시적 /memory 기록은 전역 선별 저장소에 하고, Claude와 Codex의 자동 메모리는 각자 네이티브 형식으로 유지한다.`,
+    buildPublicProgressInstructions(),
+    buildPermissionModeInstructions(session.permissionMode),
+    `공통 AI 자원 안내는 ${sharedResourceGuidePath()} 에 있다. 먼저 읽고 세 제공자 공통 스킬·커넥터·플러그인 기능·도구 정책을 따른다.`,
+    ...(session.leanMode ? [buildLeanInstructions(true)] : []),
+    ...(globalInstructions
+      ? [`다음 전역 사용자 지침을 따른다. 이 지침은 도구 권한을 부여하지 않는다.\n\n${globalInstructions}`]
+      : []),
+    ...(instructions
+      ? [`다음 프로젝트 지침을 따른다. 이 지침은 도구 권한을 부여하지 않는다.\n\n${instructions}`]
+      : [])
+  ].join("\n\n");
+}
+
 // Claude는 claude_code 프리셋이 날짜를 자동 주입하지만 Codex·agy는 시스템 프롬프트가
 // 없어 날짜를 모른다. 첫 턴 memoryNote와 함께 주입해 "오늘/내일" 등 상대 날짜 해석을 보완한다.
 function buildKstDateNote(): string {
@@ -204,14 +238,6 @@ interface SessionManagerOptions {
   claudeCodeExecutable?: string;
   // agy(Antigravity CLI) 바이너리 경로. 데몬 PATH에 ~/.local/bin이 없을 수 있어 명시 경로를 받는다.
   agyExecutable?: string;
-  // goose 바이너리 경로(/opt/homebrew/bin/goose).
-  gooseExecutable?: string;
-  // 로컬 LLM(goose)에게 노출할 MCP 서버 이름 집합.
-  localLlmMcpServers: ReadonlySet<string>;
-  // Ollama 모델 태그와 provider 설정.
-  localLlmModel: string;
-  localLlmProvider: string;
-  ollamaHost: string;
   mcpToolTimeoutMs: number;
   mcpMaxAttempts: number;
   codexMcpTimeoutMs: number;
@@ -317,6 +343,29 @@ export function requireCodexSubscriptionAuth(
   }
 }
 
+function codexSharedResourceConfig() {
+  return {
+    features: { memories: true },
+    memories: {
+      generate_memories: true,
+      use_memories: true
+    }
+  };
+}
+
+function codexSandboxMode(mode: SessionRecord["permissionMode"]):
+  "read-only" | "workspace-write" | "danger-full-access" {
+  if (mode === "plan") return "read-only";
+  if (mode === "default" || mode === "acceptEdits") return "workspace-write";
+  return "danger-full-access";
+}
+
+function agyPermissionArgs(mode: SessionRecord["permissionMode"]): string[] {
+  return mode === "auto" || mode === "dontAsk"
+    ? ["--dangerously-skip-permissions"]
+    : ["--sandbox", "--dangerously-skip-permissions"];
+}
+
 export class StreamingTextCollector {
   private readonly blocks = new Map<number, string>();
 
@@ -344,6 +393,16 @@ export class StreamingTextCollector {
 export function buildCompactCommand(focus?: string): string {
   const clean = focus?.replace(/\s+/g, " ").trim().slice(0, 500);
   return clean ? `/compact ${clean}` : "/compact";
+}
+
+export function buildRolloverSummaryPrompt(focus?: string): string {
+  const clean = focus?.replace(/\s+/g, " ").trim().slice(0, 500);
+  return [
+    "현재 대화와 작업 문맥을 새 세션이 그대로 이어받을 수 있도록 한국어 인계 요약으로 압축하십시오.",
+    "목표, 사용자 의도, 결정사항, 수정 파일, 실행한 검증, 현재 상태, 남은 일, 위험과 주의점을 포함하십시오.",
+    "추측하지 말고 실제 확인된 내용만 쓰며 요약 본문만 출력하십시오.",
+    ...(clean ? [`특히 다음 내용을 보존하십시오: ${clean}`] : [])
+  ].join("\n");
 }
 
 /** /goal 자동 진행 턴에 전달할 작업 프롬프트. reason은 직전 평가에서 무엇이 남았는지. */
@@ -408,6 +467,25 @@ export function loadProjectInstructions(cwd: string): string {
       if (content) sections.push(`[${filename}]\n${content.slice(0, 100_000)}`);
     } catch {
       // Project instruction files are optional.
+    }
+  }
+  return sections.join("\n\n");
+}
+
+export function loadGlobalInstructions(): string {
+  const sections: string[] = [];
+  const seen = new Set<string>();
+  for (const [label, path] of [
+    ["CLAUDE.md", join(homedir(), ".claude", "CLAUDE.md")],
+    ["AGENTS.md", join(homedir(), ".codex", "AGENTS.md")]
+  ] as const) {
+    try {
+      const content = readFileSync(path, "utf8").trim();
+      if (!content || seen.has(content)) continue;
+      seen.add(content);
+      sections.push(`[${label}]\n${content.slice(0, 100_000)}`);
+    } catch {
+      // Global instruction files are optional.
     }
   }
   return sections.join("\n\n");
@@ -734,7 +812,8 @@ export class SessionManager {
     provider: ProviderKind = "claude",
     codexModel?: string | null,
     codexReasoning?: string | null,
-    agyModel?: string | null
+    agyModel?: string | null,
+    handoffSummary?: string | null
   ): SessionRecord {
     const now = Date.now();
     const session: SessionRecord = {
@@ -756,7 +835,7 @@ export class SessionManager {
       codexThreadId: null,
       agyModel: agyModel ?? null,
       agyConversationId: null,
-      handoffSummary: null,
+      handoffSummary: handoffSummary ?? null,
       goalCondition: null,
       leanMode,
       usageSnapshot: null,
@@ -780,7 +859,6 @@ export class SessionManager {
     // 맥락에서 요약을 받아 시작하므로 재개 핸들 없이도 진행한다.
     const canResume = session.provider === "codex"
       || session.provider === "agy"
-      || session.provider === "local-llm"
       || !!session.sdkSessionId
       || !!session.handoffSummary;
     if (!canResume) return false;
@@ -796,22 +874,30 @@ export class SessionManager {
   }
 
   compact(session: SessionRecord, focus?: string): boolean {
-    if (!session.sdkSessionId || this.active.has(session.id)) return false;
+    if (!this.resumeHandle(session) || this.active.has(session.id)) return false;
     this.store.updateSession(session.id, { status: "queued" });
     this.enqueue({
       session: this.store.getSession(session.id) ?? session,
-      prompt: buildCompactCommand(focus),
-      resumeSessionId: session.sdkSessionId,
+      prompt: session.provider === "claude"
+        ? buildCompactCommand(focus)
+        : buildRolloverSummaryPrompt(focus),
+      ...(session.provider === "claude" && session.sdkSessionId
+        ? { resumeSessionId: session.sdkSessionId }
+        : {}),
       operation: "compact"
     });
     return true;
+  }
+
+  async prepareFork(session: SessionRecord): Promise<string | null> {
+    if (this.active.has(session.id) || !this.resumeHandle(session)) return null;
+    return this.summarizeForHandoff(session);
   }
 
   /** 제공자별 "이어 갈 수 있는 재개 핸들". null이면 아직 한 번도 실행되지 않은 세션이다. */
   private resumeHandle(session: SessionRecord): string | null {
     if (session.provider === "codex") return session.codexThreadId;
     if (session.provider === "agy") return session.agyConversationId;
-    if (session.provider === "local-llm") return "stateless";
     return session.sdkSessionId;
   }
 
@@ -1014,12 +1100,6 @@ export class SessionManager {
         agyConversationId: null,
         ...(summary ? { handoffSummary: summary } : {})
       });
-    } else if (target === "local-llm") {
-      // 대상=local-llm(goose): 무상태 실행이라 재개 핸들 불필요.
-      this.store.updateSession(sessionId, {
-        provider: "local-llm",
-        ...(summary ? { handoffSummary: summary } : {})
-      });
     } else {
       // 대상=Claude: 새 SDK 세션에서 요약을 받아 시작한다.
       this.store.updateSession(sessionId, {
@@ -1058,7 +1138,7 @@ export class SessionManager {
       const { stdout } = await this.runAgy(
         [
           "--print", prompt,
-          "--dangerously-skip-permissions",
+          ...agyPermissionArgs("plan"),
           "--conversation", session.agyConversationId
         ],
         session.cwd
@@ -1068,7 +1148,10 @@ export class SessionManager {
     // Codex: 직전 스레드를 재개해 비스트리밍으로 요약 한 턴을 받는다.
     if (!session.codexThreadId) return "";
     requireCodexSubscriptionAuth();
-    const codex = new Codex({ env: buildCodexEnvironment() });
+    const codex = new Codex({
+      env: buildCodexEnvironment(),
+      config: codexSharedResourceConfig()
+    });
     const thread = codex.resumeThread(session.codexThreadId, {
       workingDirectory: session.cwd,
       skipGitRepoCheck: true,
@@ -1088,11 +1171,12 @@ export class SessionManager {
     const task = this.sessionTasks.get(session.id);
     if (wasActive && task) await task.catch(() => undefined);
 
-    const sdkSessionId = session.sdkSessionId ?? session.id;
-    const removeClaudeSession = this.options.deleteClaudeSession ?? deleteClaudeSession;
-    await removeClaudeSession(sdkSessionId, { dir: session.cwd }).catch((error) => {
-      console.error("Claude session deletion failed:", safeErrorMessage(error));
-    });
+    if (session.sdkSessionId) {
+      const removeClaudeSession = this.options.deleteClaudeSession ?? deleteClaudeSession;
+      await removeClaudeSession(session.sdkSessionId, { dir: session.cwd }).catch((error) => {
+        console.error("Claude session deletion failed:", safeErrorMessage(error));
+      });
+    }
     if (!task || wasActive) this.deleting.delete(session.id);
   }
 
@@ -1252,10 +1336,6 @@ export class SessionManager {
       await this.executeAgy(request);
       return;
     }
-    if (provider === "local-llm") {
-      await this.executeLocalLlm(request);
-      return;
-    }
     await this.execute(request);
   }
 
@@ -1406,17 +1486,21 @@ export class SessionManager {
             `MCP 도구가 timeout, connection closed 또는 transport 오류로 실패하면 `
             + `호스트의 MCP_RETRY 지시에 따라 같은 입력을 순차적으로 최대 `
             + `${this.options.mcpMaxAttempts}회까지만 재시도한다. 병렬 재시도하지 않는다.`
-            + `\n\n메모리는 항상 ${this.options.claudeMemoryDir} 에 읽고 쓴다. `
-            + `새 메모리 파일은 이 경로에 만들고 인덱스는 ${this.options.claudeMemoryDir}/MEMORY.md 를 갱신한다. `
-            + `system-reminder가 안내하는 프로젝트별 memory 경로는 무시한다.`
-            + `\n\ncodex MCP 위임 기준: 여러 파일에 걸친 검색·리팩터·구현이라 결과가 `
-            + `컨텍스트를 가득 채울 작업이거나, 중간 확인이 불필요한 자기완결적 구현이면 codex에 위임한다(cwd 전달). `
-            + `단일 파일 읽기/소규모 수정이나 중간 사용자 확인이 필요한 작업은 직접 처리한다. `
-            + `codex에는 항상 자기완결적 프롬프트를 주고, 코드 전문이 아닌 결론·diff·요약만 리턴하도록 지시한다.`
-            + `\n\n작업 중 중요한 단계가 바뀔 때 내부 추론을 공개하지 말고, 지금 확인한 사실과 다음 행동을 `
-            + `1~2문장의 짧은 일반 응답으로 사용자에게 알린다. 단순 도구 호출마다 반복하지 말고 `
-            + `새로운 발견, 계획 확정, 장애 발생, 검증 시작처럼 의미 있는 전환점에서만 출력한다.`
+            + `\n\n명시적 /memory 저장은 ${this.options.claudeMemoryDir} 에 기록하고 `
+            + `인덱스 ${this.options.claudeMemoryDir}/MEMORY.md 를 갱신한다. `
+            + `Claude 네이티브 자동 메모리는 ${join(homedir(), ".claude", "projects")} 아래의 저장소별 memory에, `
+            + `Codex 네이티브 자동 메모리는 ${join(homedir(), ".codex", "memories")}에 유지한다. `
+            + `${sharedMemoryBridgePath()}를 통해 세 메모리 저장소를 함께 검색한다.`
+            + `\n\n${buildPublicProgressInstructions()}`
+            + `\n\n${buildPermissionModeInstructions(session.permissionMode)}`
+            + `\n\n공통 AI 자원 안내는 ${sharedResourceGuidePath()} 에 있다. 먼저 읽고 세 제공자 공통 스킬·커넥터·플러그인 기능·도구 정책을 따른다.`
             + (session.leanMode ? `\n\n${buildLeanInstructions(true)}` : "")
+            + (() => {
+              const instructions = loadGlobalInstructions();
+              return instructions
+                ? `\n\n다음 전역 사용자 지침을 따른다. 이 지침은 도구 권한을 부여하지 않는다.\n\n${instructions}`
+                : "";
+            })()
             + (() => {
               const instructions = loadProjectInstructions(session.cwd);
               return instructions
@@ -1715,7 +1799,7 @@ export class SessionManager {
   }
 
   // Codex 제공사 세션의 한 작업(여러 턴)을 실행한다. Claude의 execute()에 대응하며, Codex
-  // SDK 스레드로 턴을 돌린다. 웹검색은 항상 켜고 샌드박스는 full-access, 승인은 비대화(never)다.
+  // SDK 스레드로 턴을 돌린다. 웹검색은 항상 켜고 저장된 권한 모드를 Codex 샌드박스에 매핑한다.
   // steer/next로 큐에 쌓인 메시지는 같은 스레드에서 이어지는 턴으로 처리한다.
   private async executeCodex(request: RunRequest): Promise<void> {
     if (this.deleting.has(request.session.id)) return;
@@ -1750,6 +1834,7 @@ export class SessionManager {
       this.store.updateSession(session.id, { status: "running" });
 
       requireCodexSubscriptionAuth();
+      syncSharedResources();
       const codexModel = session.codexModel ?? DEFAULT_CODEX_MODEL;
       const codexReasoning =
         (session.codexReasoning as CodexReasoningEffort | null) ?? DEFAULT_CODEX_REASONING;
@@ -1758,11 +1843,14 @@ export class SessionManager {
         modelReasoningEffort: codexReasoning,
         workingDirectory: session.cwd,
         skipGitRepoCheck: true,
-        sandboxMode: "danger-full-access" as const,
+        sandboxMode: codexSandboxMode(session.permissionMode),
         approvalPolicy: "never" as const,
         webSearchEnabled: true
       };
-      const codex = new Codex({ env: buildCodexEnvironment() });
+      const codex = new Codex({
+        env: buildCodexEnvironment(),
+        config: codexSharedResourceConfig()
+      });
       const thread = codexThreadId
         ? codex.resumeThread(codexThreadId, threadOptions)
         : codex.startThread(threadOptions);
@@ -1770,14 +1858,7 @@ export class SessionManager {
         `Codex 실행 (${codexModelLabel(this.options.modelCatalog, codexModel)} · reasoning ${codexReasoningLabel(codexReasoning)})`
       );
 
-      // Claude는 시스템 프롬프트로 장기기억 위치를 받지만 Codex 턴에는 그게 없다. 첫 턴에
-      // 장기기억 경로를 알려 스레드 맥락에 남기면 이후 턴에서도 알아서 참고한다. 기록은
-      // /memory(buildMemoryPrompt)로 명시 승인할 때만 한다.
-      const memoryNote =
-        `장기기억은 ${this.options.claudeMemoryDir} 에 있다. 작업과 관련 있으면 `
-        + `${this.options.claudeMemoryDir}/MEMORY.md와 관련 파일을 먼저 읽고 활용하라. `
-        + `메모리 기록은 사용자가 /memory로 명시 승인할 때만 한다.`;
-      const progressNote = buildPublicProgressInstructions();
+      const bootstrap = buildProviderBootstrap(session, this.options.claudeMemoryDir);
       const iterator = input[Symbol.asyncIterator]();
       // 초기 메시지는 위에서 push했으므로 큐에서 꺼내 첫 턴으로 쓴다. 이후 steer/next로
       // 쌓인 메시지는 pendingTurns>0인 동안 같은 스레드에서 이어지는 턴으로 소비한다.
@@ -1786,8 +1867,7 @@ export class SessionManager {
       while (!pending.done) {
         const content = pending.value.message.content;
         const turnPrompt = typeof content === "string" ? content : request.prompt;
-        const memoryPrefix = firstTurn ? `${buildKstDateNote()}\n\n${memoryNote}\n\n${progressNote}\n\n` : "";
-        const leanPrefix = session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "";
+        const memoryPrefix = firstTurn ? `${bootstrap}\n\n` : "";
         run.codexStarts.set("codex", Date.now());
         if (turnTimeout) clearTimeout(turnTimeout);
         turnTimeout = setTimeout(() => {
@@ -1798,7 +1878,7 @@ export class SessionManager {
         let attemptResponse = "";
         let completed = false;
         try {
-          const streamed = await thread.runStreamed(`${memoryPrefix}${leanPrefix}${turnPrompt}`, {
+          const streamed = await thread.runStreamed(`${memoryPrefix}${turnPrompt}`, {
             signal: controller.signal
           });
           for await (const event of streamed.events) {
@@ -1832,7 +1912,6 @@ export class SessionManager {
           this.store.updateSession(session.id, { codexThreadId });
         }
         lastResponse = attemptResponse || lastResponse;
-        if (attemptResponse) await renderer.text(attemptResponse);
         firstTurn = false;
 
         run.pendingTurns = Math.max(0, run.pendingTurns - 1);
@@ -1841,12 +1920,23 @@ export class SessionManager {
         pending = await iterator.next();
       }
 
-      this.store.updateSession(session.id, { status: "done" });
-      await renderer.finish("done", lastResponse ? "" : "Codex가 텍스트 응답 없이 작업을 마쳤습니다.");
+      if (request.operation === "compact") {
+        this.store.updateSession(session.id, {
+          status: "done",
+          codexThreadId: null,
+          handoffSummary: lastResponse
+        });
+        await renderer.finish("done", "컨텍스트 압축 완료: 다음 턴은 압축 요약으로 새 Codex 스레드에서 이어집니다.");
+      } else {
+        this.store.updateSession(session.id, { status: "done" });
+        await renderer.finish("done", lastResponse ? "" : "Codex가 텍스트 응답 없이 작업을 마쳤습니다.");
+      }
       await this.safeRename(session, `[DONE] ${session.title}`);
       // 활성 목표가 있으면 충족 여부를 읽기 전용 Haiku로 평가하고, 미충족이면 다음 턴을 자동 예약한다.
       // codex는 Claude 재개 핸들이 없으므로 sdkSessionId=null로 넘긴다(executeCodex가 스레드를 재개).
-      await this.maybeContinueGoal(session, request, null);
+      if (request.operation !== "compact") {
+        await this.maybeContinueGoal(session, request, null);
+      }
     } catch (error) {
       if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
       console.error(
@@ -2004,12 +2094,9 @@ export class SessionManager {
       this.store.updateSession(session.id, { status: "running" });
 
       const agyModel = session.agyModel ?? DEFAULT_AGY_MODEL;
-      // 병합 커넥터(claude.json + codex config)를 agy가 네이티브로 읽는 mcp_config.json에 동기화한다.
-      // 스킬·플러그인은 agy가 ~/.gemini/config 아래에서 네이티브로 읽으므로 별도 작업이 없다.
       let agyConnectorCount = 0;
       try {
-        const sync = syncAgyMcpConfig(loadMergedConnectors());
-        agyConnectorCount = sync.count;
+        agyConnectorCount = syncSharedResources().connectorCount;
       } catch (error) {
         console.error(
           `agy MCP 동기화 실패 (session=${session.id}):`,
@@ -2021,21 +2108,15 @@ export class SessionManager {
         + ` · 커넥터 ${agyConnectorCount}개 동기화(~/.gemini/config/mcp_config.json)`
       );
 
-      // agy 턴에는 시스템 프롬프트가 없으므로 첫 턴에 장기기억 위치를 프롬프트로 알린다(Codex와 동일).
-      const memoryNote =
-        `장기기억은 ${this.options.claudeMemoryDir} 에 있다. 작업과 관련 있으면 `
-        + `${this.options.claudeMemoryDir}/MEMORY.md와 관련 파일을 먼저 읽고 활용하라. `
-        + `메모리 기록은 사용자가 /memory로 명시 승인할 때만 한다.`;
-      const progressNote = buildPublicProgressInstructions();
+      const bootstrap = buildProviderBootstrap(session, this.options.claudeMemoryDir);
       const iterator = input[Symbol.asyncIterator]();
       let pending = await iterator.next();
       let firstTurn = true;
       while (!pending.done) {
         const content = pending.value.message.content;
         const turnPrompt = typeof content === "string" ? content : request.prompt;
-        const memoryPrefix = firstTurn ? `${buildKstDateNote()}\n\n${memoryNote}\n\n${progressNote}\n\n` : "";
-        const leanPrefix = session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "";
-        const finalPrompt = `${memoryPrefix}${leanPrefix}${turnPrompt}`;
+        const memoryPrefix = firstTurn ? `${bootstrap}\n\n` : "";
+        const finalPrompt = `${memoryPrefix}${turnPrompt}`;
 
         if (turnTimeout) clearTimeout(turnTimeout);
         turnTimeout = setTimeout(() => {
@@ -2050,7 +2131,7 @@ export class SessionManager {
         const agyLogPath = join(tmpdir(), `telegram-agy-${session.id}-${randomUUID()}.log`);
         const args = [
           "--print", finalPrompt,
-          "--dangerously-skip-permissions",
+          ...agyPermissionArgs(session.permissionMode),
           "--model", agyModel,
           "--print-timeout", printTimeoutArg,
           "--log-file", agyLogPath
@@ -2134,12 +2215,23 @@ export class SessionManager {
         pending = await iterator.next();
       }
 
-      this.store.updateSession(session.id, { status: "done" });
-      await renderer.finish("done", lastResponse ? "" : "agy가 텍스트 응답 없이 작업을 마쳤습니다.");
+      if (request.operation === "compact") {
+        this.store.updateSession(session.id, {
+          status: "done",
+          agyConversationId: null,
+          handoffSummary: lastResponse
+        });
+        await renderer.finish("done", "컨텍스트 압축 완료: 다음 턴은 압축 요약으로 새 agy 대화에서 이어집니다.");
+      } else {
+        this.store.updateSession(session.id, { status: "done" });
+        await renderer.finish("done", lastResponse ? "" : "agy가 텍스트 응답 없이 작업을 마쳤습니다.");
+      }
       await this.safeRename(session, `[DONE] ${session.title}`);
       // 활성 목표가 있으면 충족 여부를 읽기 전용 Haiku로 평가하고, 미충족이면 다음 턴을 자동 예약한다.
       // agy는 Claude 재개 핸들이 없으므로 sdkSessionId=null로 넘긴다(executeAgy가 대화를 재개).
-      await this.maybeContinueGoal(session, request, null);
+      if (request.operation !== "compact") {
+        await this.maybeContinueGoal(session, request, null);
+      }
     } catch (error) {
       if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
       console.error(
@@ -2158,222 +2250,6 @@ export class SessionManager {
       } else {
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", `agy 실행 실패: ${safeErrorMessage(error)}`);
-        await this.safeRename(session, `[ERROR] ${session.title}`);
-      }
-    } finally {
-      if (turnTimeout) clearTimeout(turnTimeout);
-      renderer.dispose();
-      input.close();
-      this.active.delete(session.id);
-    }
-  }
-
-  private gooseBinary(): string {
-    return this.options.gooseExecutable ?? "goose";
-  }
-
-  // goose를 한 번 실행한다. signal로 중단하면 SIGTERM 후 잠시 뒤 SIGKILL.
-  private runGoose(
-    args: string[],
-    cwd: string,
-    extraEnv: Record<string, string>,
-    signal?: AbortSignal,
-    onProgress?: (stdoutSoFar: string) => void
-  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
-    return new Promise((resolve, reject) => {
-      const env = {
-        ...process.env,
-        GOOSE_PROVIDER: this.options.localLlmProvider,
-        GOOSE_MODEL: this.options.localLlmModel,
-        OLLAMA_HOST: this.options.ollamaHost,
-        GOOSE_TELEMETRY_ENABLED: "false",
-        ...extraEnv
-      };
-      const child = spawn(this.gooseBinary(), args, { cwd, stdio: ["ignore", "pipe", "pipe"], env });
-      let stdout = "";
-      let stderr = "";
-      const stdoutDecoder = new StringDecoder("utf8");
-      const stderrDecoder = new StringDecoder("utf8");
-      let killTimer: NodeJS.Timeout | undefined;
-      const onAbort = () => {
-        child.kill("SIGTERM");
-        killTimer = setTimeout(() => child.kill("SIGKILL"), 3000);
-        killTimer.unref();
-      };
-      const cleanup = () => {
-        if (signal) signal.removeEventListener("abort", onAbort);
-        if (killTimer) clearTimeout(killTimer);
-      };
-      if (signal) {
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
-      }
-      child.stdout.on("data", (chunk: Buffer) => {
-        stdout += stdoutDecoder.write(chunk);
-        if (onProgress) onProgress(stdout);
-      });
-      child.stderr.on("data", (chunk: Buffer) => { stderr += stderrDecoder.write(chunk); });
-      child.on("error", (error) => { cleanup(); reject(error); });
-      child.on("close", (code) => {
-        stdout += stdoutDecoder.end();
-        stderr += stderrDecoder.end();
-        cleanup();
-        resolve({ stdout, stderr, code });
-      });
-    });
-  }
-
-  private async executeLocalLlm(request: RunRequest): Promise<void> {
-    if (this.deleting.has(request.session.id)) return;
-    let session = this.store.getSession(request.session.id);
-    if (!session) return;
-    request = this.applyHandoffSummary(request, session);
-    session = this.store.getSession(request.session.id) ?? session;
-
-    const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
-    const controller = new AbortController();
-    const input = new MessageQueue();
-    input.push(buildUserMessage(request.prompt));
-    const run: ActiveRun = {
-      controller,
-      input,
-      pendingTurns: 1,
-      startedAt: Date.now(),
-      codexTimers: new Map(),
-      codexStarts: new Map(),
-      mcpFailures: new Map()
-    };
-    this.active.set(session.id, run);
-
-    let timedOut = false;
-    let turnTimeout: NodeJS.Timeout | undefined;
-    let lastResponse = "";
-
-    try {
-      await this.safeRename(session, `[RUNNING] ${session.title}`);
-      await renderer.start(false);
-      this.store.updateSession(session.id, { status: "running" });
-
-      // allowlist로 거른 커넥터를 goose config.yaml에 동기화한다.
-      let gooseConnectorCount = 0;
-      // claude.json에서 NOTION_TOKEN 등 비밀 값을 읽어 goose 프로세스 env로 주입할 준비.
-      const secretEnv: Record<string, string> = {};
-      try {
-        const merged = loadMergedConnectors();
-        const sync = syncGooseMcpConfig(merged, this.options.localLlmMcpServers);
-        gooseConnectorCount = sync.count;
-        // NOTION_TOKEN이 병합 커넥터 env에 있으면 goose 프로세스 env로 전달(config에는 쓰지 않음).
-        for (const server of Object.values(merged)) {
-          const s = server as Record<string, unknown>;
-          const env = s.env as Record<string, string> | undefined;
-          if (env?.NOTION_TOKEN) secretEnv.NOTION_TOKEN = env.NOTION_TOKEN;
-        }
-      } catch (error) {
-        console.error(
-          `local-llm MCP 동기화 실패 (session=${session.id}):`,
-          safeErrorMessage(error)
-        );
-      }
-      renderer.note(
-        `로컬 LLM 실행 (${this.options.localLlmProvider}/${this.options.localLlmModel})`
-        + ` · 커넥터 ${gooseConnectorCount}개 동기화(~/.config/goose/config.yaml)`
-      );
-
-      // 시스템 프롬프트 없으므로 첫 턴에 메모리 위치·KST 현재 시각을 주입한다.
-      const memoryNote =
-        `장기기억은 ${this.options.claudeMemoryDir} 에 있다. 작업과 관련 있으면 `
-        + `${this.options.claudeMemoryDir}/MEMORY.md와 관련 파일을 먼저 읽고 활용하라. `
-        + `메모리 기록은 사용자가 /memory로 명시 승인할 때만 한다.`;
-      const progressNote = buildPublicProgressInstructions();
-
-      const iterator = input[Symbol.asyncIterator]();
-      let pending = await iterator.next();
-      let firstTurn = true;
-      while (!pending.done) {
-        const content = pending.value.message.content;
-        const turnPrompt = typeof content === "string" ? content : request.prompt;
-
-        // 매 턴 KST 현재 시각을 주입한다(장기 세션에서 자정 경계를 안전하게 처리).
-        const nowKst = new Intl.DateTimeFormat("ko-KR", {
-          timeZone: "Asia/Seoul", dateStyle: "full", timeStyle: "short", hour12: false
-        }).format(new Date());
-        const dateNote =
-          `현재 시각은 ${nowKst} (KST, UTC+9)이다. `
-          + `"오늘/내일/다음 주" 등 상대 날짜는 이 기준으로 해석한다. `
-          + `Google Calendar 이벤트를 만들거나 조회할 때 시간대는 항상 Asia/Seoul로 지정하고, `
-          + `start/end의 timeZone 필드에 "Asia/Seoul"을 명시한다.`;
-
-        const memoryPrefix = firstTurn ? `${memoryNote}\n\n${progressNote}\n\n` : "";
-        const leanPrefix = session.leanMode ? `${buildLeanInstructions(true)}\n\n` : "";
-        const finalPrompt = `${memoryPrefix}${dateNote}\n\n${leanPrefix}${turnPrompt}`;
-
-        if (turnTimeout) clearTimeout(turnTimeout);
-        turnTimeout = setTimeout(() => {
-          timedOut = true;
-          controller.abort();
-        }, this.options.codexMcpTimeoutMs);
-
-        const agyLogPath = join(tmpdir(), `telegram-goose-${session.id}-${randomUUID()}.log`);
-        const args = [
-          "run",
-          "--text", finalPrompt,
-          "--log-file", agyLogPath
-        ];
-
-        let result!: { stdout: string; stderr: string; code: number | null };
-        const progress = new ProgressiveParagraphCollector();
-        let progressDelivery = Promise.resolve();
-        try {
-          result = await this.runGoose(args, session.cwd, secretEnv, controller.signal, (soFar) => {
-            const visible = soFar.trim();
-            for (const paragraph of progress.accept(visible)) {
-              progressDelivery = progressDelivery.then(() => renderer.text(paragraph));
-            }
-          });
-        } finally {
-          if (turnTimeout) clearTimeout(turnTimeout);
-          turnTimeout = undefined;
-        }
-
-        let attemptResponse = this.stripAgyWarning(result.stdout).trim();
-        if (!attemptResponse && result.stderr) {
-          attemptResponse = result.stderr.trim();
-        }
-        for (const paragraph of progress.finish(attemptResponse)) {
-          progressDelivery = progressDelivery.then(() => renderer.text(paragraph));
-        }
-        await progressDelivery;
-        lastResponse = attemptResponse || lastResponse;
-        firstTurn = false;
-
-        run.pendingTurns = Math.max(0, run.pendingTurns - 1);
-        if (run.pendingTurns === 0) break;
-        renderer.note(`예약 메시지 ${run.pendingTurns}개 처리 대기`);
-        pending = await iterator.next();
-      }
-
-      this.store.updateSession(session.id, { status: "done" });
-      await renderer.finish("done", lastResponse ? "" : "로컬 LLM이 텍스트 응답 없이 작업을 마쳤습니다.");
-      await this.safeRename(session, `[DONE] ${session.title}`);
-      await this.maybeContinueGoal(session, request, null);
-    } catch (error) {
-      if (this.deleting.has(session.id) || !this.store.getSession(session.id)) return;
-      console.error(
-        `local-llm run failed (session=${session.id}):`,
-        safeErrorMessage(error, this.oauthTokens)
-      );
-      if (timedOut) {
-        const minutes = Math.round(this.options.codexMcpTimeoutMs / 60_000);
-        this.store.updateSession(session.id, { status: "error" });
-        await renderer.finish("error", `로컬 LLM 턴이 ${minutes}분 제한을 초과해 중단되었습니다.`);
-        await this.safeRename(session, `[STALL] ${session.title}`);
-      } else if (controller.signal.aborted) {
-        this.store.updateSession(session.id, { status: "aborted" });
-        await renderer.finish("aborted", "사용자가 작업을 중단했습니다.");
-        await this.safeRename(session, `[STOP] ${session.title}`);
-      } else {
-        this.store.updateSession(session.id, { status: "error" });
-        await renderer.finish("error", `로컬 LLM 실행 실패: ${safeErrorMessage(error)}`);
         await this.safeRename(session, `[ERROR] ${session.title}`);
       }
     } finally {

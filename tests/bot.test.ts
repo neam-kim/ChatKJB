@@ -66,12 +66,7 @@ function botSetup() {
     longRunningMcpServers: new Set(["codex"]),
     turnIdleTimeoutMs: 120_000,
     claudeCodeExecutable: undefined,
-    agyExecutable: "agy",
-    gooseExecutable: "/opt/homebrew/bin/goose",
-    localLlmMcpServers: new Set(["notion", "google-calendar"]),
-    localLlmModel: "qwen3.6:35b-a3b",
-    localLlmProvider: "ollama",
-    ollamaHost: "http://localhost:11434"
+    agyExecutable: "agy"
   } satisfies AppConfig;
   const instance = createBot(config, store);
   instance.bot.botInfo = {
@@ -275,7 +270,7 @@ describe("/steer command", () => {
     expect(answer).toHaveBeenCalledWith("session", "2번으로 진행");
     expect(steer).not.toHaveBeenCalled();
     expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
-      .toContain("대기 중인 Claude 질문에 답변");
+      .toContain("대기 중인 질문에 답변");
   });
 });
 

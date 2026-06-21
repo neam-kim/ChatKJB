@@ -14,7 +14,9 @@ import {
   buildGoalPrompt,
   buildLeanInstructions,
   buildMemoryPrompt,
+  buildPermissionModeInstructions,
   buildPublicProgressInstructions,
+  buildRolloverSummaryPrompt,
   buildUserMessage,
   CLAUDE_MODEL,
   MAX_GOAL_ROUNDS,
@@ -324,6 +326,19 @@ describe("compact command", () => {
       "/compact 인증 변경 사항 중심"
     );
   });
+
+  it("builds provider-neutral rollover summaries", () => {
+    expect(buildRolloverSummaryPrompt()).toContain("인계 요약");
+    expect(buildRolloverSummaryPrompt("검증 결과 중심")).toContain("검증 결과 중심");
+  });
+});
+
+describe("provider permission parity", () => {
+  it("turns the shared modes into explicit provider instructions", () => {
+    expect(buildPermissionModeInstructions("plan")).toContain("변경하지 말고");
+    expect(buildPermissionModeInstructions("acceptEdits")).toContain("프로젝트 내부 파일 편집");
+    expect(buildPermissionModeInstructions("auto")).toContain("자율 실행");
+  });
 });
 
 describe("memory command", () => {
@@ -430,11 +445,7 @@ describe("goal state", () => {
       longRunningMcpServers: new Set(["codex"]),
       turnIdleTimeoutMs: 600_000,
       claudeMemoryDir: join(directory, ".claude", "memory"),
-      modelCatalog: FALLBACK_MODEL_CATALOG,
-      localLlmMcpServers: new Set(["notion", "google-calendar"]),
-      localLlmModel: "qwen3.6:35b-a3b",
-      localLlmProvider: "ollama",
-      ollamaHost: "http://localhost:11434"
+      modelCatalog: FALLBACK_MODEL_CATALOG
     });
 
     try {
@@ -507,10 +518,6 @@ describe("goal state", () => {
       turnIdleTimeoutMs: 600_000,
       claudeMemoryDir: join(directory, ".claude", "memory"),
       modelCatalog: FALLBACK_MODEL_CATALOG,
-      localLlmMcpServers: new Set(["notion", "google-calendar"]),
-      localLlmModel: "qwen3.6:35b-a3b",
-      localLlmProvider: "ollama",
-      ollamaHost: "http://localhost:11434",
       // 백그라운드 실제 실행을 막기 위해 곧장 삭제로 드레인하므로 Claude 트랜스크립트 삭제는 무시한다.
       deleteClaudeSession: async () => {}
     });
@@ -585,10 +592,6 @@ describe("session deletion", () => {
       turnIdleTimeoutMs: 600_000,
       claudeMemoryDir: join(directory, ".claude", "memory"),
       modelCatalog: FALLBACK_MODEL_CATALOG,
-      localLlmMcpServers: new Set(["notion", "google-calendar"]),
-      localLlmModel: "qwen3.6:35b-a3b",
-      localLlmProvider: "ollama",
-      ollamaHost: "http://localhost:11434",
       deleteClaudeSession: async (id, options) => {
         deleted.push({ id, ...(options?.dir ? { dir: options.dir } : {}) });
       }

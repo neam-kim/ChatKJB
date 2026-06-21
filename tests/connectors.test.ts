@@ -1,14 +1,17 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   loadClaudeConnectors,
   loadMergedConnectors,
+  loadPluginMcpServers,
   parseCodexMcpServers,
   syncAgyMcpConfig,
+  syncCodexMcpConfig,
   toGeminiMcpConfig
 } from "../src/connectors.js";
+import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 
 const directories: string[] = [];
 
@@ -124,6 +127,32 @@ describe("loadMergedConnectors", () => {
   });
 });
 
+describe("loadPluginMcpServers", () => {
+  it("loads plugin MCP definitions and resolves relative commands and arguments", () => {
+    const dir = tempDir();
+    const plugin = join(dir, "plugin");
+    mkdirSync(join(plugin, "mcp"), { recursive: true });
+    writeFileSync(
+      join(plugin, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          widget: {
+            command: "node",
+            args: ["./mcp/server.cjs", "--stdio"]
+          }
+        }
+      })
+    );
+    writeFileSync(join(plugin, "mcp", "server.cjs"), "");
+
+    const servers = loadPluginMcpServers(dir);
+    expect((servers.widget as { command: string }).command).toBe("node");
+    expect((servers.widget as { args: string[] }).args[0]).toBe(
+      join(plugin, "mcp", "server.cjs")
+    );
+  });
+});
+
 describe("loadClaudeConnectors", () => {
   it("applies long timeout + alwaysLoad only to long-running servers", () => {
     const dir = tempDir();
@@ -189,5 +218,65 @@ describe("syncAgyMcpConfig", () => {
     const geminiPath = join(dir, "mcp_config.json");
     const result = syncAgyMcpConfig({}, geminiPath);
     expect(result).toEqual({ changed: false, count: 0 });
+  });
+});
+
+describe("syncCodexMcpConfig", () => {
+  it("adds shared connectors through the secret-preserving wrapper and remains idempotent", () => {
+    const dir = tempDir();
+    const configPath = join(dir, "config.toml");
+    writeFileSync(
+      configPath,
+      `[mcp_servers.native]\ncommand = "native-command"\n`
+    );
+    const merged = {
+      native: { type: "stdio", command: "native-command" },
+      notion: {
+        type: "stdio",
+        command: "node",
+        args: ["notion.mjs"],
+        env: { NOTION_TOKEN: "secret-value" }
+      },
+      remote: { type: "http", url: "https://example.com/mcp" }
+    } as unknown as Record<string, McpServerConfig>;
+
+    const first = syncCodexMcpConfig(
+      merged,
+      configPath,
+      "/node",
+      "/wrapper.mjs",
+      "/connectors.json"
+    );
+    expect(first).toEqual({ changed: true, count: 2 });
+    const text = readFileSync(configPath, "utf8");
+    expect(text).toContain("[mcp_servers.\"notion\"]");
+    expect(text).toContain('args = ["/wrapper.mjs", "/connectors.json", "notion"]');
+    expect(text).toContain('url = "https://example.com/mcp"');
+    expect(text).not.toContain("secret-value");
+
+    const second = syncCodexMcpConfig(
+      merged,
+      configPath,
+      "/node",
+      "/wrapper.mjs",
+      "/connectors.json"
+    );
+    expect(second).toEqual({ changed: false, count: 2 });
+  });
+
+  it("can configure agy stdio connectors through the same wrapper", () => {
+    const dir = tempDir();
+    const geminiPath = join(dir, "mcp_config.json");
+    const merged = {
+      notion: { type: "stdio", command: "node", env: { TOKEN: "secret" } }
+    } as unknown as Record<string, McpServerConfig>;
+    syncAgyMcpConfig(merged, geminiPath, "/node", "/wrapper.mjs", "/connectors.json");
+    const config = JSON.parse(readFileSync(geminiPath, "utf8")) as {
+      mcpServers: Record<string, { command: string; args: string[]; env?: unknown }>;
+    };
+    expect(config.mcpServers.notion).toEqual({
+      command: "/node",
+      args: ["/wrapper.mjs", "/connectors.json", "notion"]
+    });
   });
 });

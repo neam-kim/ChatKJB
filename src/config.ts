@@ -48,12 +48,7 @@ const environmentSchema = z.object({
   CLAUDE_MEMORY_DIR: z.string().default("~/.claude/memory"),
   FILE_INBOX_DIR: z.string().default("~/.claude/channels/telegram/inbox"),
   CLAUDE_CODE_EXECUTABLE: z.string().optional(),
-  AGY_EXECUTABLE: z.string().optional(),
-  GOOSE_EXECUTABLE: z.string().optional(),
-  LOCAL_LLM_MCP_SERVERS: z.string().default("notion,google-calendar"),
-  LOCAL_LLM_MODEL: z.string().default("qwen3.6:35b-a3b"),
-  LOCAL_LLM_PROVIDER: z.string().default("ollama"),
-  OLLAMA_HOST: z.string().default("http://localhost:11434")
+  AGY_EXECUTABLE: z.string().optional()
 });
 
 const projectSchema = z.object({
@@ -91,14 +86,6 @@ function resolveAgyExecutable(explicit: string | undefined): string {
   if (explicit && explicit.trim()) return absolutePath(explicit);
   const local = join(homedir(), ".local", "bin", "agy");
   return existsSync(local) ? local : "agy";
-}
-
-// goose 바이너리 경로를 정한다. Homebrew(block-goose-cli)로 설치되므로
-// 명시 env가 없으면 /opt/homebrew/bin/goose를 우선 확인한다.
-function resolveGooseExecutable(explicit: string | undefined): string {
-  if (explicit && explicit.trim()) return absolutePath(explicit);
-  const candidates = ["/opt/homebrew/bin/goose", `${homedir()}/.local/bin/goose`];
-  return candidates.find(existsSync) ?? "goose";
 }
 
 function validateEnvironmentFile(): void {
@@ -284,15 +271,6 @@ export async function loadConfig() {
       env.APPROVAL_TIMEOUT_MINUTES * 60_000 + 300_000
     ),
     claudeCodeExecutable: env.CLAUDE_CODE_EXECUTABLE,
-    agyExecutable: resolveAgyExecutable(env.AGY_EXECUTABLE),
-    gooseExecutable: resolveGooseExecutable(env.GOOSE_EXECUTABLE),
-    localLlmMcpServers: new Set(
-      env.LOCAL_LLM_MCP_SERVERS.split(",")
-        .map((name) => name.trim().toLowerCase())
-        .filter(Boolean)
-    ),
-    localLlmModel: env.LOCAL_LLM_MODEL,
-    localLlmProvider: env.LOCAL_LLM_PROVIDER,
-    ollamaHost: env.OLLAMA_HOST
+    agyExecutable: resolveAgyExecutable(env.AGY_EXECUTABLE)
   };
 }
