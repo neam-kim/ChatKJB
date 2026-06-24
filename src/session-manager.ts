@@ -33,9 +33,15 @@ import { CodexAccountPool } from "./codex-account-pool.js";
 import {
   normalizeGoalCondition,
   parseGoalChecks,
+  parseGoalVerdict,
   runGoalChecks,
   type CheckRunResult
 } from "./goal-checks.js";
+import {
+  callOllama,
+  ollamaConfig,
+  TIER2_MODEL
+} from "./orchestration/local-tiers.js";
 import {
   sharedMemoryBridgePath,
   sharedResourceGuidePath,
@@ -90,6 +96,12 @@ const LIMIT_RESUME_BUFFER_MS = 10_000;
 export const MAX_GOAL_ROUNDS = 25;
 // 목표 충족 여부를 판정하는 빠르고 저렴한 모델. 매 턴 한 번만 읽기 전용으로 호출한다.
 const GOAL_EVAL_MODEL = "claude-haiku-4-5";
+// 로컬 Tier 2 판관에게 전달하는 시스템 프롬프트. 저장소 파일에 직접 접근할 수 없으므로
+// 결정론적 검증 결과(객관 사실)에만 근거해 판정하도록 지시한다.
+const LOCAL_GOAL_JUDGE_SYSTEM =
+  "너는 목표 충족 여부만 판정하는 읽기 전용 심판이다. "
+  + "저장소 파일을 직접 볼 수 없으니, 아래 제공된 결정론적 검증 결과(객관 사실)에만 근거해 판정하라. "
+  + "사실에 없는 것은 추측하지 말고, 마지막 줄에 정확히 GOAL_MET: <근거> 또는 GOAL_UNMET: <남은점> 한 줄로만 답하라.";
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
 export const CODEX_MODEL = DEFAULT_CODEX_MODEL;
 export const CODEX_REASONING_EFFORT = DEFAULT_CODEX_REASONING;
@@ -2684,10 +2696,21 @@ export class SessionManager {
     const condition = this.store.getSession(session.id)?.goalCondition;
     if (!condition || this.deleting.has(session.id)) return;
 
-    // 모든 토큰이 한도면 충족 여부 평가 자체가 불가능하다. 멈추지 말고 가장 먼저 회복되는
-    // 시각에 다시 평가하도록 예약한다(작업 턴의 waiting_limit과 같은 방식).
+    // 모든 토큰이 한도면 충족 여부 평가 자체가 불가능하다. 먼저 로컬 Tier 2 판정을 시도하고,
+    // 달성이 확인되면 즉시 완료한다. 그렇지 않으면 가장 먼저 회복되는 시각에 다시 예약한다.
     const recoversAt = this.tokenPool.recoversAt();
     if (recoversAt !== null) {
+      const local = await this.tryLocalGoalVerdict(session, condition);
+      if (local?.met) {
+        this.goalRounds.delete(session.id);
+        this.store.updateSession(session.id, { goalCondition: null });
+        await this.transport.sendText(
+          session.chatId,
+          session.topicId,
+          `목표를 달성했습니다 ✅ (Claude 한도 중 로컬 Tier2 판정)\n조건: ${condition}\n근거: ${local.reason}`
+        ).catch(() => undefined);
+        return;
+      }
       this.scheduleGoalRecheck(session, request, sdkSessionId, recoversAt);
       return;
     }
@@ -2696,10 +2719,21 @@ export class SessionManager {
     try {
       verdict = await this.evaluateGoal(session, condition);
     } catch (error) {
-      // 평가 도중 모든 토큰이 한도에 닿았으면 회복 시각에 다시 평가한다.
+      // 평가 도중 모든 토큰이 한도에 닿았으면 로컬 Tier 2 판정을 먼저 시도한다.
       if (isRateLimitError(error)) {
         const at = this.tokenPool.recoversAt();
         if (at !== null) {
+          const local = await this.tryLocalGoalVerdict(session, condition);
+          if (local?.met) {
+            this.goalRounds.delete(session.id);
+            this.store.updateSession(session.id, { goalCondition: null });
+            await this.transport.sendText(
+              session.chatId,
+              session.topicId,
+              `목표를 달성했습니다 ✅ (Claude 한도 중 로컬 Tier2 판정)\n조건: ${condition}\n근거: ${local.reason}`
+            ).catch(() => undefined);
+            return;
+          }
           this.scheduleGoalRecheck(session, request, sdkSessionId, at);
           return;
         }
@@ -2753,6 +2787,41 @@ export class SessionManager {
   }
 
   /**
+   * Claude 토큰이 모두 한도에 도달했을 때 로컬 Tier 2(qwen3.6)로 목표 달성 여부를 판정한다.
+   * 결정론적 check: 게이트가 하나 이상 있는 경우에만 신뢰 가능한 판정이 가능하다.
+   * 자유 서술형 목표(check: 없음)는 로컬 모델이 저장소를 볼 수 없으므로 null을 반환한다.
+   */
+  private async tryLocalGoalVerdict(
+    session: SessionRecord,
+    condition: string
+  ): Promise<{ met: boolean; reason: string } | null> {
+    const spec = parseGoalChecks(condition);
+    const checkRun = await runGoalChecks(spec.checks, session.cwd);
+    if (!checkRun.allPassed) {
+      const failed = checkRun.results.filter((r) => !r.passed).map((r) => r.command);
+      return { met: false, reason: `결정론적 검증 실패: ${failed.join(", ")}` };
+    }
+    if (spec.checks.length > 0 && !spec.description) {
+      return { met: true, reason: `결정론적 검증 ${spec.checks.length}건 모두 통과` };
+    }
+    // 자유 서술형 목표: 로컬 모델은 저장소에 직접 접근할 수 없으므로 판정 불가.
+    if (spec.checks.length === 0) {
+      return null;
+    }
+    // check: 게이트 + 사람용 설명이 함께 있는 경우: 결정론적 결과를 packet으로 넘겨 로컬 모델 판정.
+    try {
+      const raw = await callOllama(
+        TIER2_MODEL,
+        { system: LOCAL_GOAL_JUDGE_SYSTEM, user: buildGoalCheckPrompt(spec.description, checkRun) },
+        ollamaConfig()
+      );
+      return parseGoalVerdict(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * 목표 충족 여부를 판정한다(Structure2.md Tier 0 철학).
    * 1) 목표에 `check:` 결정론적 게이트가 있으면 먼저 실행한다.
    * 2) 게이트가 하나라도 실패하면 LLM을 부르지 않고 즉시 미충족으로 본다(사실은 추측하지 않는다).
@@ -2799,18 +2868,7 @@ export class SessionManager {
       false,
       GOAL_EVAL_MODEL
     );
-    const line = text
-      .split("\n")
-      .map((part) => part.trim())
-      .reverse()
-      .find((part) => /^GOAL_(MET|UNMET)/i.test(part)) ?? text.trim();
-    if (/^GOAL_MET/i.test(line)) {
-      return { met: true, reason: line.replace(/^GOAL_MET:?\s*/i, "").trim() || "조건 충족" };
-    }
-    return {
-      met: false,
-      reason: line.replace(/^GOAL_UNMET:?\s*/i, "").trim() || text.trim().slice(0, 200)
-    };
+    return parseGoalVerdict(text);
   }
 
   private async runReadOnlyClaude(

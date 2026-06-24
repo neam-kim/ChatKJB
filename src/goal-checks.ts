@@ -60,6 +60,23 @@ export interface CheckRunResult {
   results: CheckResult[];
 }
 
+/**
+ * LLM 판정 텍스트(또는 결정론적 판정 텍스트)에서 GOAL_MET/GOAL_UNMET 결과를 추출한다.
+ * 마지막 GOAL_(MET|UNMET) 줄을 찾아 { met, reason }을 반환한다.
+ */
+export function parseGoalVerdict(text: string): { met: boolean; reason: string } {
+  const lines = text.split("\n").map((l) => l.trim());
+  const line =
+    [...lines].reverse().find((l) => /^GOAL_(MET|UNMET)/i.test(l)) ?? text.trim();
+  if (/^GOAL_MET/i.test(line)) {
+    return { met: true, reason: line.replace(/^GOAL_MET:?\s*/i, "").trim() || "조건 충족" };
+  }
+  return {
+    met: false,
+    reason: line.replace(/^GOAL_UNMET:?\s*/i, "").trim() || text.trim().slice(0, 200)
+  };
+}
+
 // 결정론적 게이트: 각 셸 명령을 cwd에서 순차 실행해 pass/fail과 출력 꼬리를 모은다.
 export async function runGoalChecks(
   checks: string[],

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseGoalChecks } from "../src/goal-checks.js";
+import { parseGoalChecks, parseGoalVerdict } from "../src/goal-checks.js";
 
 describe("parseGoalChecks", () => {
   it("empty string -> { description: '', checks: [] }", () => {
@@ -56,6 +56,31 @@ Third line`;
       description: "First line\nSecond line\nThird line",
       checks: ["npm run build", "npm test"],
     });
+  });
+});
+
+describe("parseGoalVerdict", () => {
+  it("'GOAL_MET: done' -> { met: true, reason: 'done' }", () => {
+    expect(parseGoalVerdict("GOAL_MET: done")).toEqual({ met: true, reason: "done" });
+  });
+
+  it("multi-line text ending with 'GOAL_UNMET: missing X' -> { met: false, reason: 'missing X' }", () => {
+    const text = "Some analysis here.\nMore details.\nGOAL_UNMET: missing X";
+    expect(parseGoalVerdict(text)).toEqual({ met: false, reason: "missing X" });
+  });
+
+  it("text with neither GOAL_MET nor GOAL_UNMET marker -> { met: false, reason: trimmed text slice }", () => {
+    const text = "No verdict here at all.";
+    expect(parseGoalVerdict(text)).toEqual({ met: false, reason: "No verdict here at all." });
+  });
+
+  it("GOAL_MET without reason suffix -> reason defaults to '조건 충족'", () => {
+    expect(parseGoalVerdict("GOAL_MET")).toEqual({ met: true, reason: "조건 충족" });
+  });
+
+  it("last GOAL_MET wins when there are multiple verdict lines", () => {
+    const text = "GOAL_UNMET: not yet\nsome work\nGOAL_MET: all done";
+    expect(parseGoalVerdict(text)).toEqual({ met: true, reason: "all done" });
   });
 });
 
