@@ -59,7 +59,34 @@ Tier 0~5 다단계 위임 오케스트레이션을 실제 코드로 구현하기
 - **P4 완료** — `src/orchestration/engine.ts` (classifyRisk·checkpointsForRisk·frontierPacketBudget·escalationTarget·tierPath) (+ test).
 - **P5 완료** — `src/orchestration/frontier-review.ts` (ReviewPacket→판정 프롬프트/파서) (+ test).
 - 누계: tsc 0건, 전체 테스트 347 passed / 1 skipped.
-- **P6 미착수 (일시정지)** — 라이브 `/goal` 동작을 바꾸므로 어르신 승인 후 진행.
+- **P6 완료** — `/goal` 로컬 판관 폴백 결합. goal-checks에 `parseGoalVerdict` 추출,
+  session-manager에 `tryLocalGoalVerdict`(Claude 전원 한도 시 결정론 목표를 로컬 Tier2로 사실기반 판정)
+  추가, `maybeContinueGoal`의 한도 분기·rate-limit catch에 폴백 연결. 자유형 목표는 null→기존 회복대기(무퇴행).
+  커밋 a33fc1b, Node v22.18.0 빌드·배포(launchd:install), 데몬 재기동(pid 81846, runs=1, 무에러).
+
+- **P6.1 완료 (2026-06-24, 판관 교체 + 턴 상한 재설계)** — 정상 경로의 옛 잔재(고정 Haiku 평가·고정 25턴)를
+  Structure2 설계로 교체:
+  - **판관 = Tier 5 = 세션 모델.** `GOAL_EVAL_MODEL = "claude-haiku-4-5"` 고정 평가 폐지.
+    `evaluateGoal`은 결정론 게이트 통과 후 (a) 로컬 Tier 2(qwen3.6) local-first 판정을 먼저 시도하고,
+    (b) 로컬 판정 불가(자유서술형)일 때만 `runReadOnlyClaude`를 modelOverride 없이 호출해 **session.model**
+    (Tier 5)로 판정한다. `/synth` 판관 폴백에서만 쓰던 Haiku는 `JUDGE_FALLBACK_MODEL`로 분리(이름 명확화).
+  - **턴 상한 = Risk_Level별 동적.** 고정 `MAX_GOAL_ROUNDS=25`(폭주 안전 상한으로만 잔존) 대신
+    `estimateGoalRisk(condition)`(goal-checks.ts, 순수 함수)로 목표 위험도를 추정해
+    `GOAL_ROUNDS_BY_RISK`(L0:3·L1:6·L2:12·L3:20·L4:30)를 적용. 위험 키워드(보안/스키마/마이그레이션/
+    아키텍처/public API/통합)와 check: 게이트 수를 신호로 engine.ts `classifyRisk`에 위임.
+  - 위험도 추정 정규식의 `\b` 단어경계가 한글에 작동하지 않던 버그를 영문/한글 매칭 분리로 수정
+    (테스트가 검출). 신규 `tests/goal-risk.test.ts` 7건(로컬 qwen3-coder 위임·오케스트레이터 검수).
+  - tsc 0건, 전체 361 passed / 1 skipped. 빌드(Node v22.18.0) 완료. **데몬 재기동은 어르신 지시로 보류**
+    (현 데몬은 구버전 유지, 차기 `launchd:restart` 시 반영).
+
+## 잔여 (후속 epic)
+
+- **작업 턴 전면 위임 미구현**: 현재 work turn은 여전히 세션의 클라우드 모델이 수행한다.
+  Tier 3(qwen3-coder)가 실제 repo 작업 턴을 도구접근과 함께 구동하는 전면 DAG 위임
+  (사양의 Model_Routing Default_Flow 전체)은 세션 실행경로 대수술이라 별도 epic으로 남김.
+  엔진 모듈(engine/tier0/local-tiers/frontier-review)은 이미 갖춰져 있어 이를 바탕으로 진행 가능.
+
+## 미확정 / 추적
 
 ## 미확정 / 추적
 

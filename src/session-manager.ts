@@ -31,6 +31,7 @@ import { safeErrorMessage } from "./telegram-transport.js";
 import { TokenPool } from "./token-pool.js";
 import { CodexAccountPool } from "./codex-account-pool.js";
 import {
+  estimateGoalRisk,
   normalizeGoalCondition,
   parseGoalChecks,
   parseGoalVerdict,
@@ -42,6 +43,7 @@ import {
   ollamaConfig,
   TIER2_MODEL
 } from "./orchestration/local-tiers.js";
+import type { RiskLevel } from "./orchestration/types.js";
 import {
   sharedMemoryBridgePath,
   sharedResourceGuidePath,
@@ -93,9 +95,21 @@ const OVERLOAD_RETRY_CAP_MS = 60_000;
 // 한도 초기화 직후의 미세한 시계 오차로 또 거부당하는 것을 막는다.
 const LIMIT_RESUME_BUFFER_MS = 10_000;
 // /goal: 한 목표를 향해 자동으로 이어 도는 최대 턴 수(폭주·무한 반복 방지).
+// Structure2.md는 고정 턴 상한 대신 Risk_Level별 checkpoint 경로로 진행을 통제한다.
+// 위험도를 추정할 수 없을 때(자유서술형 목표 등)의 안전 상한으로만 남긴다.
 export const MAX_GOAL_ROUNDS = 25;
-// 목표 충족 여부를 판정하는 빠르고 저렴한 모델. 매 턴 한 번만 읽기 전용으로 호출한다.
-const GOAL_EVAL_MODEL = "claude-haiku-4-5";
+// Risk_Level별 자동 진행 턴 상한. checkpointsForRisk 단계 수에 여유를 둔 값으로,
+// L0(사소)는 짧게, L4(치명)는 길게 둔다. classifyRisk로 목표 위험도를 추정해 선택한다.
+const GOAL_ROUNDS_BY_RISK: Record<RiskLevel, number> = {
+  L0: 3,
+  L1: 6,
+  L2: 12,
+  L3: 20,
+  L4: 30
+};
+// /synth 다중후보 판관의 클라우드 폴백 모델(로컬 qwen3.6 심사가 실패했을 때만 쓴다).
+// /goal 평가와는 무관하다(Tier 5 판관 = 세션 모델).
+const JUDGE_FALLBACK_MODEL = "claude-haiku-4-5";
 // 로컬 Tier 2 판관에게 전달하는 시스템 프롬프트. 저장소 파일에 직접 접근할 수 없으므로
 // 결정론적 검증 결과(객관 사실)에만 근거해 판정하도록 지시한다.
 const LOCAL_GOAL_JUDGE_SYSTEM =
@@ -2797,13 +2811,15 @@ export class SessionManager {
     }
 
     const rounds = this.goalRounds.get(session.id) ?? 0;
-    if (rounds + 1 >= MAX_GOAL_ROUNDS) {
+    // Structure2.md: 고정 상한이 아니라 추정된 Risk_Level별 상한으로 자동 진행을 통제한다.
+    const limit = Math.min(this.goalRoundLimit(condition), MAX_GOAL_ROUNDS);
+    if (rounds + 1 >= limit) {
       this.goalRounds.delete(session.id);
       this.store.updateSession(session.id, { goalCondition: null });
       await this.transport.sendText(
         session.chatId,
         session.topicId,
-        `목표 자동 진행을 ${MAX_GOAL_ROUNDS}턴 후 중단합니다(아직 미달성).\n조건: ${condition}\n`
+        `목표 자동 진행을 ${limit}턴 후 중단합니다(아직 미달성).\n조건: ${condition}\n`
         + `마지막 평가: ${verdict.reason}\n계속하려면 새 지시를 보내거나 /goal 로 다시 설정하세요.`
       ).catch(() => undefined);
       return;
@@ -2813,7 +2829,7 @@ export class SessionManager {
     await this.transport.sendText(
       session.chatId,
       session.topicId,
-      `목표 미달성 → 자동으로 다음 턴을 진행합니다 (${rounds + 1}/${MAX_GOAL_ROUNDS}).\n남은 점: ${verdict.reason}`
+      `목표 미달성 → 자동으로 다음 턴을 진행합니다 (${rounds + 1}/${limit}).\n남은 점: ${verdict.reason}`
     ).catch(() => undefined);
     const resumeId = sdkSessionId ?? request.resumeSessionId;
     this.store.updateSession(session.id, { status: "queued" });
@@ -2860,11 +2876,14 @@ export class SessionManager {
   }
 
   /**
-   * 목표 충족 여부를 판정한다(Structure2.md Tier 0 철학).
+   * 목표 충족 여부를 판정한다(Structure2.md Tier 0 + Tier 5 판관).
    * 1) 목표에 `check:` 결정론적 게이트가 있으면 먼저 실행한다.
    * 2) 게이트가 하나라도 실패하면 LLM을 부르지 않고 즉시 미충족으로 본다(사실은 추측하지 않는다).
-   * 3) 게이트가 모두 통과(또는 게이트 없음)면 그 객관적 결과를 packet으로 판관(Haiku)에 넘겨
+   * 3) 게이트가 모두 통과(또는 게이트 없음)면 그 객관적 결과를 packet으로 판관에 넘겨
    *    목표 설명(description)의 나머지 충족 여부를 읽기 전용으로 판정한다.
+   *    판관 = Tier 5 = "이 세션이 도는 모델 그 자체"(session.model). 옛 Haiku 고정 평가는 폐지.
+   *    단, 결정론 게이트가 있는 경우 먼저 로컬 Tier 2(qwen3.6)로 사실기반 판정을 시도해
+   *    프런티어(클라우드) 호출을 아낀다(local-first). 로컬이 판정 불가면 Tier 5로 승격한다.
    */
   private async evaluateGoal(
     session: SessionRecord,
@@ -2887,6 +2906,14 @@ export class SessionManager {
       };
     }
 
+    // 결정론 게이트가 통과한 상태에서 사람용 설명이 남은 경우: 먼저 로컬 Tier 2 판정을 시도한다.
+    // (저장소 직접 접근이 필요 없는 사실기반 판정이므로 로컬로 충분하다.) 로컬이 판정 불가(null)면
+    // 자유서술형이므로 Tier 5(세션 모델)로 읽기 전용 판정한다.
+    if (spec.checks.length > 0) {
+      const local = await this.tryLocalGoalVerdict(session, condition);
+      if (local) return local;
+    }
+
     const controller = new AbortController();
     const run: ActiveRun = {
       controller,
@@ -2897,16 +2924,24 @@ export class SessionManager {
       codexStarts: new Map(),
       mcpFailures: new Map()
     };
+    // Tier 5 판관 = 세션 모델. modelOverride를 주지 않으면 runReadOnlyClaude가 session.model을 쓴다.
     const text = await this.runReadOnlyClaude(
       session,
       controller,
       run,
       buildGoalCheckPrompt(spec.description, checkRun),
       this.tokenPool.select(),
-      false,
-      GOAL_EVAL_MODEL
+      false
     );
     return parseGoalVerdict(text);
+  }
+
+  /**
+   * 목표 텍스트에서 Structure2.md Risk_Level을 추정해 자동 진행 턴 상한을 정한다.
+   * 위험도 추정은 순수 함수(estimateGoalRisk)로 분리해 테스트 가능하게 했다.
+   */
+  private goalRoundLimit(condition: string): number {
+    return GOAL_ROUNDS_BY_RISK[estimateGoalRisk(condition)];
   }
 
   private async runReadOnlyClaude(
@@ -3087,7 +3122,7 @@ export class SessionManager {
         buildHaikuJudgePrompt(question, candidates),
         this.tokenPool.select(),
         false,
-        GOAL_EVAL_MODEL
+        JUDGE_FALLBACK_MODEL
       );
       const parsed = parseJudgeResponse(text, candidates.length);
       if (parsed) return { ...parsed, judge: "haiku" };

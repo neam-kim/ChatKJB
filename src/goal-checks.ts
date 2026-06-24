@@ -4,8 +4,45 @@
 
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { classifyRisk, type RiskSignals } from "./orchestration/engine.js";
+import type { RiskLevel } from "./orchestration/types.js";
 
 const execAsync = promisify(exec);
+
+/**
+ * 목표 텍스트에서 Structure2.md Risk_Level을 보수적으로 추정한다(순수 함수, 저장소 미접근).
+ * 목표 본문의 위험 키워드(security/migration/schema/architecture/public API/통합)와
+ * check: 게이트 수만 신호로 쓴다. 키워드가 전혀 없으면 게이트 수에 따라 L1/L2로 떨어진다.
+ */
+export function estimateGoalRisk(condition: string): RiskLevel {
+  const spec = parseGoalChecks(condition);
+  const text = condition.toLowerCase();
+  // 영문 키워드는 단어 경계(\b)로 부분 오매칭을 막고, 한글 키워드는 토큰 경계가 없으므로
+  // 부분 문자열로 매칭한다(\b는 한글 같은 비ASCII에는 작동하지 않으므로 분리한다).
+  const hasEn = (...words: string[]) =>
+    new RegExp(`\\b(?:${words.join("|")})\\b`).test(text);
+  const hasKo = (...words: string[]) => words.some((w) => text.includes(w));
+  const signals: RiskSignals = {
+    docsOrFormatOnly:
+      (hasEn("docs?", "format", "readme", "typo") || hasKo("문서", "포맷", "주석", "오타")) &&
+      spec.checks.length === 0,
+    securityOrDataIntegrity:
+      hasEn("security", "auth", "secret", "data\\s*integrity") ||
+      hasKo("보안", "취약", "토큰", "데이터 무결"),
+    schemaOrMigration:
+      hasEn("schema", "migration", "migrate", "db", "database") ||
+      hasKo("스키마", "마이그레이션"),
+    architectureChange:
+      hasEn("architecture", "refactor") || hasKo("아키텍처", "리팩터", "구조 변경", "재설계"),
+    multiService: hasEn("multi-?service", "cross-?service") || hasKo("여러 서비스"),
+    publicApiChange:
+      hasEn("public\\s*api", "breaking", "backward") || hasKo("공개 api", "호환성"),
+    multiFileIntegration:
+      hasEn("integration", "multi-?file") || hasKo("통합", "여러 파일", "전반"),
+    changedFiles: spec.checks.length
+  };
+  return classifyRisk(signals);
+}
 
 export interface GoalSpec {
   description: string; // check: 줄을 제거한 사람용 목표 텍스트(양끝 trim)
