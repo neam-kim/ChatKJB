@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const label = "com.neam.telegram-claude-orchestrator";
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -42,6 +42,8 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
   <key>ProgramArguments</key>
   <array>
     <string>${xml(nodePath)}</string>
+    <string>--import</string>
+    <string>${xml(pathToFileURL(join(projectDir, "scripts", "ensure-local-node-modules.mjs")).href)}</string>
     <string>${xml(join(projectDir, "dist", "index.js"))}</string>
   </array>
   <key>WorkingDirectory</key>
