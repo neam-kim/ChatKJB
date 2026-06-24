@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { Agent as HttpsAgent, get as httpsGet } from "node:https";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
@@ -42,6 +43,7 @@ import {
   SessionManager
 } from "./session-manager.js";
 import { StateStore } from "./store.js";
+import { agentStrengthsPath, loadStrengthHints, routeProvider, wikiVaultPath } from "./router.js";
 import { safeErrorMessage, TelegramTransport } from "./telegram-transport.js";
 import type { ProjectConfig, ProviderKind, SessionDefaults, SessionRecord } from "./types.js";
 import { formatAgyUsage, formatUsageSnapshot, parseStoredAgyUsage } from "./usage.js";
@@ -187,6 +189,28 @@ function defaultsModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog)
     : catalog.claudeModels.map((option) => ({ id: option.id, label: option.label }));
   for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `setm:${defaults.provider}:${option.id}`);
+    if (index < options.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+// 기본값 패널의 추론 강도/thinking 선택용 인라인 키보드(제공자별). setr:<provider>:<id>
+// 현재 선택값에는 ✅를 붙인다. Claude는 thinking on/off 두 선택지로 노출한다.
+function defaultsReasoningKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const options = defaults.provider === "codex"
+    ? codexReasoningOptionsForModel(catalog, defaults.codexModel)
+        .map((option) => ({ id: option.id, label: option.label, current: option.id === defaults.codexReasoning }))
+    : defaults.provider === "agy"
+    ? agyThinkingOptions()
+        .map((option) => ({ id: option.id, label: option.label, current: option.id === defaults.agyThinkingLevel }))
+    : [
+        { id: "adaptive", label: "on", current: defaults.thinking !== "off" },
+        { id: "off", label: "off", current: defaults.thinking === "off" }
+      ];
+  for (const [index, option] of options.entries()) {
+    const mark = option.current ? "✅ " : "";
+    keyboard.text(`${mark}${option.label}`, `setr:${defaults.provider}:${option.id}`);
     if (index < options.length - 1) keyboard.row();
   }
   return keyboard;
@@ -363,13 +387,24 @@ function usageRateLimitWarning(): string {
 }
 
 export function createBot(config: AppConfig, store: StateStore) {
-  const bot = new Bot(config.telegramBotToken);
+  // 이 Mac에서는 api.telegram.org의 IPv6 경로가 간헐적으로 연결만 성립한 채
+  // 응답 없이 시간 초과된다. Bot API 트래픽을 정상 동작하는 IPv4 경로에 고정한다.
+  // 파일 다운로드(아래 downloadFile)도 같은 에이전트를 공유해 IPv6로 새지 않게 한다.
+  const ipv4Agent = new HttpsAgent({ family: 4, keepAlive: true });
+  const bot = new Bot(config.telegramBotToken, {
+    client: {
+      baseFetchConfig: {
+        agent: ipv4Agent
+      }
+    }
+  });
   const transport = new TelegramTransport(bot.api);
   const permissions = new PermissionBroker(store, transport, config.approvalTimeoutMs);
   const sessions = new SessionManager(store, transport, permissions, {
     debounceMs: config.statusDebounceMs,
     claudeCodeOauthToken: config.claudeCodeOauthToken,
     additionalOauthTokens: config.claudeCodeOauthTokens.slice(1),
+    codexAccountHomes: config.codexAccountHomes,
     mcpToolTimeoutMs: config.mcpToolTimeoutMs,
     mcpMaxAttempts: config.mcpMaxAttempts,
     codexMcpTimeoutMs: config.codexMcpTimeoutMs,
@@ -392,7 +427,12 @@ export function createBot(config: AppConfig, store: StateStore) {
 
   const registerProject = async (path: string): Promise<ProjectConfig> => {
     const project = await addProject(config.projectsPath, config.projects, cleanPathInput(path));
-    config.projects.push(project);
+    const existingIndex = config.projects.findIndex((item) => item.name === project.name);
+    if (existingIndex === -1) {
+      config.projects.push(project);
+    } else {
+      config.projects[existingIndex] = project;
+    }
     store.syncProjects([project]);
     return project;
   };
@@ -434,9 +474,24 @@ export function createBot(config: AppConfig, store: StateStore) {
     const safe = filename.replace(/[^\w가-힣.-]/g, "_").slice(0, 80);
     const dest = join(config.fileInboxDir, `${timestamp}_${safe}`);
     const url = `https://api.telegram.org/file/bot${config.telegramBotToken}/${filePath}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`다운로드 실패: ${response.status}`);
-    await writeFile(dest, Buffer.from(await response.arrayBuffer()));
+    // 글로벌 fetch(undici)는 agent 옵션을 무시해 IPv6로 새어나가 멈춘다.
+    // Bot API 호출과 동일한 IPv4 에이전트를 쓰는 node:https로 받는다.
+    const buffer = await new Promise<Buffer>((resolve, reject) => {
+      const req = httpsGet(url, { agent: ipv4Agent }, (res) => {
+        const status = res.statusCode ?? 0;
+        if (status !== 200) {
+          res.resume();
+          reject(new Error(`다운로드 실패: ${status}`));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk) => chunks.push(chunk as Buffer));
+        res.on("end", () => resolve(Buffer.concat(chunks)));
+        res.on("error", reject);
+      });
+      req.on("error", reject);
+    });
+    await writeFile(dest, buffer);
     return dest;
   }
 
@@ -1239,7 +1294,13 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply(
         session.goalCondition
           ? `현재 목표: ${session.goalCondition}\n해제하려면 /goal clear`
-          : "설정된 목표가 없습니다.\n예: /goal 모든 테스트가 통과하고 lint가 깨끗하다\n조건이 충족될 때까지 자동으로 턴을 이어 갑니다."
+          : "설정된 목표가 없습니다.\n예: /goal 모든 테스트가 통과하고 lint가 깨끗하다\n"
+            + "코딩뿐 아니라 요약·조사·문서 작성 같은 일반 작업에도 쓸 수 있습니다.\n"
+            + "결정론적 검증을 넣으려면 줄마다 `check: <명령>`을 추가하세요(예: check: npm test).\n"
+            + "그 명령들을 먼저 실행해 객관적으로 판정하고, 나머지는 판관 모델이 확인합니다.\n"
+            + "조건이 충족될 때까지 자동으로 턴을 이어 갑니다.\n"
+            + "자동 진행은 매 턴 모델을 호출하므로, Sonnet 4.6·gpt-5.4-mini 같은 가벼운 모델은 "
+            + "작업량 '보통(중간)'·thinking off로 두고 쓰길 권합니다(/power, /thinking)."
       );
       return;
     }
@@ -1253,7 +1314,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply(
         `목표를 설정하고 작업을 시작합니다.\n조건: ${arg}\n`
         + `충족될 때까지 자동으로 턴을 이어 가며 최대 ${MAX_GOAL_ROUNDS}턴까지 진행합니다. `
-        + "매 턴이 끝나면 Haiku로 달성 여부를 평가합니다. /goal clear 또는 /stop 으로 중단."
+        + "매 턴 종료 후 `check:` 명령(있으면)을 먼저 실행해 객관 판정하고, 나머지는 판관 모델이 평가합니다. /goal clear 또는 /stop 으로 중단."
       );
     } else if (result === "active") {
       await ctx.reply(
@@ -1264,6 +1325,120 @@ export function createBot(config: AppConfig, store: StateStore) {
         `목표를 저장했습니다. 이 토픽에서 작업을 한 번 실행(메시지 전송)하면 그 이후부터 목표를 향해 자동 진행합니다.\n조건: ${arg}`
       );
     }
+  });
+
+  // /route <작업 설명>: 강점 사전(매일 03:00 갱신)과 작업유형 규칙으로 적합한 제공자를
+  // 추천한다. 1단계 라우터 — 추천만 하고 자동 배정은 하지 않는다(어르신이 보고 판단).
+  bot.command("route", async (ctx) => {
+    const arg = ctx.match.trim();
+    if (!arg) {
+      await ctx.reply(
+        "작업 설명과 함께 사용하세요.\n예: /route 이 PDF를 요약해줘\n"
+        + "작업유형과 이력 기반 강점 사전을 보고 Claude·Codex·agy 중 적합한 제공자를 추천합니다."
+      );
+      return;
+    }
+    const hints = loadStrengthHints(agentStrengthsPath());
+    const decision = routeProvider(arg, hints);
+    const hintNote = Object.keys(hints).length === 0
+      ? "\n(강점 사전이 아직 비어 있어 기본 규칙으로만 판단했습니다.)"
+      : decision.usedHint
+        ? "\n(이력 기반 강점 사전이 기본 규칙을 보정했습니다.)"
+        : "";
+    await ctx.reply(
+      `추천 제공자: ${providerDisplayLabel(decision.provider)}\n`
+      + `작업유형: ${decision.taskType}\n`
+      + `근거: ${decision.reason}${hintNote}`
+    );
+  });
+
+  // /synth <작업>: 병렬 종합. Claude·Codex·agy를 읽기 전용으로 동시에 시키고, 로컬
+  // qwen3 심사자(실패 시 Haiku 폴백)가 최우수 답을 고른 뒤 승자가 통합해 최종답을 낸다.
+  // 읽기·조언 작업 전용(파일 수정 안 함). 토큰·시간이 N배인 비싼 경로.
+  bot.command("synth", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const arg = ctx.match.trim();
+    if (!arg) {
+      await ctx.reply(
+        "작업 설명과 함께 사용하세요.\n예: /synth 이 설계의 위험 요소를 분석해줘\n"
+        + "Claude·Codex·agy를 읽기 전용으로 동시에 실행하고 로컬 심사자가 최우수 답을 골라 통합합니다. "
+        + "읽기·조언 작업 전용이며 토큰·시간이 더 듭니다."
+      );
+      return;
+    }
+    await ctx.reply(
+      "병렬 종합을 시작합니다. Claude·Codex·agy를 읽기 전용으로 동시 실행 → 심사 → 통합. "
+      + "잠시 걸립니다."
+    );
+    try {
+      const result = await sessions.runSynthesis(session, arg);
+      if (!result.ok) {
+        await ctx.reply(`병렬 종합을 완료하지 못했습니다: ${result.reason ?? "원인 불명"}`);
+        return;
+      }
+      const judgeLabel = result.verdict
+        ? result.verdict.judge === "local"
+          ? "로컬 qwen3"
+          : result.verdict.judge === "haiku"
+            ? "Haiku 폴백"
+            : "폴백(첫 후보)"
+        : "단일 후보(심사 생략)";
+      const candidateLabels = (result.candidates ?? [])
+        .map((p) => providerDisplayLabel(p))
+        .join("·");
+      const tail =
+        `\n\n———\n후보: ${candidateLabels} / 심사: ${judgeLabel}`
+        + (result.synthesizedBy ? ` / 통합: ${providerDisplayLabel(result.synthesizedBy)}` : "")
+        + (result.verdict ? `\n근거: ${result.verdict.reason}` : "");
+      await ctx.reply(`${result.answer ?? ""}${tail}`);
+    } catch (error) {
+      await ctx.reply(`병렬 종합 중 오류가 발생했습니다: ${safeErrorMessage(error)}`);
+    }
+  });
+
+  // /query <질문>: LLM-Wiki에 질문한다. 현재 세션 에이전트(Claude/Codex/agy)에게 위키
+  // 규약(.claude/commands/query.md)을 먼저 읽고 그대로 수행하라고 주입한다. 봇은 규약
+  // 본문을 복제하지 않으므로 위키 규약이 바뀌어도 자동으로 따라간다. 검색 대상은 항상
+  // LLM-Wiki(절대경로)이며 현재 세션 프로젝트 cwd와 무관하다.
+  bot.command("query", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!session) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const arg = ctx.match.trim();
+    if (!arg) {
+      await ctx.reply(
+        "질문과 함께 사용하세요.\n예: /query 멀티모델 오케스트레이션이 뭐야?\n"
+        + "현재 세션 에이전트가 LLM-Wiki를 query.md 규약대로 검색해 인용과 함께 답합니다."
+      );
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.reply("현재 세션이 작업 중입니다. 끝난 뒤 다시 시도하거나 /steer로 지시하세요.");
+      return;
+    }
+    const vault = wikiVaultPath();
+    const prompt =
+      `다음 질문에 LLM-Wiki로 답하라.\n\n`
+      + `질문: ${arg}\n\n`
+      + `절차: 먼저 \`${vault}/.claude/commands/query.md\`를 읽고, 그 규약(2단 라우팅 `
+      + `Route→Search, 근거 인용, 지어내기 금지)을 그대로 따른다. 검색 대상 저장소 루트는 `
+      + `\`${vault}\` 이며, 현재 작업 디렉터리가 아니라 이 절대경로 안의 파일만 읽는다. `
+      + `규약대로 회수한 페이지 내용으로만, 각 주장에 \`[[페이지]]\` 인용을 붙여 답하라. `
+      + `근거가 없으면 "위키에 없음 — /ingest 필요"라고 답하고 지어내지 마라. 위키 파일을 `
+      + `수정하지 말고(읽기 전용) 답변만 작성하라.`;
+    if (!sessions.resume(session, prompt)) {
+      await ctx.reply("질의를 시작하지 못했습니다. 세션 상태를 확인하세요.");
+      return;
+    }
+    await ctx.reply(`LLM-Wiki에 질의합니다: ${arg}`);
   });
 
   bot.command("diff", async (ctx) => {
@@ -1687,6 +1862,52 @@ export function createBot(config: AppConfig, store: StateStore) {
     });
   });
 
+  // 새 세션 기본값 패널: 추론 강도/thinking 선택. setr:<provider>:<id>
+  bot.callbackQuery(/^setr:/, async (ctx) => {
+    const rest = ctx.callbackQuery.data.slice("setr:".length);
+    const sep = rest.indexOf(":");
+    const provider = rest.slice(0, sep) as ProviderKind;
+    const valueId = rest.slice(sep + 1);
+    if (provider === "codex") {
+      const current = store.getSessionDefaults();
+      const option = codexReasoningOptionsForModel(config.modelCatalog, current.codexModel)
+        .find((item) => item.id === valueId);
+      if (!option) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 추론 강도입니다.", show_alert: true });
+        return;
+      }
+      const defaults = store.updateSessionDefaults({ codexReasoning: option.id });
+      await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
+      await ctx.reply(`새 세션 기본 Codex 추론 강도: ${option.label}`, {
+        reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+      });
+      return;
+    }
+    if (provider === "agy") {
+      const option = agyThinkingOptions().find((item) => item.id === valueId);
+      if (!option) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 추론 강도입니다.", show_alert: true });
+        return;
+      }
+      const defaults = store.updateSessionDefaults({ agyThinkingLevel: option.id });
+      await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
+      await ctx.reply(`새 세션 기본 agy 추론 강도: ${option.label}`, {
+        reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+      });
+      return;
+    }
+    // Claude: thinking on(adaptive)/off.
+    if (valueId !== "adaptive" && valueId !== "off") {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 thinking입니다.", show_alert: true });
+      return;
+    }
+    const defaults = store.updateSessionDefaults({ thinking: valueId });
+    await ctx.answerCallbackQuery({ text: `thinking ${valueId === "off" ? "off" : "on"} 기본값` });
+    await ctx.reply(`새 세션 기본 thinking: ${valueId === "off" ? "off" : "on"}`, {
+      reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+    });
+  });
+
   bot.callbackQuery(/^delp:/, async (ctx) => {
     const index = Number.parseInt(ctx.callbackQuery.data.slice("delp:".length), 10);
     const project = Number.isInteger(index) ? config.projects[index] : undefined;
@@ -1806,35 +2027,15 @@ export function createBot(config: AppConfig, store: StateStore) {
   });
 
   bot.hears(/^💭 /, async (ctx) => {
-    const current = store.getSessionDefaults();
-    if (current.provider === "codex") {
-      // Codex: 추론 강도를 다음 단계로 순환한다.
-      const options = codexReasoningOptionsForModel(config.modelCatalog, current.codexModel);
-      const index = options.findIndex((option) => option.id === current.codexReasoning);
-      const nextOption = options[(index + 1) % options.length] ?? options[0];
-      if (!nextOption) return;
-      const defaults = store.updateSessionDefaults({ codexReasoning: nextOption.id });
-      await ctx.reply(`새 세션 기본 Codex 추론 강도: ${nextOption.label}`, {
-        reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
-      });
-      return;
-    }
-    if (current.provider === "agy") {
-      const options = agyThinkingOptions();
-      const index = options.findIndex((option) => option.id === current.agyThinkingLevel);
-      const nextOption = options[(index + 1) % options.length] ?? options[0];
-      if (!nextOption) return;
-      const defaults = store.updateSessionDefaults({ agyThinkingLevel: nextOption.id });
-      await ctx.reply(`새 세션 기본 agy 추론 강도: ${nextOption.label}`, {
-        reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
-      });
-      return;
-    }
-    // Claude: thinking on(adaptive)/off 토글.
-    const next = current.thinking === "off" ? "adaptive" : "off";
-    const defaults = store.updateSessionDefaults({ thinking: next });
-    await ctx.reply(`새 세션 기본 thinking: ${next === "off" ? "off" : "on"}`, {
-      reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+    // 순환 토글 대신, 강도/thinking 선택지를 개별 버튼으로 노출한다.
+    const defaults = store.getSessionDefaults();
+    const prompt = defaults.provider === "codex"
+      ? "새 세션 기본 Codex 추론 강도를 선택하세요."
+      : defaults.provider === "agy"
+      ? "새 세션 기본 agy 추론 강도를 선택하세요."
+      : "새 세션 기본 Claude thinking을 선택하세요.";
+    await ctx.reply(prompt, {
+      reply_markup: defaultsReasoningKeyboard(defaults, config.modelCatalog)
     });
   });
 

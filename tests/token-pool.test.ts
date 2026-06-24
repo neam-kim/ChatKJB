@@ -37,15 +37,15 @@ describe("TokenPool", () => {
     expect(pool.select(now)).toBe(B);
   });
 
-  it("recovers the first token after its reset time passes", () => {
+  it("stays on the failed-over token even after the first token recovers (sticky)", () => {
     const pool = new TokenPool([A, B]);
     const now = 1_000_000;
     const resetsAt = new Date(now + 3_600_000).toISOString();
     pool.observe(A, snapshot({ fiveHour: { utilization: 100, resetsAt } }), now);
 
     expect(pool.select(now)).toBe(B);
-    // 초기화 시각 이후에는 다시 1순위 토큰을 사용한다.
-    expect(pool.select(now + 3_600_001)).toBe(A);
+    // sticky: A가 회복돼도 1순위로 되돌아가지 않고, 마지막에 쓰던 B를 계속 사용한다.
+    expect(pool.select(now + 3_600_001)).toBe(B);
   });
 
   it("treats an exhausted Agent SDK weekly window as exhausted", () => {
@@ -61,7 +61,8 @@ describe("TokenPool", () => {
     expect(pool.isExhausted(A, now)).toBe(true);
     // resetsAt가 없으면 기본 백오프(1시간) 동안 봉인.
     expect(pool.select(now)).toBe(B);
-    expect(pool.select(now + 3_600_001)).toBe(A);
+    // sticky: 백오프가 지나 A가 회복돼도 마지막에 쓰던 B를 계속 사용한다.
+    expect(pool.select(now + 3_600_001)).toBe(B);
   });
 
   it("marks a token exhausted from a rate-limit error with default backoff", () => {
@@ -119,6 +120,35 @@ describe("TokenPool", () => {
     expect(pool.recoversAt(now)).toBe(now + 3_000);
     // 그 시각이 지나면 다시 살아있는 토큰이 생겨 대기가 필요 없다.
     expect(pool.recoversAt(now + 3_001)).toBeNull();
+  });
+
+  it("keeps returning the same token across calls while it is healthy (sticky)", () => {
+    const pool = new TokenPool([A, B]);
+    const now = 1_000_000;
+    expect(pool.select(now)).toBe(A);
+    expect(pool.select(now)).toBe(A);
+    expect(pool.select(now)).toBe(A);
+  });
+
+  it("moves to the next token when the current one is exhausted and then sticks to it", () => {
+    const pool = new TokenPool([A, B]);
+    const now = 1_000_000;
+    expect(pool.select(now)).toBe(A);
+    // A 소진 → B로 이동하고 이후 B를 고수한다.
+    pool.noteRateLimited(A, now, now + 5_000);
+    expect(pool.select(now)).toBe(B);
+    expect(pool.select(now)).toBe(B);
+  });
+
+  it("fails over back from B to A when B becomes exhausted", () => {
+    const pool = new TokenPool([A, B]);
+    const now = 1_000_000;
+    pool.noteRateLimited(A, now, now + 5_000);
+    expect(pool.select(now)).toBe(B);
+    // B도 소진되고 A는 이미 회복된 시점이면 다시 A로 넘어간다.
+    pool.noteRateLimited(B, now + 6_000, now + 20_000);
+    expect(pool.select(now + 6_000)).toBe(A);
+    expect(pool.select(now + 6_000)).toBe(A);
   });
 
   it("does not fail over below the exhaustion threshold", () => {

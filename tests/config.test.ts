@@ -137,6 +137,37 @@ describe("project configuration", () => {
     expect(JSON.parse(readFileSync(projectsPath, "utf8"))).toHaveLength(2);
   });
 
+  it("repairs a moved project when the old path is missing and the folder name matches", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
+    directories.push(directory);
+    const oldParent = join(directory, "old");
+    const newParent = join(directory, "new");
+    const oldPath = join(oldParent, "Application Form");
+    const newPath = join(newParent, "Application Form");
+    mkdirSync(oldParent);
+    mkdirSync(newParent);
+    mkdirSync(newPath);
+    const projectsPath = join(directory, "projects.json");
+    const projects = [{
+      name: "Application Form",
+      aliases: ["forms"],
+      cwd: oldPath,
+      defaultMode: "default" as const
+    }];
+    writeFileSync(projectsPath, JSON.stringify(projects));
+    const { addProject } = await import("../src/config.js");
+
+    const project = await addProject(projectsPath, projects, newPath);
+
+    expect(project).toEqual({
+      name: "Application Form",
+      aliases: ["forms"],
+      cwd: realpathSync(newPath),
+      defaultMode: "default"
+    });
+    expect(JSON.parse(readFileSync(projectsPath, "utf8"))).toEqual([project]);
+  });
+
   it("removes a project by name or alias and rewrites projects.json", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
     directories.push(directory);

@@ -168,8 +168,23 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
       ];
     }),
     check("Codex 구독 인증", 1000, async () => {
-      requireCodexSubscriptionAuth();
-      return ["✅ Codex 구독 인증: ChatGPT 로그인 확인"];
+      const homes = deps.config.codexAccountHomes;
+      const failures: string[] = [];
+      homes.forEach((home, index) => {
+        try {
+          requireCodexSubscriptionAuth(home);
+        } catch (error) {
+          failures.push(`계정 #${index + 1} (${home}): ${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+      if (failures.length > 0) {
+        return [`❌ Codex 구독 인증: ${failures.length}/${homes.length}개 계정 오류`, ...failures.map((f) => `   ${f}`)];
+      }
+      return [
+        homes.length > 1
+          ? `✅ Codex 구독 인증: ${homes.length}개 계정 ChatGPT 로그인 확인 (한도 도달 시 자동 페일오버)`
+          : "✅ Codex 구독 인증: ChatGPT 로그인 확인"
+      ];
     }),
     check("agy SDK", 5000, async () => {
       if (!deps.config.geminiApiKey || deps.config.geminiApiKey.length < 30) {

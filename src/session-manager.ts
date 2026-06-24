@@ -29,6 +29,13 @@ import { StateStore } from "./store.js";
 import { StreamRenderer } from "./stream-renderer.js";
 import { safeErrorMessage } from "./telegram-transport.js";
 import { TokenPool } from "./token-pool.js";
+import { CodexAccountPool } from "./codex-account-pool.js";
+import {
+  normalizeGoalCondition,
+  parseGoalChecks,
+  runGoalChecks,
+  type CheckRunResult
+} from "./goal-checks.js";
 import {
   sharedMemoryBridgePath,
   sharedResourceGuidePath,
@@ -63,6 +70,14 @@ import {
   snapshotFromUsageResponse
 } from "./usage.js";
 import { AgyInteractiveSession, type AgyAttachment, type AgyLiveStatus } from "./agy-interactive.js";
+import {
+  buildHaikuJudgePrompt,
+  buildSynthesisPrompt,
+  judgeLocal,
+  parseJudgeResponse,
+  type JudgeCandidate,
+  type JudgeVerdict
+} from "./judge.js";
 
 // 일시적 과부하(Overloaded/5xx) 자동 재시도 상한과 백오프(지수, 상한 60초).
 const MAX_OVERLOAD_RETRIES = 5;
@@ -324,6 +339,8 @@ interface SessionManagerOptions {
   claudeCodeOauthToken: string;
   // 한도 도달 시 페일오버할 추가 계정 토큰(선택). 기본 토큰 다음 우선순위로 사용된다.
   additionalOauthTokens?: string[];
+  // Codex 계정별 CODEX_HOME 디렉터리 목록(선택). 미지정 시 단일 기본 홈으로 동작한다.
+  codexAccountHomes?: string[];
   claudeCodeExecutable?: string;
   // agy(Antigravity CLI) 바이너리 경로. 데몬 PATH에 ~/.local/bin이 없을 수 있어 명시 경로를 받는다.
   agyExecutable?: string;
@@ -373,6 +390,19 @@ export interface ResetContextResult {
   reason?: string;
 }
 
+export interface SynthesisResult {
+  ok: boolean;
+  reason?: string;
+  // 최종 종합 답변(ok일 때).
+  answer?: string;
+  // 후보로 실제 응답한 provider들.
+  candidates?: ProviderKind[];
+  // 심사 결과(투명성). 단일 후보면 생략될 수 있다.
+  verdict?: JudgeVerdict;
+  // 종합자로 쓴 provider.
+  synthesizedBy?: ProviderKind;
+}
+
 function assistantBlocks(message: SDKMessage): Array<Record<string, unknown>> {
   if (message.type !== "assistant" || !Array.isArray(message.message.content)) return [];
   return message.message.content as unknown as Array<Record<string, unknown>>;
@@ -403,6 +433,7 @@ function codexProgress(item: ThreadItem): string | null {
 }
 
 export function buildCodexEnvironment(
+  targetHome?: string,
   source: NodeJS.ProcessEnv = process.env
 ): Record<string, string> {
   const result: Record<string, string> = {};
@@ -418,13 +449,20 @@ export function buildCodexEnvironment(
     }
     result[key] = value;
   }
+  // 다중 계정: 선택된 계정의 CODEX_HOME으로 강제 덮어쓴다. SDK에 env를 통째로 넘기면
+  // 자식 프로세스는 process.env를 상속하지 않으므로, 여기서 지정한 값이 인증 디렉터리를 결정한다.
+  if (targetHome && targetHome.trim()) {
+    result["CODEX_HOME"] = targetHome;
+  }
   return result;
 }
 
 export function requireCodexSubscriptionAuth(
+  home?: string,
   source: NodeJS.ProcessEnv = process.env
 ): void {
-  const codexHome = source.CODEX_HOME?.trim() || join(homedir(), ".codex");
+  // 명시된 계정 홈이 있으면 그 홈을, 없으면 기존 단일 계정 해석(CODEX_HOME 또는 ~/.codex)을 검사한다.
+  const codexHome = home?.trim() || source.CODEX_HOME?.trim() || join(homedir(), ".codex");
   const authPath = join(codexHome, "auth.json");
   let auth: unknown;
   try {
@@ -508,27 +546,63 @@ export function buildRolloverSummaryPrompt(focus?: string): string {
   ].join("\n");
 }
 
-/** /goal 자동 진행 턴에 전달할 작업 프롬프트. reason은 직전 평가에서 무엇이 남았는지. */
+/**
+ * /goal 자동 진행 턴에 전달할 작업 프롬프트. reason은 직전 평가에서 무엇이 남았는지.
+ * 목표 원문에 포함된 `check:` 결정론 게이트 줄은 작업 모델에게 노출하지 않는다(평가 전용).
+ * 사람용 설명(description)만 목표로 제시한다.
+ */
 export function buildGoalPrompt(condition: string, reason?: string): string {
-  const clean = condition.replace(/\s+/g, " ").trim();
-  const base = `[GOAL] 다음 목표가 완전히 충족될 때까지 작업을 진행하세요: ${clean}`;
+  const { description, checks } = parseGoalChecks(condition);
+  const clean = (description || condition).replace(/\s+/g, " ").trim();
+  const checkNote = checks.length > 0
+    ? `\n(완료 판정은 다음 명령으로 객관 검증됩니다: ${checks.join(" ; ")})`
+    : "";
+  const base = `[GOAL] 다음 목표가 완전히 충족될 때까지 작업을 진행하세요: ${clean}${checkNote}`;
   const tail = reason
     ? `\n직전 턴 평가에서 아직 충족되지 않았습니다: ${reason}\n남은 부분을 끝까지 완료하세요.`
     : "";
   return `${base}${tail}`;
 }
 
-/** /goal 충족 여부를 빠른 모델로 판정시키기 위한 읽기 전용 프롬프트. */
-export function buildGoalCheckPrompt(condition: string): string {
-  const clean = condition.replace(/\s+/g, " ").trim();
-  return [
+/**
+ * /goal 충족 여부를 빠른 모델(판관)로 판정시키기 위한 읽기 전용 프롬프트.
+ * Structure2.md의 Tier 0 철학에 따라, 결정론적 게이트(`check:` 명령) 실행 결과가 있으면
+ * 그 사실을 packet으로 함께 전달해 판관이 사실을 추측하지 않게 한다. description은 목표에서
+ * check 줄을 뺀 사람용 텍스트다.
+ */
+export function buildGoalCheckPrompt(
+  description: string,
+  checkRun?: CheckRunResult
+): string {
+  const clean = description.replace(/\s+/g, " ").trim();
+  const lines = [
     "다음 목표가 현재 저장소 상태에서 이미 충족되었는지 읽기 전용으로만 확인해 판정하세요.",
     "파일을 수정하지 말고, 필요한 파일·명령 결과를 확인한 뒤 마지막 줄에 정확히 아래 한 형식으로만 답하세요.",
     "GOAL_MET: <한 줄 근거>",
     "GOAL_UNMET: <무엇이 남았는지 한 줄>",
     "",
-    `목표: ${clean}`
-  ].join("\n");
+    `목표: ${clean || "(자유형 목표)"}`
+  ];
+  if (checkRun && checkRun.results.length > 0) {
+    lines.push(
+      "",
+      "[결정론적 검증 결과] 아래는 이미 실행된 명령의 객관적 결과입니다. 이 사실은 추측하지 말고 그대로 신뢰하세요."
+    );
+    for (const result of checkRun.results) {
+      const status = result.passed ? "PASS" : "FAIL";
+      lines.push(`- ${status}: ${result.command}`);
+      if (!result.passed && result.outputTail) {
+        lines.push(`  출력(꼬리): ${result.outputTail.replace(/\s+/g, " ").slice(-200)}`);
+      }
+    }
+    lines.push(
+      "",
+      checkRun.allPassed
+        ? "모든 결정론적 검증은 통과했습니다. 위 목표 설명의 나머지 부분까지 충족됐는지 확인해 판정하세요."
+        : "결정론적 검증 중 실패가 있으므로 목표는 아직 미충족입니다. GOAL_UNMET으로 답하세요."
+    );
+  }
+  return lines.join("\n");
 }
 
 export function buildMemoryPrompt(focus?: string, memoryDir = "~/.claude/memory"): string {
@@ -564,10 +638,15 @@ export function resultSummary(
 
 export function loadProjectInstructions(cwd: string): string {
   const sections: string[] = [];
+  const seen = new Set<string>();
   for (const filename of ["CLAUDE.md", "AGENTS.md"]) {
     try {
       const content = readFileSync(join(cwd, filename), "utf8").trim();
-      if (content) sections.push(`[${filename}]\n${content.slice(0, 100_000)}`);
+      // AGENTS.md is often a symlink to CLAUDE.md (so Codex/agy read the same
+      // project rules); dedupe identical content to avoid double-injection.
+      if (!content || seen.has(content)) continue;
+      seen.add(content);
+      sections.push(`[${filename}]\n${content.slice(0, 100_000)}`);
     } catch {
       // Project instruction files are optional.
     }
@@ -804,6 +883,18 @@ export function resultFailureText(
 ): string | null {
   if (message.type !== "result") return null;
   const text = resultText(message);
+  const apiErrorStatus =
+    message.subtype === "success" ? message.api_error_status : null;
+  if (apiErrorStatus === 429) {
+    return text || "Claude API Error: 429 rate limit";
+  }
+  if (apiErrorStatus != null && apiErrorStatus >= 500) {
+    return text && !text.includes("[ede_diagnostic]")
+      ? text
+      : `Claude API Error: ${apiErrorStatus} ${
+          apiErrorStatus === 529 ? "Overloaded" : "server error"
+        }`;
+  }
   if (rateLimitRejected || isRateLimitError(text) || isOverloadedError(text)) {
     return text || (rateLimitRejected ? "Claude rate limit rejected" : null);
   }
@@ -890,6 +981,8 @@ export class SessionManager {
   >();
   private readonly tokenPool: TokenPool;
   private readonly oauthTokens: string[];
+  // Codex 다중 계정 풀(CODEX_HOME 디렉터리 기준, sticky 선택 + reactive 페일오버).
+  private readonly codexAccountPool: CodexAccountPool;
 
   constructor(
     private readonly store: StateStore,
@@ -902,6 +995,11 @@ export class SessionManager {
       ...(options.additionalOauthTokens ?? [])
     ];
     this.tokenPool = new TokenPool(this.oauthTokens);
+    // 계정 홈이 주어지지 않으면 기본 홈(CODEX_HOME 또는 ~/.codex) 1개로 단일 계정 동작.
+    const codexHomes = options.codexAccountHomes && options.codexAccountHomes.length > 0
+      ? options.codexAccountHomes
+      : [process.env.CODEX_HOME?.trim() || join(homedir(), ".codex")];
+    this.codexAccountPool = new CodexAccountPool(codexHomes);
   }
 
   createSession(
@@ -1019,7 +1117,9 @@ export class SessionManager {
   setGoal(sessionId: string, condition: string): "queued" | "active" | "stored" {
     const session = this.store.getSession(sessionId);
     if (!session) return "stored";
-    const clean = condition.replace(/\s+/g, " ").trim();
+    // 개행은 보존하고 각 줄 안의 공백만 압축한다. check: 게이트는 줄 단위로 추출하므로
+    // 개행을 통째로 없애면(`\s+`→" ") 결정론 검증이 동작하지 않는다.
+    const clean = normalizeGoalCondition(condition);
     this.store.updateSession(sessionId, { goalCondition: clean });
     this.goalRounds.set(sessionId, 0);
     if (this.active.has(sessionId)) return "active";
@@ -1333,9 +1433,10 @@ export class SessionManager {
     }
     // Codex: 직전 스레드를 재개해 비스트리밍으로 요약 한 턴을 받는다.
     if (!session.codexThreadId) return "";
-    requireCodexSubscriptionAuth();
+    const codexHome = this.codexAccountPool.select();
+    requireCodexSubscriptionAuth(codexHome);
     const codex = new Codex({
-      env: buildCodexEnvironment(),
+      env: buildCodexEnvironment(codexHome),
       config: codexSharedResourceConfig()
     });
     const thread = codex.resumeThread(session.codexThreadId, {
@@ -2061,13 +2162,16 @@ export class SessionManager {
     let turnTimeout: NodeJS.Timeout | undefined;
     let lastResponse = "";
     let codexThreadId = session.codexThreadId;
+    // catch의 한도 페일오버에서 봉인 대상으로 참조하려고 try 바깥에 둔다.
+    let codexHome = this.codexAccountPool.select();
 
     try {
       await this.safeRename(session, `[RUNNING] ${session.title}`);
       await renderer.start(false);
       this.store.updateSession(session.id, { status: "running" });
 
-      requireCodexSubscriptionAuth();
+      codexHome = this.codexAccountPool.select();
+      requireCodexSubscriptionAuth(codexHome);
       syncSharedResources();
       const codexModel = session.codexModel ?? DEFAULT_CODEX_MODEL;
       const codexReasoning =
@@ -2082,7 +2186,7 @@ export class SessionManager {
         webSearchEnabled: true
       };
       const codex = new Codex({
-        env: buildCodexEnvironment(),
+        env: buildCodexEnvironment(codexHome),
         config: codexSharedResourceConfig()
       });
       const thread = codexThreadId
@@ -2186,6 +2290,50 @@ export class SessionManager {
         this.store.updateSession(session.id, { status: "aborted" });
         await renderer.finish("aborted", "사용자가 작업을 중단했습니다.");
         await this.safeRename(session, `[STOP] ${session.title}`);
+      } else if (isRateLimitError(error)) {
+        // 현재 계정이 한도에 도달했다. 봉인하고, 살아있는 다른 계정이 있으면 같은 작업을
+        // 그 계정으로 자동 재실행한다. 스레드는 계정 홈(CODEX_HOME)별로 저장되므로, 다른
+        // 계정에서는 기존 codexThreadId가 없다 → null로 리셋해 새 스레드로 시작한다.
+        // 대화 맥락은 다음 턴의 메모리/요약 부트스트랩으로 보강된다.
+        const limitSnapshot = snapshotFromRateLimitError(error);
+        const resetsAt = limitSnapshot?.fiveHour?.resetsAt;
+        this.codexAccountPool.markFailed(
+          codexHome,
+          Date.now(),
+          resetsAt ? Date.parse(resetsAt) : undefined
+        );
+        const attempts = (request.autoSwitchCount ?? 0) + 1;
+        const nextHome = this.codexAccountPool.select();
+        const canAutoSwitch =
+          this.codexAccountPool.size > 1
+          && attempts < this.codexAccountPool.size
+          && !this.codexAccountPool.isExhausted(nextHome);
+        if (canAutoSwitch) {
+          const fromIndex = this.codexAccountPool.indexOf(codexHome);
+          const nextIndex = this.codexAccountPool.indexOf(nextHome);
+          await this.transport.sendText(
+            session.chatId,
+            session.topicId,
+            `Codex 계정 #${fromIndex + 1} 한도 도달 → 계정 #${nextIndex + 1}로 자동 전환해 새 스레드로 이어서 실행합니다.`
+          ).catch(() => undefined);
+          await this.safeRename(session, `[SWITCH] ${session.title}`);
+          // 다른 계정 홈에는 기존 스레드가 없으므로 스레드를 리셋한다.
+          this.store.updateSession(session.id, { codexThreadId: null });
+          this.enqueue({ ...request, autoSwitchCount: attempts });
+          return;
+        }
+        // 전환할 살아있는 계정이 없으면 회복 시각에 맞춰 자동 재개를 예약한다.
+        const resumeAt = this.codexAccountPool.recoversAt();
+        if (resumeAt !== null) {
+          if (this.codexAccountPool.size > 1) {
+            renderer.note("모든 Codex 계정이 한도에 도달했습니다. 회복 시각에 자동 재개를 예약합니다.");
+          }
+          this.scheduleLimitResume(session, request, null, resumeAt);
+          return;
+        }
+        this.store.updateSession(session.id, { status: "error" });
+        await renderer.finish("error", `Codex 실행 실패: ${safeErrorMessage(error)}`);
+        await this.safeRename(session, `[ERROR] ${session.title}`);
       } else {
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", `Codex 실행 실패: ${safeErrorMessage(error)}`);
@@ -2541,11 +2689,34 @@ export class SessionManager {
     });
   }
 
-  /** 목표 충족 여부를 빠른 모델(Haiku)로 읽기 전용 판정한다. 살아있는 토큰을 새로 고른다. */
+  /**
+   * 목표 충족 여부를 판정한다(Structure2.md Tier 0 철학).
+   * 1) 목표에 `check:` 결정론적 게이트가 있으면 먼저 실행한다.
+   * 2) 게이트가 하나라도 실패하면 LLM을 부르지 않고 즉시 미충족으로 본다(사실은 추측하지 않는다).
+   * 3) 게이트가 모두 통과(또는 게이트 없음)면 그 객관적 결과를 packet으로 판관(Haiku)에 넘겨
+   *    목표 설명(description)의 나머지 충족 여부를 읽기 전용으로 판정한다.
+   */
   private async evaluateGoal(
     session: SessionRecord,
     condition: string
   ): Promise<{ met: boolean; reason: string }> {
+    const spec = parseGoalChecks(condition);
+    const checkRun = await runGoalChecks(spec.checks, session.cwd);
+    if (!checkRun.allPassed) {
+      const failed = checkRun.results.filter((r) => !r.passed).map((r) => r.command);
+      return {
+        met: false,
+        reason: `결정론적 검증 실패: ${failed.join(", ")}`
+      };
+    }
+    // 게이트만 있고 사람용 설명이 없으면(=순수 결정론 목표) LLM 없이 통과로 판정한다.
+    if (spec.checks.length > 0 && !spec.description) {
+      return {
+        met: true,
+        reason: `결정론적 검증 ${spec.checks.length}건 모두 통과`
+      };
+    }
+
     const controller = new AbortController();
     const run: ActiveRun = {
       controller,
@@ -2560,7 +2731,7 @@ export class SessionManager {
       session,
       controller,
       run,
-      buildGoalCheckPrompt(condition),
+      buildGoalCheckPrompt(spec.description, checkRun),
       this.tokenPool.select(),
       false,
       GOAL_EVAL_MODEL
@@ -2672,6 +2843,176 @@ export class SessionManager {
     }
     if (!text) throw new Error("Claude 읽기 전용 단계가 빈 응답을 반환했습니다.");
     return text;
+  }
+
+  // ── 2단계 병렬 종합 ──────────────────────────────────────────────────────
+  // 같은 작업을 Claude·Codex·agy에 읽기 전용으로 동시에 시키고(파일 충돌 없음), 로컬
+  // qwen3.6 심사자(실패 시 Haiku 폴백)가 가장 나은 답을 고른 뒤, 승자 provider가 다른
+  // 후보의 더 나은 부분을 통합해 최종답을 만든다. /synth 명령으로만 호출되는 비싼 경로다.
+  async runSynthesis(session: SessionRecord, prompt: string): Promise<SynthesisResult> {
+    if (this.active.has(session.id)) {
+      return { ok: false, reason: "실행 중에는 병렬 종합을 시작할 수 없습니다. 작업 완료 또는 /stop 후 다시 시도하세요." };
+    }
+    const providers: ProviderKind[] = ["claude", "codex", "agy"];
+    const settled = await Promise.allSettled(
+      providers.map((provider) => this.runSilentReadOnly(session, provider, prompt))
+    );
+    const candidates: JudgeCandidate[] = [];
+    for (const [index, result] of settled.entries()) {
+      if (result.status === "fulfilled" && result.value.trim()) {
+        candidates.push({ provider: providers[index]!, text: result.value.trim() });
+      }
+    }
+
+    if (candidates.length === 0) {
+      return { ok: false, reason: "후보 제공자가 모두 응답하지 못했습니다." };
+    }
+    const candidateProviders = candidates.map((c) => c.provider);
+
+    // 후보가 하나뿐이면 심사·종합 없이 그대로 반환한다.
+    if (candidates.length === 1) {
+      return {
+        ok: true,
+        answer: candidates[0]!.text,
+        candidates: candidateProviders,
+        synthesizedBy: candidates[0]!.provider
+      };
+    }
+
+    const verdict = await this.judgeCandidates(session, prompt, candidates);
+    const winner = candidates[verdict.winner - 1] ?? candidates[0]!;
+
+    // 승자 기반 통합: 승자 provider에게 후보들을 주고 최종본을 합치게 한다(읽기 전용).
+    const synthPrompt = buildSynthesisPrompt(prompt, candidates, verdict);
+    let answer = winner.text;
+    try {
+      answer = (await this.runSilentReadOnly(session, winner.provider, synthPrompt)).trim() || winner.text;
+    } catch (error) {
+      // 종합 실패 시 승자 답을 그대로 쓴다(품질은 낮아도 답은 보존).
+      console.error("Synthesis merge failed:", safeErrorMessage(error, this.oauthTokens));
+    }
+
+    return {
+      ok: true,
+      answer,
+      candidates: candidateProviders,
+      verdict,
+      synthesizedBy: winner.provider
+    };
+  }
+
+  // 후보들을 심사한다. 로컬 qwen3.6 우선, 실패 시 Haiku 폴백, 그마저 실패하면 1번 후보.
+  private async judgeCandidates(
+    session: SessionRecord,
+    question: string,
+    candidates: JudgeCandidate[]
+  ): Promise<JudgeVerdict> {
+    const local = await judgeLocal(question, candidates).catch(() => null);
+    if (local) return { ...local, judge: "local" };
+
+    try {
+      const controller = new AbortController();
+      const run: ActiveRun = {
+        controller,
+        input: new MessageQueue(),
+        pendingTurns: 0,
+        startedAt: Date.now(),
+        codexTimers: new Map(),
+        codexStarts: new Map(),
+        mcpFailures: new Map()
+      };
+      const text = await this.runReadOnlyClaude(
+        session,
+        controller,
+        run,
+        buildHaikuJudgePrompt(question, candidates),
+        this.tokenPool.select(),
+        false,
+        GOAL_EVAL_MODEL
+      );
+      const parsed = parseJudgeResponse(text, candidates.length);
+      if (parsed) return { ...parsed, judge: "haiku" };
+    } catch (error) {
+      console.error("Haiku judge fallback failed:", safeErrorMessage(error, this.oauthTokens));
+    }
+    return { winner: 1, reason: "심사자를 사용할 수 없어 첫 후보를 선택했습니다.", judge: "fallback" };
+  }
+
+  // provider 하나에 같은 프롬프트를 읽기 전용·새 맥락으로 1회 실행해 최종 텍스트만 받는다.
+  // 텔레그램 토픽·active 맵·렌더러에 흘리지 않는다(병렬 종합 전용 조용한 실행).
+  private async runSilentReadOnly(
+    session: SessionRecord,
+    provider: ProviderKind,
+    prompt: string
+  ): Promise<string> {
+    if (provider === "claude") {
+      const controller = new AbortController();
+      const run: ActiveRun = {
+        controller,
+        input: new MessageQueue(),
+        pendingTurns: 0,
+        startedAt: Date.now(),
+        codexTimers: new Map(),
+        codexStarts: new Map(),
+        mcpFailures: new Map()
+      };
+      return this.runReadOnlyClaude(session, controller, run, prompt, this.tokenPool.select());
+    }
+    if (provider === "codex") {
+      const codexHome = this.codexAccountPool.select();
+      requireCodexSubscriptionAuth(codexHome);
+      const codex = new Codex({
+        env: buildCodexEnvironment(codexHome),
+        config: codexSharedResourceConfig()
+      });
+      const thread = codex.startThread({
+        workingDirectory: session.cwd,
+        skipGitRepoCheck: true,
+        sandboxMode: "read-only",
+        approvalPolicy: "never"
+      });
+      const result = await thread.run(prompt);
+      return result.finalResponse.trim();
+    }
+    // agy: 새 plan(읽기 전용) interactive 세션 한 턴. 종합용 임시 세션이므로 사용자 세션의
+    // agyConversationId를 건드리지 않도록 conversationId 없이 새로 만들고 끝나면 닫는다.
+    const geminiApiKey = this.options.geminiApiKey ?? process.env["GEMINI_API_KEY"];
+    if (!geminiApiKey) throw new Error("GEMINI_API_KEY가 설정되지 않았습니다.");
+    const client = new AgyInteractiveSession({
+      pythonPath: this.options.agySdkPython ?? join(
+        homedir(),
+        ".local",
+        "share",
+        "telegram-claude-orchestrator",
+        "agy-sdk",
+        "bin",
+        "python"
+      ),
+      bridgePath: resolve(process.cwd(), "scripts", "agy-sdk-bridge.py"),
+      cwd: session.cwd,
+      model: session.agyModel ?? DEFAULT_AGY_MODEL,
+      thinkingLevel: session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL,
+      permissionMode: "plan",
+      conversationId: null,
+      systemInstructions: buildProviderBootstrap(session, this.options.claudeMemoryDir),
+      connectorRegistry: join(homedir(), ".claude", "shared-resources", "connectors.json"),
+      skillsPaths: [
+        join(homedir(), ".claude", "skills"),
+        join(homedir(), ".codex", "skills"),
+        join(homedir(), ".gemini", "config", "skills")
+      ],
+      env: {
+        ...process.env,
+        GEMINI_API_KEY: geminiApiKey,
+        PYTHONUNBUFFERED: "1"
+      }
+    });
+    try {
+      const result = await client.runTurn(prompt);
+      return result.response.trim();
+    } finally {
+      client.interrupt();
+    }
   }
 
   private async safeRename(session: SessionRecord, title: string): Promise<void> {

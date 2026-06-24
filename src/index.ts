@@ -5,6 +5,12 @@ import { StateStore } from "./store.js";
 import { safeErrorMessage } from "./telegram-transport.js";
 import { syncSharedResources } from "./resource-sync.js";
 
+const TELEGRAM_POLL_RETRY_DELAY_MS = 5_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function main(): Promise<void> {
   const config = await loadConfig();
   const store = new StateStore(config.databasePath);
@@ -52,6 +58,9 @@ async function main(): Promise<void> {
     { command: "steer", description: "실행 중 작업에 즉시 지시" },
     { command: "next", description: "현재 작업 뒤 후속 작업 예약" },
     { command: "goal", description: "목표 조건 달성까지 자동으로 턴 이어가기" },
+    { command: "route", description: "작업에 적합한 제공자(Claude/Codex/agy) 추천" },
+    { command: "synth", description: "여러 제공자 답을 비교·심사 후 장점 통합" },
+    { command: "query", description: "LLM-Wiki에 질문 (인용 포함 답변)" },
     { command: "stop", description: "현재 토픽 작업 중단" },
     { command: "fork", description: "현재 세션 분기" },
     { command: "compact", description: "현재 세션 컨텍스트 압축" },
@@ -64,26 +73,51 @@ async function main(): Promise<void> {
     { command: "reset", description: "세션 문맥만 초기화" },
     { command: "diff", description: "프로젝트 git diff 요약" },
     { command: "delete", description: "토픽과 로컬 세션 삭제" }
-  ]);
+  ]).catch((error: unknown) => {
+    // Telegram API가 일시적으로 불안정해도 기존 명령 목록으로 봇 본체는 계속
+    // 실행되어야 한다. 다음 데몬 재시작 때 명령 동기화를 다시 시도한다.
+    console.error(`Telegram command sync failed: ${safeErrorMessage(error)}`);
+  });
 
   if (interrupted > 0) {
     await bot.api.sendMessage(
       config.chatId,
       `[RECOVERY] 재시작 전 실행 중이던 ${interrupted}개 세션을 중단 상태로 표시했습니다. 기존 토픽에 후속 지시를 보내 재개할 수 있습니다.`
-    );
+    ).catch((error: unknown) => {
+      console.error(`Telegram recovery notice failed: ${safeErrorMessage(error)}`);
+    });
   }
 
+  let shuttingDown = false;
   const shutdown = () => {
-    bot.stop();
-    store.close();
+    shuttingDown = true;
+    void bot.stop().catch((error: unknown) => {
+      console.error(`Telegram shutdown failed: ${safeErrorMessage(error)}`);
+    }).finally(() => {
+      store.close();
+    });
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
 
   console.log(`Telegram Claude orchestrator started with ${config.projects.length} project(s).`);
-  await bot.start({
-    allowed_updates: ["message", "callback_query"]
-  });
+  while (!shuttingDown) {
+    try {
+      await bot.start({
+        allowed_updates: ["message", "callback_query"]
+      });
+      if (!shuttingDown) {
+        console.error("Telegram polling stopped unexpectedly; restarting in 5 seconds.");
+      }
+    } catch (error: unknown) {
+      if (!shuttingDown) {
+        console.error(`Telegram polling failed: ${safeErrorMessage(error)}; restarting in 5 seconds.`);
+      }
+    }
+    if (!shuttingDown) {
+      await sleep(TELEGRAM_POLL_RETRY_DELAY_MS);
+    }
+  }
 }
 
 main().catch((error: unknown) => {

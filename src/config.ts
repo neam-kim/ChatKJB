@@ -3,6 +3,7 @@ import {
   accessSync,
   constants,
   existsSync,
+  readFileSync,
   realpathSync,
   statSync
 } from "node:fs";
@@ -41,6 +42,8 @@ const environmentSchema = z.object({
   STATUS_DEBOUNCE_MS: z.coerce.number().int().min(1000).default(2500),
   MCP_TOOL_TIMEOUT_SECONDS: z.coerce.number().int().min(10).default(60),
   MCP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+  // 여러 Codex ChatGPT 계정의 CODEX_HOME 디렉터리(CSV, 절대경로). 비어 있으면 단일 계정.
+  CODEX_ACCOUNT_HOMES: z.string().optional(),
   CODEX_MCP_TIMEOUT_MINUTES: z.coerce.number().int().min(1).default(30),
   CODEX_MCP_HEARTBEAT_SECONDS: z.coerce.number().int().min(10).default(60),
   LONG_RUNNING_MCP_SERVERS: z.string().default("codex,obsidian"),
@@ -83,6 +86,51 @@ export type AppConfig = Awaited<ReturnType<typeof loadConfig>>;
 function absolutePath(path: string): string {
   const expanded = path.trim().replace(/^~(?=\/|$)/, homedir());
   return isAbsolute(expanded) ? expanded : resolve(process.cwd(), expanded);
+}
+
+// 여러 Codex 계정의 CODEX_HOME 디렉터리(CSV)를 파싱·검증한다. 각 홈은 디렉터리여야 하고
+// 내부에 auth_mode가 "chatgpt"인 auth.json이 있어야 한다(구독 로그인만 허용). 비어 있으면
+// 폴백 홈 1개만 반환해 단일 계정 동작과 하위호환을 유지한다.
+export function parseCodexAccountHomes(
+  raw: string | undefined,
+  fallbackHome: string
+): string[] {
+  if (raw === undefined || raw.trim() === "") {
+    return [fallbackHome];
+  }
+  const entries = raw.split(",").map((part) => part.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of entries) {
+    const absPath = absolutePath(entry);
+    if (!existsSync(absPath) || !statSync(absPath).isDirectory()) {
+      throw new Error(`Codex 계정 홈이 디렉터리가 아닙니다: ${entry}`);
+    }
+    const authPath = join(absPath, "auth.json");
+    if (!existsSync(authPath)) {
+      throw new Error(`Codex 계정 홈에 auth.json이 없습니다: ${entry}`);
+    }
+    let auth: unknown;
+    try {
+      auth = JSON.parse(readFileSync(authPath, "utf8")) as unknown;
+    } catch {
+      throw new Error(`Codex auth.json을 읽을 수 없습니다: ${entry}`);
+    }
+    if (
+      typeof auth !== "object"
+      || auth === null
+      || (auth as Record<string, unknown>)["auth_mode"] !== "chatgpt"
+    ) {
+      throw new Error(`Codex 계정은 ChatGPT 구독 로그인이어야 합니다(auth_mode!=chatgpt): ${entry}`);
+    }
+    // 검증을 통과한 뒤에야 canonical 경로로 중복을 제거한다(존재하지 않는 경로에서 realpath가
+    // 먼저 던지지 않도록 순서를 지킨다). 등록 순서는 보존한다.
+    const canonical = realpathSync(absPath);
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    result.push(absPath);
+  }
+  return result.length > 0 ? result : [fallbackHome];
 }
 
 // agy 바이너리 경로를 정한다. 데몬 PATH에 ~/.local/bin이 없을 수 있어, 명시 env가 없으면
@@ -143,12 +191,16 @@ export function resolveProject(
   );
 }
 
-function uniqueProjectName(path: string, projects: ProjectConfig[]): string {
-  const raw = basename(path)
+function projectNameFromPath(path: string): string {
+  return basename(path)
     .replace(/[^\p{L}\p{N} _.-]/gu, "-")
     .replace(/\s+/g, " ")
     .replace(/^[ ._-]+|[ ._-]+$/g, "")
     .slice(0, 32) || "project";
+}
+
+function uniqueProjectName(path: string, projects: ProjectConfig[]): string {
+  const raw = projectNameFromPath(path);
   const names = new Set(projects.flatMap((project) =>
     [project.name, ...(project.aliases ?? [])].map((name) => name.toLocaleLowerCase("en-US"))
   ));
@@ -192,8 +244,42 @@ export async function addProject(
     throw new Error("프로젝트 경로는 절대경로여야 합니다.");
   }
   const cwd = validateProjectDirectory(expanded);
-  if (projects.some((project) => validateProjectDirectory(project.cwd) === cwd)) {
-    throw new Error("이미 등록된 프로젝트 경로입니다.");
+  for (const project of projects) {
+    try {
+      if (validateProjectDirectory(project.cwd) === cwd) {
+        throw new Error("이미 등록된 프로젝트 경로입니다.");
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === "이미 등록된 프로젝트 경로입니다.") {
+        throw error;
+      }
+      // 이동되거나 삭제된 기존 프로젝트는 아래의 이름 기반 복구 대상이 될 수 있다.
+    }
+  }
+
+  const inferredName = projectNameFromPath(cwd);
+  const staleMatch = projects.find((project) => {
+    if (project.name.toLocaleLowerCase("en-US") !== inferredName.toLocaleLowerCase("en-US")) {
+      return false;
+    }
+    try {
+      validateProjectDirectory(project.cwd);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (staleMatch) {
+    const repaired = normalizeProject(projectSchema.parse({
+      ...staleMatch,
+      cwd
+    }));
+    const updated = projects.map((project) =>
+      project === staleMatch ? repaired : project
+    );
+    validateUniqueProjects(updated);
+    await persistProjects(projectsPath, updated);
+    return repaired;
   }
 
   const project = normalizeProject(projectSchema.parse({
@@ -240,6 +326,12 @@ export async function loadConfig() {
       ].filter((token): token is string => Boolean(token))
     )
   ];
+  // Codex 계정 홈 목록. 기본 홈은 CODEX_HOME(있으면) 또는 ~/.codex로, session-manager의
+  // 해석과 일치시킨다. 미설정이면 이 단일 홈만 담겨 기존 단일 계정 동작과 동일하다.
+  const codexFallbackHome = process.env.CODEX_HOME?.trim()
+    ? absolutePath(process.env.CODEX_HOME)
+    : join(homedir(), ".codex");
+  const codexAccountHomes = parseCodexAccountHomes(env.CODEX_ACCOUNT_HOMES, codexFallbackHome);
   // 실제 카탈로그는 시작 시 index.ts가 제공사에서 읽어 config.modelCatalog에 채운다.
   // 여기서는 정적 fallback을 둬, 설정 로드 단계가 외부 프로세스를 띄우지 않게 한다.
   const modelCatalog = FALLBACK_MODEL_CATALOG;
@@ -250,6 +342,7 @@ export async function loadConfig() {
     chatId: env.TELEGRAM_CHAT_ID,
     claudeCodeOauthToken: env.CLAUDE_CODE_OAUTH_TOKEN,
     claudeCodeOauthTokens,
+    codexAccountHomes,
     modelCatalog,
     databasePath: absolutePath(env.DATABASE_PATH),
     projectsPath,

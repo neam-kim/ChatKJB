@@ -259,7 +259,9 @@ npm run dev
 
 `/usage`는 먼저 Claude SDK 사용량 API를 새로 호출해 현재 서버 응답을 확인한다. OAuth 토큰을 여러 개 등록했다면 토큰별로 조회해 보여 주고, 모든 토큰의 실시간 조회가 실패한 경우에만 최근 세션에 저장된 마지막 스냅샷을 대신 표시한다. 실행 중·완료 메시지에도 같은 한도 정보가 포함된다. `total_cost_usd`는 실제 차감액이 아닌 추정치이므로 화면·SQLite에 비용으로 저장하지 않는다.
 
-여러 토큰을 등록하면 한도에 대응해 자동 전환한다. `.env`에 `CLAUDE_CODE_OAUTH_TOKEN_2`, `CLAUDE_CODE_OAUTH_TOKEN_3` …를 추가한다(각 계정에서 `claude setup-token`으로 생성). 앞선 "살아있는" 토큰을 우선 쓰고, 실행 중 한 토큰이 한도(사용률 100% 또는 rate-limit 오류)에 도달하면 그 토큰을 초기화 시각까지 봉인한 뒤 다른 살아있는 토큰으로 같은 작업을 즉시 재실행한다(맥락은 `resume`으로 잇는다). 봉인된 토큰이 회복되면 다시 1순위로 돌아온다. 모든 토큰이 동시에 한도에 도달하면 에러로 끝내지 않고 `waiting_limit` 상태로 두었다가, 가장 먼저 회복되는 토큰의 초기화 시각(여유 10초)에 맞춰 자동으로 이어 실행한다. 그 전에 사용자가 새 지시를 보내거나 `/stop`을 누르면 예약은 취소된다. 데몬이 재시작되면 메모리상의 예약 타이머가 사라지므로 해당 세션은 `interrupted`로 복구되고 후속 지시로 재개할 수 있다. (이 전환은 Claude 제공자에 적용된다. Codex·agy는 각자 구독 인증을 따른다.)
+여러 토큰을 등록하면 한도에 대응해 자동 전환한다. `.env`에 `CLAUDE_CODE_OAUTH_TOKEN_2`, `CLAUDE_CODE_OAUTH_TOKEN_3` …를 추가한다(각 계정에서 `claude setup-token`으로 생성). **마지막에 사용한 토큰을 우선(sticky)** 쓰며, 실행 중 그 토큰이 한도(사용률 100% 또는 rate-limit 오류)에 도달하면 그 토큰을 초기화 시각까지 봉인한 뒤 다른 살아있는 토큰으로 같은 작업을 즉시 재실행한다(맥락은 `resume`으로 잇는다). 한 번 전환하면 봉인된 토큰이 회복돼도 1순위로 되돌아가지 않고 현재 토큰을 계속 쓴다(그 토큰이 소진될 때까지). 모든 토큰이 동시에 한도에 도달하면 에러로 끝내지 않고 `waiting_limit` 상태로 두었다가, 가장 먼저 회복되는 토큰의 초기화 시각(여유 10초)에 맞춰 자동으로 이어 실행한다. 그 전에 사용자가 새 지시를 보내거나 `/stop`을 누르면 예약은 취소된다. 데몬이 재시작되면 메모리상의 예약 타이머가 사라지므로 해당 세션은 `interrupted`로 복구되고 후속 지시로 재개할 수 있다.
+
+**Codex도 같은 방식의 다중 계정 페일오버를 지원한다.** 토큰 문자열이 아니라 계정별 `CODEX_HOME` 디렉터리로 등록한다. `.env`에 `CODEX_ACCOUNT_HOMES`를 쉼표로 구분한 절대경로 목록으로 지정한다(예: `CODEX_ACCOUNT_HOMES=/Users/me/.codex,/Users/me/.codex-acct-b`). 각 디렉터리는 **최초 1회** `CODEX_HOME=<경로> codex login`으로 ChatGPT 로그인을 마쳐 두면 되고, 이후 계정 전환 시 재로그인은 필요 없다(토큰은 `refresh_token`으로 자동 갱신). 동작은 Claude와 동일하게 sticky + reactive 페일오버다. 다만 Codex SDK에는 사용량 스냅샷이 없어 **한도 도달 전 선제 회피는 불가**하고 실패가 나야 전환한다. 또한 스레드는 `CODEX_HOME`별로 저장되므로 계정을 바꾸면 기존 스레드를 재개하지 못한다 → 전환 시 새 스레드로 시작하고 대화 맥락은 메모리·요약 부트스트랩으로 보강한다. 미설정 시 기존처럼 단일 계정(`CODEX_HOME` 또는 `~/.codex`)으로 동작한다. (agy는 자체 Gemini 인증을 따른다.)
 
 ### 상태 확인
 
@@ -267,7 +269,7 @@ npm run dev
 
 ### 목표 자동 진행 (`/goal`)
 
-`/goal 조건`은 조건이 충족될 때까지 작업을 자동으로 이어 가게 한다. **Claude·Codex·agy 세 제공자 모두에서 동작한다** — 작업 턴은 그 세션의 제공자로 실행하고, 한 턴이 정상 종료될 때마다 작업 제공자와 무관하게 빠른 모델(Claude Haiku)로 "조건이 이미 충족됐는지"를 읽기 전용으로 판정한다(저장소 상태만 확인하므로 제공자 독립적). 미충족이면 같은 목표를 향한 다음 턴을 자동 예약한다(Codex는 직전 스레드, agy는 직전 대화를 재개). 충족되면 목표를 해제하고 알리며, 폭주 방지를 위해 최대 25턴까지만 진행한다. `/goal`만 입력하면 현재 목표를, `/goal clear`는 목표를 해제한다. 유휴 상태에서 걸면 즉시 시작하고, 실행 중에 걸면 현재 턴이 끝난 뒤부터 평가한다. `/stop`이나 `/goal clear`로 언제든 멈출 수 있다. 자동 진행 턴도 일반 실행과 같은 경로를 타므로 Claude 세션에는 토큰 한도 자동 전환과 `waiting_limit` 대기·자동 재개가 그대로 적용된다(Codex·agy는 각자 구독 인증). 목표가 걸린 세션은 `/status`에 `목표(자동 진행)` 줄로 표시된다. (사용량을 빠르게 소모할 수 있으니 `/usage`로 한도를 함께 확인하는 것이 좋다.)
+`/goal 조건`은 조건이 충족될 때까지 작업을 자동으로 이어 가게 한다. 코딩 작업에 한정되지 않으며 요약·조사·문서 작성 등 일반 작업에도 그대로 쓸 수 있다(판정은 저장소 상태만 읽는 범용 구조다). **Claude·Codex·agy 세 제공자 모두에서 동작한다** — 작업 턴은 그 세션의 제공자로 실행하고, 한 턴이 정상 종료될 때마다 작업 제공자와 무관하게 빠른 모델(Claude Haiku)로 "조건이 이미 충족됐는지"를 읽기 전용으로 판정한다(저장소 상태만 확인하므로 제공자 독립적). 미충족이면 같은 목표를 향한 다음 턴을 자동 예약한다(Codex는 직전 스레드, agy는 직전 대화를 재개). 충족되면 목표를 해제하고 알리며, 폭주 방지를 위해 최대 25턴까지만 진행한다. `/goal`만 입력하면 현재 목표를, `/goal clear`는 목표를 해제한다. 유휴 상태에서 걸면 즉시 시작하고, 실행 중에 걸면 현재 턴이 끝난 뒤부터 평가한다. `/stop`이나 `/goal clear`로 언제든 멈출 수 있다. 자동 진행 턴도 일반 실행과 같은 경로를 타므로 Claude 세션에는 토큰 한도 자동 전환과 `waiting_limit` 대기·자동 재개가 그대로 적용된다(Codex·agy는 각자 구독 인증). 목표가 걸린 세션은 `/status`에 `목표(자동 진행)` 줄로 표시된다. (사용량을 빠르게 소모할 수 있으니 `/usage`로 한도를 함께 확인하는 것이 좋다.) 자동 진행은 매 턴 모델을 호출하므로, Sonnet 4.6·gpt-5.4-mini 같은 가벼운 모델은 작업량을 `보통(중간)`으로, thinking은 `off`로 두고 쓰는 편이 토큰 효율이 좋다(`/power`·`/thinking`으로 조절).
 
 ### 최소 구현 원칙 (`/lean`)
 
@@ -347,6 +349,36 @@ launchctl bootout gui/$(id -u)/com.neam.telegram-claude-orchestrator
 > `bootout`은 재시작이 아니라 서비스를 등록 해제하고 멈추므로, 실행 중인 봇 자신에서 호출하면 후속 시작 명령을 수행할 수 없다. 재시작에는 위 `launchd:restart`를 쓴다.
 
 로그는 `data/stdout.log`와 `data/stderr.log`에 기록된다.
+
+## LLM Wiki 대화 기록 자동 수집
+
+`scripts/dump-transcripts.mjs`는 세 제공자의 완료된 대화를 LLM Wiki `10-inbox/`에 Markdown으로 보낸다.
+
+- 같은 세션을 재개해도 전체 대화를 다시 복사하지 않고 새 user–assistant 대화 묶음만 `part` 파일로 기록한다.
+- Unicode와 공백을 정규화한 SHA-256 지문으로 같은 세션 및 다른 세션의 완전 동일 대화 묶음을 차단한다.
+- `_meta/.transcript-dump-state.json`이 없어져도 `10-inbox/`와 `20-raw/`의 frontmatter에서 처리 범위를 복구한다.
+- 진행 중인 세션은 건너뛰고 `done`, `error`, `aborted`, `interrupted`, `verification_failed` 상태만 처리한다.
+- 사용자 홈 전체와 `/Users/neam/Library/CloudStorage/SynologyDrive-neam` 아래의 모든 `.result.md`도 함께 찾아 `10-inbox/global-project-results.md` 한 파일로 병합한다. 각 기록은 대화와 같은 Unicode·공백 정규화 SHA-256 지문으로 중복 제거하며 원본 파일 경로를 출처로 남긴다.
+
+수동 실행과 매일 실행 LaunchAgent 설치:
+
+```bash
+npm run transcripts:dump
+npm run transcripts:install-agent
+```
+
+대상 경로는 `WIKI_VAULT`, `ORCH_STATE_DB` 등 환경변수로 바꿀 수 있다. `.result.md` 검색 루트는 `RESULT_SEARCH_ROOTS`(macOS에서는 `:` 구분), 병합 파일은 `RESULT_MERGED_FILE`로 바꿀 수 있다. Wiki의 `/compile`은 동일한 `source_key`를 가진 part들을 하나의 논리 source 페이지로 병합해야 한다.
+
+### LLM Wiki 로컬 전처리 역할 경계
+
+ChatKJB는 transcript와 `.result.md`를 LLM Wiki `10-inbox/`에 공급하는 역할까지만 담당한다. LLM Wiki가 `/compile`할 때 로컬 Ollama `qwen3.6:27b-96k`를 사용할 수 있으나, 이는 원문 evidence를 붙인 topic·takeaway·entity·concept·decision·모순·민감정보·중복 후보를 JSON으로 추출하는 **읽기 전용 비신뢰 전처리**에 한정한다.
+
+- ChatKJB는 로컬 전처리 결과를 정본으로 취급하거나 `30-wiki/`를 직접 수정하지 않는다.
+- 로컬 모델은 canonical/alias, provenance/tier, index/overview, raw 이동을 결정하지 않는다.
+- 타임아웃·JSON 절단·근거 불일치·모델 부재 시 결과를 폐기하고 LLM Wiki 주 에이전트가 계속한다.
+- 개인정보·연구자료·비공개 transcript를 GLM·DeepSeek 등 외부 무료 API로 자동 전송하지 않는다.
+
+세부 정본은 LLM Wiki `00-system/conventions.md §15`와 `.claude/commands/compile.md`에 있다.
 
 ## 권한 정책
 

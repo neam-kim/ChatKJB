@@ -98,7 +98,7 @@ describe("usage lookup fallback", () => {
 
 describe("Codex subscription authentication", () => {
   it("removes API billing credentials from the Codex child environment", () => {
-    expect(buildCodexEnvironment({
+    expect(buildCodexEnvironment(undefined, {
       PATH: "/usr/bin",
       HOME: "/tmp/home",
       OPENAI_API_KEY: "openai-key",
@@ -112,14 +112,24 @@ describe("Codex subscription authentication", () => {
     });
   });
 
+  it("overrides CODEX_HOME with the selected account home", () => {
+    expect(buildCodexEnvironment("/tmp/codex-acct-b", {
+      PATH: "/usr/bin",
+      CODEX_HOME: "/tmp/codex"
+    })).toEqual({
+      PATH: "/usr/bin",
+      CODEX_HOME: "/tmp/codex-acct-b"
+    });
+  });
+
   it("accepts ChatGPT login and rejects API-key auth mode", () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-codex-auth-"));
     try {
       writeFileSync(join(directory, "auth.json"), JSON.stringify({ auth_mode: "chatgpt" }));
-      expect(() => requireCodexSubscriptionAuth({ CODEX_HOME: directory })).not.toThrow();
+      expect(() => requireCodexSubscriptionAuth(directory)).not.toThrow();
 
       writeFileSync(join(directory, "auth.json"), JSON.stringify({ auth_mode: "apikey" }));
-      expect(() => requireCodexSubscriptionAuth({ CODEX_HOME: directory }))
+      expect(() => requireCodexSubscriptionAuth(directory))
         .toThrow("API 키 인증은 허용하지 않습니다");
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -192,6 +202,35 @@ describe("failure classification", () => {
     } as Parameters<typeof resultFailureText>[0];
 
     expect(resultFailureText(result, true)).toBe("Claude rate limit rejected");
+  });
+
+  it("turns a 529 success-shaped diagnostic result into an overloaded failure", () => {
+    const result = {
+      type: "result",
+      subtype: "success",
+      api_error_status: 529,
+      result:
+        "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+      session_id: "session"
+    } as Parameters<typeof resultFailureText>[0];
+
+    const failure = resultFailureText(result);
+    expect(failure).toBe("Claude API Error: 529 Overloaded");
+    expect(isOverloadedError(failure)).toBe(true);
+  });
+
+  it("turns a 429 success-shaped diagnostic result into a rate-limit failure", () => {
+    const result = {
+      type: "result",
+      subtype: "success",
+      api_error_status: 429,
+      result: "",
+      session_id: "session"
+    } as Parameters<typeof resultFailureText>[0];
+
+    const failure = resultFailureText(result);
+    expect(failure).toBe("Claude API Error: 429 rate limit");
+    expect(isRateLimitError(failure)).toBe(true);
   });
 });
 
@@ -408,6 +447,27 @@ describe("goal prompts", () => {
     expect(prompt).toContain("GOAL_MET:");
     expect(prompt).toContain("GOAL_UNMET:");
     expect(prompt).toContain("lint가 깨끗하다");
+  });
+
+  it("injects deterministic check results as objective facts when all pass", () => {
+    const prompt = buildGoalCheckPrompt("모든 테스트 통과", {
+      allPassed: true,
+      results: [{ command: "npm test", passed: true, outputTail: "" }]
+    });
+    expect(prompt).toContain("결정론적 검증 결과");
+    expect(prompt).toContain("PASS: npm test");
+    expect(prompt).toContain("모든 결정론적 검증은 통과");
+    expect(prompt).toContain("모든 테스트 통과");
+  });
+
+  it("tells the judge it's unmet when a check fails", () => {
+    const prompt = buildGoalCheckPrompt("빌드 성공", {
+      allPassed: false,
+      results: [{ command: "tsc --noEmit", passed: false, outputTail: "error TS1234: boom" }]
+    });
+    expect(prompt).toContain("FAIL: tsc --noEmit");
+    expect(prompt).toContain("GOAL_UNMET");
+    expect(prompt).toContain("미충족");
   });
 
   it("caps automatic goal rounds to prevent runaway loops", () => {

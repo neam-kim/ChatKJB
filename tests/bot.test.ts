@@ -53,6 +53,7 @@ function botSetup() {
     chatId: -1001,
     claudeCodeOauthToken: "test-oauth-token",
     claudeCodeOauthTokens: ["test-oauth-token"],
+    codexAccountHomes: [join(directory, "codex-home")],
     modelCatalog: FALLBACK_MODEL_CATALOG,
     databasePath: join(directory, "state.sqlite"),
     projectsPath: join(directory, "projects.json"),
