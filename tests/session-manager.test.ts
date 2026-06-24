@@ -54,6 +54,22 @@ const fakeTransport: MessageTransport = {
   async sendFile() {}
 };
 
+function sessionManagerOptions(directory: string, codexAccountHomes?: string[]) {
+  return {
+    debounceMs: 1,
+    claudeCodeOauthToken: "test-token",
+    ...(codexAccountHomes ? { codexAccountHomes } : {}),
+    mcpToolTimeoutMs: 1000,
+    mcpMaxAttempts: 1,
+    codexMcpTimeoutMs: 1000,
+    codexMcpHeartbeatMs: 1000,
+    longRunningMcpServers: new Set(["codex"]),
+    turnIdleTimeoutMs: 600_000,
+    claudeMemoryDir: join(directory, ".claude", "memory"),
+    modelCatalog: FALLBACK_MODEL_CATALOG
+  };
+}
+
 describe("Claude child environment", () => {
   it("forces setup-token OAuth and removes API credentials", () => {
     const environment = buildClaudeEnvironment("sk-ant-oat01-oauth", {
@@ -309,6 +325,126 @@ describe("streaming input", () => {
     expect(prompt).toContain("표로 바꿔");
     expect(prompt).toContain("우선 반영");
     expect(prompt).toContain("현재 저장소 상태");
+  });
+
+  it("restores persisted Codex account limit state for /usage", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-codex-state-"));
+    const home = join(directory, "codex-a");
+    const store = new StateStore(join(directory, "state.sqlite"));
+    const exhaustedUntil = Date.parse("2026-06-27T06:57:00.000Z");
+    const latestUsage = {
+      capturedAt: Date.parse("2026-06-24T15:00:00.000Z"),
+      model: "gpt-5.5",
+      reasoning: "high",
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      outputTokens: 3,
+      reasoningOutputTokens: 1,
+      totalTokens: 13
+    };
+
+    try {
+      store.setAppSetting("codex.accountState.v1", JSON.stringify({
+        version: 1,
+        accounts: [{ home, exhaustedUntil, latestUsage }]
+      }));
+      const manager = new SessionManager(
+        store,
+        fakeTransport,
+        new PermissionBroker(store, fakeTransport, 1000),
+        sessionManagerOptions(directory, [home])
+      );
+
+      expect(manager.getCodexUsageSnapshots(Date.parse("2026-06-26T00:00:00.000Z"))).toEqual([
+        {
+          accountIndex: 1,
+          available: false,
+          exhaustedUntil,
+          latestUsage
+        }
+      ]);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("restarts an active Codex turn when steered instead of queueing for after the turn", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-codex-steer-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const session: SessionRecord = {
+      id: "codex-steer",
+      sdkSessionId: null,
+      chatId: -1001,
+      topicId: 10,
+      projectName: "test",
+      cwd: directory,
+      title: "codex steer",
+      status: "running",
+      permissionMode: "default",
+      provider: "codex",
+      model: null,
+      thinking: null,
+      claudeEffort: null,
+      codexModel: null,
+      codexReasoning: null,
+      codexThreadId: "thread-1",
+      agyModel: null,
+      agyThinkingLevel: null,
+      agyConversationId: null,
+      agyUsage: null,
+      handoffSummary: null,
+      goalCondition: null,
+      leanMode: true,
+      usageSnapshot: null,
+      createdAt: 1,
+      updatedAt: 1
+    };
+    const controller = new AbortController();
+    const manager = new SessionManager(
+      store,
+      fakeTransport,
+      new PermissionBroker(store, fakeTransport, 1000),
+      sessionManagerOptions(directory)
+    );
+
+    try {
+      store.createSession(session);
+      (manager as unknown as {
+        active: Map<string, {
+          controller: AbortController;
+          input: MessageQueue;
+          pendingTurns: number;
+          startedAt: number;
+          codexCurrentPrompt: string;
+          codexRestartPrompt?: string;
+          codexTimers: Map<string, NodeJS.Timeout>;
+          codexStarts: Map<string, number>;
+          mcpFailures: Map<string, number>;
+        }>;
+      }).active.set(session.id, {
+        controller,
+        input: new MessageQueue(),
+        pendingTurns: 1,
+        startedAt: Date.now(),
+        codexCurrentPrompt: "원래 작업",
+        codexTimers: new Map(),
+        codexStarts: new Map(),
+        mcpFailures: new Map()
+      });
+
+      expect(manager.steer(session.id, "표로 바꿔")).toBe("restarted");
+      const run = (manager as unknown as {
+        active: Map<string, { codexRestartPrompt?: string }>;
+      }).active.get(session.id);
+      expect(controller.signal.aborted).toBe(true);
+      expect(run?.codexRestartPrompt).toContain("표로 바꿔");
+      expect(run?.codexRestartPrompt).toContain("원래 작업");
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 

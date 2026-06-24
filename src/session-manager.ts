@@ -121,6 +121,7 @@ const LOCAL_GOAL_JUDGE_SYSTEM =
   "너는 목표 충족 여부만 판정하는 읽기 전용 심판이다. "
   + "저장소 파일을 직접 볼 수 없으니, 아래 제공된 결정론적 검증 결과(객관 사실)에만 근거해 판정하라. "
   + "사실에 없는 것은 추측하지 말고, 마지막 줄에 정확히 GOAL_MET: <근거> 또는 GOAL_UNMET: <남은점> 한 줄로만 답하라.";
+const CODEX_ACCOUNT_STATE_SETTING = "codex.accountState.v1";
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
 export const CODEX_MODEL = DEFAULT_CODEX_MODEL;
 export const CODEX_REASONING_EFFORT = DEFAULT_CODEX_REASONING;
@@ -404,6 +405,28 @@ interface ActiveRun {
   codexTimers: Map<string, NodeJS.Timeout>;
   codexStarts: Map<string, number>;
   mcpFailures: Map<string, number>;
+}
+
+interface PersistedCodexAccountState {
+  version: 1;
+  accounts: Array<{
+    home: string;
+    exhaustedUntil: number | null;
+    latestUsage: CodexUsageSnapshot | null;
+  }>;
+}
+
+function isCodexUsageSnapshot(value: unknown): value is CodexUsageSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.capturedAt === "number"
+    && typeof record.model === "string"
+    && typeof record.reasoning === "string"
+    && typeof record.inputTokens === "number"
+    && typeof record.cachedInputTokens === "number"
+    && typeof record.outputTokens === "number"
+    && typeof record.reasoningOutputTokens === "number"
+    && typeof record.totalTokens === "number";
 }
 
 export interface SessionInspection {
@@ -1090,6 +1113,7 @@ export class SessionManager {
       ? options.codexAccountHomes
       : [process.env.CODEX_HOME?.trim() || join(homedir(), ".codex")];
     this.codexAccountPool = new CodexAccountPool(codexHomes);
+    this.restoreCodexAccountState();
   }
 
   createSession(
@@ -1282,6 +1306,39 @@ export class SessionManager {
     }));
   }
 
+  private restoreCodexAccountState(): void {
+    const raw = this.store.getAppSetting(CODEX_ACCOUNT_STATE_SETTING);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as Partial<PersistedCodexAccountState>;
+      if (parsed.version !== 1 || !Array.isArray(parsed.accounts)) return;
+      for (const account of parsed.accounts) {
+        if (!account || typeof account.home !== "string") continue;
+        if (this.codexAccountPool.indexOf(account.home) === -1) continue;
+        if (typeof account.exhaustedUntil === "number" && Number.isFinite(account.exhaustedUntil)) {
+          this.codexAccountPool.markFailed(account.home, Date.now(), account.exhaustedUntil);
+        }
+        if (isCodexUsageSnapshot(account.latestUsage)) {
+          this.codexUsageByHome.set(account.home, account.latestUsage);
+        }
+      }
+    } catch (error) {
+      console.error("Codex account state restore failed:", safeErrorMessage(error));
+    }
+  }
+
+  private persistCodexAccountState(): void {
+    const state: PersistedCodexAccountState = {
+      version: 1,
+      accounts: this.codexAccountPool.statuses().map((status) => ({
+        home: status.home,
+        exhaustedUntil: status.exhaustedUntil,
+        latestUsage: this.codexUsageByHome.get(status.home) ?? null
+      }))
+    };
+    this.store.setAppSetting(CODEX_ACCOUNT_STATE_SETTING, JSON.stringify(state));
+  }
+
   private recordCodexUsage(
     home: string,
     usage: CodexSdkUsage,
@@ -1302,6 +1359,7 @@ export class SessionManager {
       reasoningOutputTokens,
       totalTokens: inputTokens + outputTokens
     });
+    this.persistCodexAccountState();
   }
 
   private async fetchUsageSnapshotForToken(
@@ -1637,7 +1695,7 @@ export class SessionManager {
     if (!task || wasActive) this.deleting.delete(session.id);
   }
 
-  steer(sessionId: string, prompt: string): boolean {
+  steer(sessionId: string, prompt: string): "restarted" | "queued" | false {
     const run = this.active.get(sessionId);
     const clean = prompt.trim();
     if (!run || !clean) return false;
@@ -1646,10 +1704,10 @@ export class SessionManager {
       const base = run.codexRestartPrompt ?? run.codexCurrentPrompt;
       run.codexRestartPrompt = buildCodexSteeredPrompt(base, clean);
       run.controller.abort();
-      return true;
+      return "restarted";
     }
     run.pendingTurns += 1;
-    if (run.input.push(buildUserMessage(clean, "now"))) return true;
+    if (run.input.push(buildUserMessage(clean, "now"))) return "queued";
     run.pendingTurns -= 1;
     return false;
   }
@@ -2473,6 +2531,7 @@ export class SessionManager {
           Date.now(),
           resetsAt ? Date.parse(resetsAt) : undefined
         );
+        this.persistCodexAccountState();
         const attempts = (request.autoSwitchCount ?? 0) + 1;
         const nextHome = this.codexAccountPool.select();
         const canAutoSwitch =

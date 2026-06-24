@@ -881,12 +881,15 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("대기 중인 질문에 답변을 전달했습니다.");
       return;
     }
-    if (!sessions.steer(session.id, prompt)) {
+    const steerResult = sessions.steer(session.id, prompt);
+    if (!steerResult) {
       await ctx.reply("현재 실행 중인 작업이 없습니다. 일반 메시지로 후속 작업을 시작하세요.");
       return;
     }
     await ctx.reply(
-      session.provider === "claude"
+      steerResult === "restarted"
+        ? "현재 Codex 턴을 중단하고 /steer 지시를 우선 반영해 다시 시작합니다."
+        : session.provider === "claude"
         ? "현재 실행 중인 작업에 즉시 반영할 메시지를 보냈습니다."
         : "현재 턴이 끝나는 즉시 최우선으로 반영할 메시지를 보냈습니다."
     );
