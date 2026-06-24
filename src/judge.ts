@@ -1,13 +1,8 @@
 import type { ProviderKind } from "./types.js";
 
-// 병렬 종합의 심사자. 여러 provider가 같은 작업을 푼 후보 답들을 받아 가장 정확·완전한
-// 것을 고른다. 심사자는 작업을 수행하지 않는다(중립 채점만).
-//
-// 1차 = 로컬 qwen3.6(96k). 토큰 한도 무관·자기답 편향 없는 독립 심판.
-// 폴백 = Haiku. 로컬이 죽거나 응답이 깨지면 자동 강등(로컬을 단일 장애점으로 두지 않음).
-//
-// 이 모듈은 SDK에 의존하지 않는다. 로컬 심사는 fetch로 자체 완결하고, Haiku 폴백은
-// 프롬프트 빌더와 파서만 export해 session-manager의 기존 Claude 실행 경로가 호출한다.
+// 병렬 종합의 심사 프롬프트와 응답 파서. 여러 provider가 같은 작업을 푼 후보 답들을 받아
+// 가장 정확·완전한 것을 고르게 한다. 실제 심사 실행 순서(Claude → Codex)는
+// session-manager가 담당하므로 이 모듈은 SDK에 의존하지 않는다.
 
 export interface JudgeCandidate {
   provider: ProviderKind;
@@ -19,23 +14,7 @@ export interface JudgeVerdict {
   winner: number;
   reason: string;
   // 어느 심사자가 판정했는지(투명성).
-  judge: "local" | "haiku" | "fallback";
-}
-
-export interface LocalJudgeConfig {
-  url: string;
-  model: string;
-  disabled: boolean;
-  timeoutMs: number;
-}
-
-export function localJudgeConfig(env: NodeJS.ProcessEnv = process.env): LocalJudgeConfig {
-  return {
-    url: env.JUDGE_OLLAMA_URL || "http://localhost:11434/api/chat",
-    model: env.JUDGE_MODEL || "qwen3.6:27b-96k",
-    disabled: env.JUDGE_DISABLE_LOCAL === "1",
-    timeoutMs: Number(env.JUDGE_TIMEOUT_MS) || 60_000
-  };
+  judge: "claude" | "codex" | "fallback";
 }
 
 const JUDGE_SYSTEM =
@@ -79,47 +58,9 @@ export function parseJudgeResponse(
   return { winner, reason };
 }
 
-// 로컬 qwen3.6에 심사를 의뢰한다. 성공 시 {winner,reason}, 실패(서버다운·타임아웃·
-// JSON깨짐·disabled)면 null을 돌려 호출자가 Haiku로 폴백하게 한다.
-export async function judgeLocal(
-  question: string,
-  candidates: readonly JudgeCandidate[],
-  config: LocalJudgeConfig = localJudgeConfig(),
-  fetchImpl: typeof fetch = fetch
-): Promise<{ winner: number; reason: string } | null> {
-  if (config.disabled || candidates.length === 0) return null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
-  try {
-    const response = await fetchImpl(config.url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: config.model,
-        stream: false,
-        think: false,
-        options: { temperature: 0, num_ctx: 16_384 },
-        messages: [
-          { role: "system", content: JUDGE_SYSTEM },
-          { role: "user", content: buildJudgeUserPrompt(question, candidates) }
-        ]
-      })
-    });
-    if (!response.ok) return null;
-    const data = (await response.json()) as { message?: { content?: string } };
-    const content = data.message?.content ?? "";
-    return parseJudgeResponse(content, candidates.length);
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// Haiku 폴백용 프롬프트. 로컬과 같은 채점 규약을 쓰되, Claude 실행 경로가 system 프롬프트를
-// 따로 주입하지 않으므로 규약을 본문에 포함한다(self-contained).
-export function buildHaikuJudgePrompt(question: string, candidates: readonly JudgeCandidate[]): string {
+// 클라우드 심사용 프롬프트. Claude·Codex 실행 경로가 system 프롬프트를 따로 주입하지
+// 않으므로 채점 규약을 본문에 포함한다(self-contained).
+export function buildJudgePrompt(question: string, candidates: readonly JudgeCandidate[]): string {
   return [
     JUDGE_SYSTEM,
     "",

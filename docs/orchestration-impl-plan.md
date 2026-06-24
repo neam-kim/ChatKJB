@@ -69,7 +69,7 @@ Tier 0~5 다단계 위임 오케스트레이션을 실제 코드로 구현하기
   - **판관 = Tier 5 = 세션 모델.** `GOAL_EVAL_MODEL = "claude-haiku-4-5"` 고정 평가 폐지.
     `evaluateGoal`은 결정론 게이트 통과 후 (a) 로컬 Tier 2(qwen3.6) local-first 판정을 먼저 시도하고,
     (b) 로컬 판정 불가(자유서술형)일 때만 `runReadOnlyClaude`를 modelOverride 없이 호출해 **session.model**
-    (Tier 5)로 판정한다. `/synth` 판관 폴백에서만 쓰던 Haiku는 `JUDGE_FALLBACK_MODEL`로 분리(이름 명확화).
+    (Tier 5)로 판정한다. 이후 `/synth` 판관은 Claude Opus 4.8 high → Codex 5.5 high 폴백으로 교체되었다.
   - **턴 상한 = Risk_Level별 동적.** 고정 `MAX_GOAL_ROUNDS=25`(폭주 안전 상한으로만 잔존) 대신
     `estimateGoalRisk(condition)`(goal-checks.ts, 순수 함수)로 목표 위험도를 추정해
     `GOAL_ROUNDS_BY_RISK`(L0:3·L1:6·L2:12·L3:20·L4:30)를 적용. 위험 키워드(보안/스키마/마이그레이션/

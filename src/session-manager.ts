@@ -79,9 +79,8 @@ import {
 } from "./usage.js";
 import { AgyInteractiveSession, type AgyAttachment, type AgyLiveStatus } from "./agy-interactive.js";
 import {
-  buildHaikuJudgePrompt,
+  buildJudgePrompt,
   buildSynthesisPrompt,
-  judgeLocal,
   parseJudgeResponse,
   type JudgeCandidate,
   type JudgeVerdict
@@ -107,9 +106,13 @@ const GOAL_ROUNDS_BY_RISK: Record<RiskLevel, number> = {
   L3: 20,
   L4: 30
 };
-// /synth 다중후보 판관의 클라우드 폴백 모델(로컬 qwen3.6 심사가 실패했을 때만 쓴다).
+// /synth 다중후보 판관. 후보 생성·통합과 별개로 심사만 고정 고성능 모델에 맡긴다.
 // /goal 평가와는 무관하다(Tier 5 판관 = 세션 모델).
-const JUDGE_FALLBACK_MODEL = "claude-haiku-4-5";
+const SYNTH_JUDGE_CLAUDE_MODEL = "claude-opus-4-8";
+const SYNTH_JUDGE_CLAUDE_THINKING = "high";
+const SYNTH_JUDGE_CLAUDE_EFFORT = "high";
+const SYNTH_JUDGE_CODEX_MODEL = "gpt-5.5";
+const SYNTH_JUDGE_CODEX_REASONING: CodexReasoningEffort = "high";
 // 로컬 Tier 2 판관에게 전달하는 시스템 프롬프트. 저장소 파일에 직접 접근할 수 없으므로
 // 결정론적 검증 결과(객관 사실)에만 근거해 판정하도록 지시한다.
 const LOCAL_GOAL_JUDGE_SYSTEM =
@@ -432,6 +435,14 @@ export interface SynthesisResult {
   verdict?: JudgeVerdict;
   // 종합자로 쓴 provider.
   synthesizedBy?: ProviderKind;
+}
+
+interface SilentReadOnlyOptions {
+  claudeModelOverride?: string;
+  claudeThinkingOverride?: string;
+  claudeEffortOverride?: string;
+  codexModelOverride?: string;
+  codexReasoningOverride?: CodexReasoningEffort;
 }
 
 function assistantBlocks(message: SDKMessage): Array<Record<string, unknown>> {
@@ -2951,16 +2962,18 @@ export class SessionManager {
     prompt: string,
     oauthToken: string,
     allowQuestions = false,
-    modelOverride?: string
+    modelOverride?: string,
+    thinkingOverride?: string,
+    effortOverride?: string
   ): Promise<string> {
     const instructions = loadProjectInstructions(session.cwd);
     const claudeModel = modelOverride ?? session.model ?? DEFAULT_CLAUDE_MODEL;
     const thinking = normalizeThinkingForModel(
       this.options.modelCatalog,
       claudeModel,
-      session.thinking
+      thinkingOverride ?? session.thinking
     );
-    const effort = resolveClaudeEffort(session.claudeEffort);
+    const effort = resolveClaudeEffort(effortOverride ?? session.claudeEffort);
     const sdkQuery = query({
       prompt,
       options: {
@@ -3040,9 +3053,10 @@ export class SessionManager {
   }
 
   // ── 2단계 병렬 종합 ──────────────────────────────────────────────────────
-  // 같은 작업을 Claude·Codex·agy에 읽기 전용으로 동시에 시키고(파일 충돌 없음), 로컬
-  // qwen3.6 심사자(실패 시 Haiku 폴백)가 가장 나은 답을 고른 뒤, 승자 provider가 다른
-  // 후보의 더 나은 부분을 통합해 최종답을 만든다. /synth 명령으로만 호출되는 비싼 경로다.
+  // 같은 작업을 Claude·Codex·agy에 읽기 전용으로 동시에 시키고(파일 충돌 없음), Claude
+  // Opus 4.8 high 심사자(실패 시 Codex 5.5 high 폴백)가 가장 나은 답을 고른 뒤,
+  // 승자 provider가 다른 후보의 더 나은 부분을 통합해 최종답을 만든다. /synth 명령으로만
+  // 호출되는 비싼 경로다.
   async runSynthesis(session: SessionRecord, prompt: string): Promise<SynthesisResult> {
     if (this.active.has(session.id)) {
       return { ok: false, reason: "실행 중에는 병렬 종합을 시작할 수 없습니다. 작업 완료 또는 /stop 후 다시 시도하세요." };
@@ -3095,14 +3109,14 @@ export class SessionManager {
     };
   }
 
-  // 후보들을 심사한다. 로컬 qwen3.6 우선, 실패 시 Haiku 폴백, 그마저 실패하면 1번 후보.
+  // 후보들을 심사한다. Claude Opus 4.8 high 우선, 실패 시 Codex 5.5 high 폴백,
+  // 그마저 실패하면 1번 후보.
   private async judgeCandidates(
     session: SessionRecord,
     question: string,
     candidates: JudgeCandidate[]
   ): Promise<JudgeVerdict> {
-    const local = await judgeLocal(question, candidates).catch(() => null);
-    if (local) return { ...local, judge: "local" };
+    const judgePrompt = buildJudgePrompt(question, candidates);
 
     try {
       const controller = new AbortController();
@@ -3119,16 +3133,30 @@ export class SessionManager {
         session,
         controller,
         run,
-        buildHaikuJudgePrompt(question, candidates),
+        judgePrompt,
         this.tokenPool.select(),
         false,
-        JUDGE_FALLBACK_MODEL
+        SYNTH_JUDGE_CLAUDE_MODEL,
+        SYNTH_JUDGE_CLAUDE_THINKING,
+        SYNTH_JUDGE_CLAUDE_EFFORT
       );
       const parsed = parseJudgeResponse(text, candidates.length);
-      if (parsed) return { ...parsed, judge: "haiku" };
+      if (parsed) return { ...parsed, judge: "claude" };
     } catch (error) {
-      console.error("Haiku judge fallback failed:", safeErrorMessage(error, this.oauthTokens));
+      console.error("Claude synthesis judge failed:", safeErrorMessage(error, this.oauthTokens));
     }
+
+    try {
+      const text = await this.runSilentReadOnly(session, "codex", judgePrompt, {
+        codexModelOverride: SYNTH_JUDGE_CODEX_MODEL,
+        codexReasoningOverride: SYNTH_JUDGE_CODEX_REASONING
+      });
+      const parsed = parseJudgeResponse(text, candidates.length);
+      if (parsed) return { ...parsed, judge: "codex" };
+    } catch (error) {
+      console.error("Codex synthesis judge fallback failed:", safeErrorMessage(error, this.oauthTokens));
+    }
+
     return { winner: 1, reason: "심사자를 사용할 수 없어 첫 후보를 선택했습니다.", judge: "fallback" };
   }
 
@@ -3137,7 +3165,8 @@ export class SessionManager {
   private async runSilentReadOnly(
     session: SessionRecord,
     provider: ProviderKind,
-    prompt: string
+    prompt: string,
+    options: SilentReadOnlyOptions = {}
   ): Promise<string> {
     if (provider === "claude") {
       const controller = new AbortController();
@@ -3150,7 +3179,17 @@ export class SessionManager {
         codexStarts: new Map(),
         mcpFailures: new Map()
       };
-      return this.runReadOnlyClaude(session, controller, run, prompt, this.tokenPool.select());
+      return this.runReadOnlyClaude(
+        session,
+        controller,
+        run,
+        prompt,
+        this.tokenPool.select(),
+        false,
+        options.claudeModelOverride,
+        options.claudeThinkingOverride,
+        options.claudeEffortOverride
+      );
     }
     if (provider === "codex") {
       const codexHome = this.codexAccountPool.select();
@@ -3160,6 +3199,10 @@ export class SessionManager {
         config: codexSharedResourceConfig()
       });
       const thread = codex.startThread({
+        model: options.codexModelOverride ?? session.codexModel ?? DEFAULT_CODEX_MODEL,
+        modelReasoningEffort: options.codexReasoningOverride
+          ?? (session.codexReasoning as CodexReasoningEffort | null)
+          ?? DEFAULT_CODEX_REASONING,
         workingDirectory: session.cwd,
         skipGitRepoCheck: true,
         sandboxMode: "read-only",

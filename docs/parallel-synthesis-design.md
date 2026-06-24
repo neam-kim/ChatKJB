@@ -9,12 +9,13 @@
 
 ## 1. 목표와 비목표
 
-**목표**: 같은 작업을 Claude·Codex·agy 중 둘 이상에게 동시에 시키고, 로컬 qwen3.6 심사자가
-가장 나은 답을 고른 뒤, 종합자가 최종 답 하나를 만든다. *틀리면 비싼* 중요 작업의 품질을 올린다.
+**목표**: 같은 작업을 Claude·Codex·agy 중 둘 이상에게 동시에 시키고, Claude Opus 4.8 high
+심사자(실패 시 Codex 5.5 high 폴백)가 가장 나은 답을 고른 뒤, 종합자가 최종 답 하나를 만든다.
+*틀리면 비싼* 중요 작업의 품질을 올린다.
 
 **비목표 (의도적으로 안 하는 것)**:
 - 모든 작업에 적용하지 않는다. 토큰·시간이 N배이므로 **명시적으로 켤 때만** 동작한다.
-- 로컬 qwen3는 **심사 전용**이다. 작업 수행·종합에는 절대 쓰지 않는다(과거 철폐 사유 존중).
+- 심사자는 **후보 비교 전용**이다. 작업 수행·종합에는 쓰지 않는다.
 - 학습·자동 튜닝 없다. 결정적 규칙 + 1단계 강점 사전 힌트만 쓴다.
 
 ## 2. 실측 전제 (2026-06-22 확인됨)
@@ -35,8 +36,8 @@
    │        executeClaude / executeCodex / executeAgy 를 Promise.allSettled 로 묶음
    │        각자 독립 AbortController·세션. 하나 실패해도 나머지로 진행.
    │
-   ├─(3) 심사: 로컬 qwen3.6 에 후보 답들을 주고 {winner, reason} 받기
-   │        실패/타임아웃/서버다운 → Haiku 심사로 자동 강등 (폴백)
+   ├─(3) 심사: Claude Opus 4.8 high 에 후보 답들을 주고 {winner, reason} 받기
+   │        실패/타임아웃/JSON 파싱 실패 → Codex 5.5 high 심사로 자동 강등 (폴백)
    │        후보가 1개만 성공 → 심사 생략, 그 답이 승자
    │
    ├─(4) 종합: 승자 provider(또는 고정 Claude)에게
@@ -62,16 +63,12 @@
 - **권장 A.** `runSilentTurn(provider, prompt, signal): Promise<{text, error}>` 형태.
 - `Promise.allSettled`로 동시 대기. 전체 타임아웃(예: 작업당 상한) + 개별 AbortController.
 
-### 4.3 심사자 (로컬 qwen3.6 + Haiku 폴백) — 신규 모듈 `src/judge.ts`
+### 4.3 심사자 (Claude Opus 4.8 high + Codex 5.5 high 폴백) — `src/judge.ts`
 - 순수하게 테스트 가능한 형태로 분리.
-- `judgeLocal(question, candidates): Promise<{winner, reason} | null>`
-    - POST `http://localhost:11434/api/chat`, model=`qwen3.6:27b-96k`,
-      `stream:false`,`think:false`,`options:{temperature:0,num_ctx:<후보크기에 맞춤>}`.
-    - system: "중립 심사자. 작업 수행 금지, 후보 비교만. JSON 한 줄만."
-    - 타임아웃(예: 60s) + JSON 파싱 실패 시 null.
-- `judgeHaiku(question, candidates)` — 기존 `/goal` 평가자와 같은 GOAL_EVAL_MODEL 패턴 재사용.
-- `judge(...)` = `judgeLocal` 시도 → null이면 `judgeHaiku` 폴백. 어느 쪽을 썼는지 메타 반환.
-- 환경 오버라이드: `JUDGE_OLLAMA_URL`, `JUDGE_MODEL`, `JUDGE_DISABLE_LOCAL=1`(폴백 강제).
+- `buildJudgePrompt(question, candidates)`가 self-contained 채점 규약과 후보 답변을 만든다.
+- 1차 심사: Claude `claude-opus-4-8`, thinking/effort high.
+- 폴백 심사: Codex `gpt-5.5`, reasoning high.
+- 두 심사자 모두 JSON 한 줄 `{winner, reason}`만 반환하도록 지시하고, `parseJudgeResponse`가 파싱한다.
 
 ### 4.4 종합자
 - 기본: 승자 provider에게 통합 프롬프트 1회. 기존 실행 경로 재사용.
@@ -79,7 +76,7 @@
 - 통합 프롬프트는 `summarizeForHandoff`의 인계 요약 패턴을 본떠 일관성 유지.
 
 ### 4.5 투명성 (사용자에게 보이는 것)
-- 최종답 + 짧은 꼬리말: "후보: Claude·Codex / 심사: 로컬qwen3(또는 Haiku 폴백) / 선택: Codex / 근거: …"
+- 최종답 + 짧은 꼬리말: "후보: Claude·Codex / 심사: Claude Opus 4.8 high(또는 Codex 5.5 high 폴백) / 통합: Codex / 근거: …"
 - 어르신 시스템의 공개 진행 설명 규약과 일치.
 
 ## 5. 실패·강등 매트릭스 (단일 장애점 제거)
@@ -89,17 +86,16 @@
 | 후보 provider 1개 실패 | 나머지로 심사 진행 |
 | 후보 전부 실패 | 오류 보고, 종합 없음 |
 | 후보 1개만 성공 | 심사 생략, 그 답이 최종 |
-| 로컬 qwen3 다운/타임아웃/JSON깨짐 | Haiku 심사로 자동 강등 |
-| Haiku마저 실패 | 강점 사전 1순위 provider 답을 기본 선택 + 경고 |
-| Ollama 미설치/포트 닫힘 | judgeLocal 즉시 null → 폴백 (사전 ping 1회로 빠른 판단) |
+| Claude 심사 실패/타임아웃/JSON깨짐 | Codex 5.5 high 심사로 자동 강등 |
+| Codex 심사마저 실패 | 첫 후보 답을 기본 선택 + 경고 |
 
 ## 6. 비용·성능 메모
-- 토큰: 후보 N개 실행 + 종합 1회. 로컬 심사는 토큰 비용 0(전기·시간만).
-- 시간: 병렬이므로 후보 중 최장 1개 + 심사 수 초 + 종합 1회.
+- 토큰: 후보 N개 실행 + Claude 심사 1회 + 필요 시 Codex 폴백 1회 + 종합 1회.
+- 시간: 병렬이므로 후보 중 최장 1개 + 심사 1~2회 + 종합 1회.
 - 그래서 **중요 작업 한정**. 일상 작업은 1단계 라우터(단일 provider)로 충분.
 
 ## 7. 구현 단위 (승인 시 순서)
-1. `src/judge.ts` + 테스트 (로컬 호출 mock, 폴백 분기, JSON 파싱).
+1. `src/judge.ts` + 테스트 (심사 프롬프트, JSON 파싱).
 2. `runSilentTurn` 병렬 실행 헬퍼 + 테스트.
 3. 종합 오케스트레이션(트리거·강등 매트릭스) + 테스트.
 4. `/synth` 봇 명령 + 투명성 꼬리말.

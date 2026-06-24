@@ -1352,8 +1352,9 @@ export function createBot(config: AppConfig, store: StateStore) {
     );
   });
 
-  // /synth <작업>: 병렬 종합. Claude·Codex·agy를 읽기 전용으로 동시에 시키고, 로컬
-  // qwen3 심사자(실패 시 Haiku 폴백)가 최우수 답을 고른 뒤 승자가 통합해 최종답을 낸다.
+  // /synth <작업>: 병렬 종합. Claude·Codex·agy를 읽기 전용으로 동시에 시키고, Claude
+  // Opus 4.8 high 심사자(실패 시 Codex 5.5 high 폴백)가 최우수 답을 고른 뒤 승자가
+  // 통합해 최종답을 낸다.
   // 읽기·조언 작업 전용(파일 수정 안 함). 토큰·시간이 N배인 비싼 경로.
   bot.command("synth", async (ctx) => {
     const topicId = ctx.message?.message_thread_id;
@@ -1382,10 +1383,10 @@ export function createBot(config: AppConfig, store: StateStore) {
         return;
       }
       const judgeLabel = result.verdict
-        ? result.verdict.judge === "local"
-          ? "로컬 qwen3"
-          : result.verdict.judge === "haiku"
-            ? "Haiku 폴백"
+        ? result.verdict.judge === "claude"
+          ? "Claude Opus 4.8 high"
+          : result.verdict.judge === "codex"
+            ? "Codex 5.5 high 폴백"
             : "폴백(첫 후보)"
         : "단일 후보(심사 생략)";
       const candidateLabels = (result.candidates ?? [])
