@@ -151,6 +151,20 @@ describe("TokenPool", () => {
     expect(pool.select(now + 6_000)).toBe(A);
   });
 
+  it("keeps sticky token selection separately per model scope", () => {
+    const pool = new TokenPool([A, B]);
+    const now = 1_000_000;
+
+    expect(pool.select(now, "claude-opus-4-8")).toBe(A);
+    pool.noteRateLimited(A, now, now + 5_000);
+    expect(pool.select(now, "claude-opus-4-8")).toBe(B);
+
+    // A가 회복된 뒤 Opus는 마지막에 쓰던 B를 계속 유지한다.
+    expect(pool.select(now + 6_000, "claude-opus-4-8")).toBe(B);
+    // Sonnet은 별도 scope이므로 자기 첫 선택으로 A를 쓴다.
+    expect(pool.select(now + 6_000, "claude-sonnet-4-6")).toBe(A);
+  });
+
   it("does not fail over below the exhaustion threshold", () => {
     const pool = new TokenPool([A, B]);
     const now = 1_000_000;

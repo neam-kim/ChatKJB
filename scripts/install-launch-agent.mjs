@@ -14,6 +14,10 @@ const runtimeDist = join(runtimeDir, "dist");
 const runtimePreload = join(runtimeDir, "ensure-local-node-modules.mjs");
 const uid = process.getuid?.();
 
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function xml(value) {
   return value
     .replaceAll("&", "&amp;")
@@ -88,5 +92,17 @@ try {
 } catch {
   // The agent may not be loaded yet.
 }
-execFileSync("launchctl", ["bootstrap", `gui/${uid}`, agentPath], { stdio: "inherit" });
+let lastBootstrapError;
+for (let attempt = 1; attempt <= 5; attempt += 1) {
+  try {
+    execFileSync("launchctl", ["bootstrap", `gui/${uid}`, agentPath], { stdio: "inherit" });
+    lastBootstrapError = undefined;
+    break;
+  } catch (error) {
+    lastBootstrapError = error;
+    if (attempt === 5) break;
+    sleepMs(attempt * 500);
+  }
+}
+if (lastBootstrapError) throw lastBootstrapError;
 console.log(`LaunchAgent installed: ${agentPath}`);

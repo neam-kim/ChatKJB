@@ -36,8 +36,8 @@ export class TokenPool {
   private readonly slots: TokenSlot[];
   private readonly exhaustionUtilization: number;
   private readonly defaultBackoffMs: number;
-  // 직전 select()가 고른 토큰. 살아있는 한 계속 같은 토큰을 쓰는(sticky) 선택의 기준이 된다.
-  private lastSelected: string | null = null;
+  // 직전 select()가 고른 토큰. scope별로 살아있는 한 계속 같은 토큰을 쓰는(sticky) 선택의 기준이 된다.
+  private readonly lastSelectedByScope = new Map<string, string>();
 
   constructor(tokens: string[], options: TokenPoolOptions = {}) {
     const unique = [...new Set(tokens.map((token) => token.trim()).filter(Boolean))];
@@ -96,12 +96,13 @@ export class TokenPool {
    * 전부 소진된 경우엔 가장 먼저 회복되는(=exhaustedUntil이 가장 이른) 토큰을 돌려준다.
    * 어떤 경우에도 토큰 하나는 반드시 반환하며, 반환한 토큰을 lastSelected로 기록한다.
    */
-  select(now: number = Date.now()): string {
+  select(now: number = Date.now(), scope = "default"): string {
+    const lastSelected = this.lastSelectedByScope.get(scope) ?? null;
     // 직전에 고른 토큰이 아직 살아있으면 그대로 유지한다.
-    if (this.lastSelected !== null) {
-      const slot = this.slots.find((item) => item.token === this.lastSelected);
+    if (lastSelected !== null) {
+      const slot = this.slots.find((item) => item.token === lastSelected);
       if (slot && (slot.exhaustedUntil === null || slot.exhaustedUntil <= now)) {
-        return this.lastSelected;
+        return lastSelected;
       }
     }
     // 등록 순서상 가장 앞의 살아있는 토큰.
@@ -109,7 +110,7 @@ export class TokenPool {
       (slot) => slot.exhaustedUntil === null || slot.exhaustedUntil <= now
     );
     if (available) {
-      this.lastSelected = available.token;
+      this.lastSelectedByScope.set(scope, available.token);
       return available.token;
     }
     // 전부 소진: 회복이 가장 빠른(=exhaustedUntil이 가장 이른) 토큰을 시도한다.
@@ -119,7 +120,7 @@ export class TokenPool {
         ? slot
         : earliest
     );
-    this.lastSelected = soonest.token;
+    this.lastSelectedByScope.set(scope, soonest.token);
     return soonest.token;
   }
 

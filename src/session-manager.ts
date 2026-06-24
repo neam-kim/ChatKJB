@@ -1694,8 +1694,10 @@ export class SessionManager {
       mcpFailures: new Map()
     };
     this.active.set(session.id, run);
+    const claudeModel = session.model ?? DEFAULT_CLAUDE_MODEL;
     // 한도에 도달하지 않은 토큰을 고른다. 전부 소진이면 가장 빨리 회복될 토큰을 시도한다.
-    const oauthToken = this.tokenPool.select();
+    // 마지막 사용 토큰은 Claude 모델별로 따로 유지한다.
+    const oauthToken = this.tokenPool.select(Date.now(), claudeModel);
     const tokenIndex = this.tokenPool.indexOf(oauthToken);
     let sdkSessionId = request.resumeSessionId ?? session.sdkSessionId;
     // 세션의 usageSnapshot은 텔레그램 표시용 캐시이며 어느 계정 토큰에서 수집됐는지
@@ -1793,7 +1795,6 @@ export class SessionManager {
         };
       };
 
-      const claudeModel = session.model ?? DEFAULT_CLAUDE_MODEL;
       const thinking = normalizeThinkingForModel(
         this.options.modelCatalog,
         claudeModel,
@@ -2050,7 +2051,7 @@ export class SessionManager {
           resetsAt ? Date.parse(resetsAt) : undefined
         );
         const attempts = (request.autoSwitchCount ?? 0) + 1;
-        const nextToken = this.tokenPool.select();
+        const nextToken = this.tokenPool.select(Date.now(), claudeModel);
         const canAutoSwitch =
           this.tokenPool.size > 1
           && attempts < this.tokenPool.size
