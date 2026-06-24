@@ -379,6 +379,9 @@ interface ActiveRun {
   pendingTurns: number;
   startedAt: number;
   query?: Query;
+  stopRequested?: boolean;
+  codexCurrentPrompt?: string;
+  codexRestartPrompt?: string;
   codexTimers: Map<string, NodeJS.Timeout>;
   codexStarts: Map<string, number>;
   mcpFailures: Map<string, number>;
@@ -984,6 +987,13 @@ export function buildUserMessage(
   };
 }
 
+export function buildCodexSteeredPrompt(originalPrompt: string, steeringPrompt: string): string {
+  return `[중단된 기존 Codex 지시]\n${originalPrompt.trim()}\n\n`
+    + `[/steer로 새로 들어온 우선 지시]\n${steeringPrompt.trim()}\n\n`
+    + `위 /steer 지시를 우선 반영해 기존 작업을 다시 수행하십시오. `
+    + `이미 적용된 실제 파일 변경은 무작정 되돌리지 말고, 현재 저장소 상태를 확인한 뒤 이어서 진행하십시오.`;
+}
+
 export class MessageQueue implements AsyncIterable<SDKUserMessage> {
   private readonly values: SDKUserMessage[] = [];
   private readonly waiters: Array<(value: IteratorResult<SDKUserMessage>) => void> = [];
@@ -1211,6 +1221,7 @@ export class SessionManager {
     }
     const run = this.active.get(sessionId);
     if (!run) return false;
+    run.stopRequested = true;
     run.input.close();
     run.controller.abort();
     this.agyInteractiveSessions.get(sessionId)?.client.interrupt();
@@ -1571,6 +1582,13 @@ export class SessionManager {
     const run = this.active.get(sessionId);
     const clean = prompt.trim();
     if (!run || !clean) return false;
+    const session = this.store.getSession(sessionId);
+    if (session?.provider === "codex" && run.codexCurrentPrompt) {
+      const base = run.codexRestartPrompt ?? run.codexCurrentPrompt;
+      run.codexRestartPrompt = buildCodexSteeredPrompt(base, clean);
+      run.controller.abort();
+      return true;
+    }
     run.pendingTurns += 1;
     if (run.input.push(buildUserMessage(clean, "now"))) return true;
     run.pendingTurns -= 1;
@@ -2197,7 +2215,7 @@ export class SessionManager {
     session = this.store.getSession(request.session.id) ?? session;
 
     const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
-    const controller = new AbortController();
+    let controller = new AbortController();
     const input = new MessageQueue();
     input.push(buildUserMessage(request.prompt));
     const run: ActiveRun = {
@@ -2260,47 +2278,67 @@ export class SessionManager {
       let firstTurn = true;
       while (!pending.done) {
         const content = pending.value.message.content;
-        const turnPrompt = typeof content === "string" ? content : request.prompt;
-        const memoryPrefix = firstTurn ? `${bootstrap}\n\n` : "";
-        run.codexStarts.set("codex", Date.now());
-        if (turnTimeout) clearTimeout(turnTimeout);
-        turnTimeout = setTimeout(() => {
-          timedOut = true;
-          controller.abort();
-        }, this.options.codexMcpTimeoutMs);
-
+        let turnPrompt = typeof content === "string" ? content : request.prompt;
         let attemptResponse = "";
-        let completed = false;
-        try {
-          const streamed = await thread.runStreamed(`${memoryPrefix}${turnPrompt}`, {
-            signal: controller.signal
-          });
-          for await (const event of streamed.events) {
-            if (event.type === "item.completed") {
-              if (event.item.type === "agent_message") {
-                attemptResponse = event.item.text;
-                lastAgentMessage = event.item.text;
-                await renderer.text(event.item.text);
-              }
-              const progress = codexProgress(event.item);
-              if (progress) renderer.note(progress);
-            } else if (event.type === "item.updated") {
-              // 답변 본문이 자라는 동안 상태 메시지에 미리보기로 흘려보낸다.
-              if (event.item.type === "agent_message") renderer.partial(event.item.text);
-            } else if (event.type === "turn.completed") {
-              completed = true;
-            } else if (event.type === "turn.failed") {
-              throw new Error(`Codex 실행 실패: ${event.error.message}`);
-            } else if (event.type === "error") {
-              throw new Error(`Codex 스트림 오류: ${event.message}`);
-            }
-          }
-        } finally {
-          run.codexStarts.delete("codex");
+        while (true) {
+          controller = new AbortController();
+          run.controller = controller;
+          run.codexCurrentPrompt = turnPrompt;
+          delete run.codexRestartPrompt;
+          const memoryPrefix = firstTurn ? `${bootstrap}\n\n` : "";
+          run.codexStarts.set("codex", Date.now());
+          timedOut = false;
           if (turnTimeout) clearTimeout(turnTimeout);
+          turnTimeout = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, this.options.codexMcpTimeoutMs);
+
+          let completed = false;
+          try {
+            const streamed = await thread.runStreamed(`${memoryPrefix}${turnPrompt}`, {
+              signal: controller.signal
+            });
+            for await (const event of streamed.events) {
+              if (event.type === "item.completed") {
+                if (event.item.type === "agent_message") {
+                  attemptResponse = event.item.text;
+                  lastAgentMessage = event.item.text;
+                  await renderer.text(event.item.text);
+                }
+                const progress = codexProgress(event.item);
+                if (progress) renderer.note(progress);
+              } else if (event.type === "item.updated") {
+                // 답변 본문이 자라는 동안 상태 메시지에 미리보기로 흘려보낸다.
+                if (event.item.type === "agent_message") renderer.partial(event.item.text);
+              } else if (event.type === "turn.completed") {
+                completed = true;
+              } else if (event.type === "turn.failed") {
+                throw new Error(`Codex 실행 실패: ${event.error.message}`);
+              } else if (event.type === "error") {
+                throw new Error(`Codex 스트림 오류: ${event.message}`);
+              }
+            }
+          } catch (error) {
+            if (!controller.signal.aborted || !run.codexRestartPrompt || timedOut || run.stopRequested) {
+              throw error;
+            }
+          } finally {
+            run.codexStarts.delete("codex");
+            delete run.codexCurrentPrompt;
+            if (turnTimeout) clearTimeout(turnTimeout);
+          }
+          if (run.codexRestartPrompt && !timedOut && !run.stopRequested) {
+            turnPrompt = run.codexRestartPrompt;
+            delete run.codexRestartPrompt;
+            attemptResponse = "";
+            renderer.note("Codex 현재 턴을 /steer 지시로 중단하고 다시 시작합니다.");
+            continue;
+          }
+          if (timedOut || controller.signal.aborted) throw new Error("turn aborted");
+          if (!completed) throw new Error("Codex 실행이 완료 이벤트 없이 종료되었습니다.");
+          break;
         }
-        if (timedOut || controller.signal.aborted) throw new Error("turn aborted");
-        if (!completed) throw new Error("Codex 실행이 완료 이벤트 없이 종료되었습니다.");
 
         if (thread.id && thread.id !== codexThreadId) {
           codexThreadId = thread.id;

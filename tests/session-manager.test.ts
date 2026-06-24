@@ -8,6 +8,7 @@ import {
   agyFailureFromLog,
   agyRequestsProceed,
   buildClaudeEnvironment,
+  buildCodexSteeredPrompt,
   buildCodexEnvironment,
   buildCompactCommand,
   buildGoalCheckPrompt,
@@ -299,6 +300,15 @@ describe("streaming input", () => {
       ["현재 지시", "now"],
       ["후속 작업", "next"]
     ]);
+  });
+
+  it("builds a Codex restart prompt that preserves the interrupted instruction and prioritizes steering", () => {
+    const prompt = buildCodexSteeredPrompt("원래 작업", "표로 바꿔");
+
+    expect(prompt).toContain("원래 작업");
+    expect(prompt).toContain("표로 바꿔");
+    expect(prompt).toContain("우선 반영");
+    expect(prompt).toContain("현재 저장소 상태");
   });
 });
 
