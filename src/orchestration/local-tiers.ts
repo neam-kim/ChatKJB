@@ -3,6 +3,7 @@ import type { TaskContract, DiffBudget } from "./types.js";
 export const TIER1_MODEL = "gemma4:e4b-64k";
 export const TIER2_MODEL = "qwen3.6:27b-96k";
 export const TIER3_MODEL = "qwen3-coder:30b-96k";
+export const TIER2_JUDGE_TIMEOUT_MS = 300000;
 
 export interface OllamaConfig {
   url: string;
@@ -14,6 +15,10 @@ export function ollamaConfig(env: NodeJS.ProcessEnv = process.env): OllamaConfig
     url: env.OLLAMA_URL || "http://localhost:11434/api/chat",
     timeoutMs: Number(env.OLLAMA_TIMEOUT_MS) || 120000,
   };
+}
+
+export function ollamaTimeoutForModel(model: string, config: OllamaConfig): number {
+  return model === TIER2_MODEL ? TIER2_JUDGE_TIMEOUT_MS : config.timeoutMs;
 }
 
 export interface TierPrompt {
@@ -94,7 +99,9 @@ export function extractCodeBlocks(content: string): CodeBlock[] {
 }
 
 export async function callOllama(model: string, prompt: TierPrompt, config?: OllamaConfig): Promise<string> {
-  const { url, timeoutMs } = config ?? ollamaConfig();
+  const resolvedConfig = config ?? ollamaConfig();
+  const { url } = resolvedConfig;
+  const timeoutMs = ollamaTimeoutForModel(model, resolvedConfig);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { TaskContract } from "../src/orchestration/types.js";
 import {
   ollamaConfig,
+  ollamaTimeoutForModel,
+  TIER2_JUDGE_TIMEOUT_MS,
   buildTier1Prompt,
   buildTier3Prompt,
   extractCodeBlocks,
@@ -14,6 +16,22 @@ describe("ollamaConfig", () => {
       url: "http://localhost:11434/api/chat",
       timeoutMs: 120000,
     });
+  });
+});
+
+describe("ollamaTimeoutForModel", () => {
+  it("forces qwen3.6 judge calls to 300 seconds", () => {
+    expect(ollamaTimeoutForModel("qwen3.6:27b-96k", {
+      url: "http://localhost:11434/api/chat",
+      timeoutMs: 120000,
+    })).toBe(TIER2_JUDGE_TIMEOUT_MS);
+  });
+
+  it("keeps configured timeout for other local models", () => {
+    expect(ollamaTimeoutForModel("qwen3-coder:30b-96k", {
+      url: "http://localhost:11434/api/chat",
+      timeoutMs: 45000,
+    })).toBe(45000);
   });
 });
 

@@ -596,6 +596,8 @@ describe("/usage command", () => {
     expect(reply).toContain("토큰 #2");
     expect(reply).toContain("5시간 한도: 10% 사용");
     expect(reply).toContain("원천: Claude 서버 실시간 조회");
+    expect(reply).toContain("Codex 사용량");
+    expect(reply).toContain("Codex 계정 #1: 사용 가능");
   });
 
   it("explains when the live OAuth session lacks rate-limit data", async () => {
@@ -617,5 +619,6 @@ describe("/usage command", () => {
     const reply = calls.find((call) => call.method === "sendMessage")?.payload.text;
     expect(reply).toContain("Claude 서버가 현재 OAuth 토큰에 대해 한도 창");
     expect(reply).toContain("claude setup-token");
+    expect(reply).toContain("Codex 사용량");
   });
 });

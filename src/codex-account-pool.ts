@@ -2,6 +2,13 @@ export interface CodexAccountPoolOptions {
   defaultBackoffMs?: number;
 }
 
+export interface CodexAccountStatus {
+  index: number;
+  home: string;
+  exhaustedUntil: number | null;
+  available: boolean;
+}
+
 const DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
 export class CodexAccountPool {
@@ -96,6 +103,15 @@ export class CodexAccountPool {
     return earliestRecover === Infinity ? null : earliestRecover;
   }
 
+  statuses(now: number = Date.now()): CodexAccountStatus[] {
+    return this.slots.map((slot, index) => ({
+      index: index + 1,
+      home: slot.home,
+      exhaustedUntil: slot.exhaustedUntil,
+      available: slot.exhaustedUntil === null || slot.exhaustedUntil <= now
+    }));
+  }
+
   describe(now: number = Date.now()): string {
     const lines: string[] = [];
     for (const [i, slot] of this.slots.entries()) {
@@ -111,4 +127,3 @@ export class CodexAccountPool {
     return lines.join("\n");
   }
 }
-

@@ -2,7 +2,13 @@ import type {
   SDKControlGetUsageResponse,
   SDKRateLimitInfo
 } from "@anthropic-ai/claude-agent-sdk";
-import type { ExtraUsage, UsageSnapshot, UsageWindow } from "./types.js";
+import type {
+  CodexAccountUsageSnapshot,
+  CodexUsageSnapshot,
+  ExtraUsage,
+  UsageSnapshot,
+  UsageWindow
+} from "./types.js";
 import type { AgyUsage } from "./agy-interactive.js";
 
 function percentage(value: unknown): number | null {
@@ -191,6 +197,42 @@ export function parseStoredAgyUsage(value: string | null): AgyUsage | null {
   } catch {
     return null;
   }
+}
+
+function formatTokenCount(value: number): string {
+  return value.toLocaleString("ko-KR");
+}
+
+function formatCodexUsageSnapshot(snapshot: CodexUsageSnapshot): string {
+  return [
+    `  전체: ${formatTokenCount(snapshot.totalTokens)}`,
+    `  입력: ${formatTokenCount(snapshot.inputTokens)}`,
+    `  캐시 입력: ${formatTokenCount(snapshot.cachedInputTokens)}`,
+    `  출력: ${formatTokenCount(snapshot.outputTokens)}`,
+    `  추론 출력: ${formatTokenCount(snapshot.reasoningOutputTokens)}`,
+    `  모델: ${snapshot.model} · reasoning ${snapshot.reasoning}`,
+    `  측정: ${new Date(snapshot.capturedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`
+  ].join("\n");
+}
+
+export function formatCodexAccountUsage(snapshots: CodexAccountUsageSnapshot[]): string {
+  if (snapshots.length === 0) {
+    return "Codex 계정: 설정 없음";
+  }
+  const lines = ["Codex 사용량"];
+  for (const snapshot of snapshots) {
+    const status = snapshot.available
+      ? "사용 가능"
+      : `소진 · ${snapshot.exhaustedUntil
+        ? new Date(snapshot.exhaustedUntil).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })
+        : "회복 시각 알 수 없음"} 회복`;
+    lines.push(`Codex 계정 #${snapshot.accountIndex}: ${status}`);
+    lines.push(snapshot.latestUsage
+      ? formatCodexUsageSnapshot(snapshot.latestUsage)
+      : "  최근 완료 턴 토큰 사용량: 아직 없음");
+  }
+  lines.push("원천: Codex SDK 완료 이벤트 및 계정 풀 상태");
+  return lines.join("\n");
 }
 
 // 한도 윈도우를 항상 같은 순서로, 서버가 실제로 반환한 것만 표시한다.

@@ -46,7 +46,12 @@ import { StateStore } from "./store.js";
 import { agentStrengthsPath, loadStrengthHints, routeProvider, wikiVaultPath } from "./router.js";
 import { safeErrorMessage, TelegramTransport } from "./telegram-transport.js";
 import type { ProjectConfig, ProviderKind, SessionDefaults, SessionRecord } from "./types.js";
-import { formatAgyUsage, formatUsageSnapshot, parseStoredAgyUsage } from "./usage.js";
+import {
+  formatAgyUsage,
+  formatCodexAccountUsage,
+  formatUsageSnapshot,
+  parseStoredAgyUsage
+} from "./usage.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -794,13 +799,15 @@ export function createBot(config: AppConfig, store: StateStore) {
         .filter((result) => !result.snapshot)
         .map((result) => `토큰 #${result.tokenIndex}: 조회 실패${result.error ? ` (${result.error})` : ""}`);
       const failedText = failed.length > 0 ? `\n\n${failed.join("\n")}` : "";
+      const codexText = `\n\n${formatCodexAccountUsage(sessions.getCodexUsageSnapshots())}`;
       await ctx.reply(
-        `${sections.join("\n\n")}\n원천: Claude 서버 실시간 조회${failedText}`
+        `${sections.join("\n\n")}\n원천: Claude 서버 실시간 조회${failedText}${codexText}`
       );
       return;
     }
 
     const latest = store.listSessions(50).find((session) => session.usageSnapshot);
+    const codexText = `\n\n${formatCodexAccountUsage(sessions.getCodexUsageSnapshots())}`;
     if (!latest?.usageSnapshot) {
       await ctx.reply(
         "실시간 사용량 조회에 실패했고, 저장된 한도 사용량도 없습니다."
@@ -809,6 +816,7 @@ export function createBot(config: AppConfig, store: StateStore) {
               `토큰 #${result.tokenIndex}: ${result.error ?? "사용량 없음"}`
             ).join("\n")}`
           : "")
+        + codexText
       );
       return;
     }
@@ -820,6 +828,7 @@ export function createBot(config: AppConfig, store: StateStore) {
           ).join("\n")}`
         : "")
       + `\n\n${formatUsageSnapshot(latest.usageSnapshot)}\n측정: ${new Date(latest.usageSnapshot.capturedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`
+      + codexText
     );
   });
 

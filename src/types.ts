@@ -61,6 +61,24 @@ export interface UsageSnapshot {
   extraUsage?: ExtraUsage;
 }
 
+export interface CodexUsageSnapshot {
+  capturedAt: number;
+  model: string;
+  reasoning: string;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+}
+
+export interface CodexAccountUsageSnapshot {
+  accountIndex: number;
+  available: boolean;
+  exhaustedUntil: number | null;
+  latestUsage: CodexUsageSnapshot | null;
+}
+
 export interface SessionRecord {
   id: string;
   sdkSessionId: string | null;

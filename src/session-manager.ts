@@ -14,7 +14,7 @@ import {
   type SDKUserMessage,
   type SDKMessage
 } from "@anthropic-ai/claude-agent-sdk";
-import { Codex, type ThreadItem } from "@openai/codex-sdk";
+import { Codex, type ThreadItem, type Usage as CodexSdkUsage } from "@openai/codex-sdk";
 import { InlineKeyboard } from "grammy";
 import {
   isRetryableMcpError,
@@ -67,6 +67,8 @@ import {
 } from "./model-catalog.js";
 import type {
   MessageTransport,
+  CodexAccountUsageSnapshot,
+  CodexUsageSnapshot,
   ProjectConfig,
   ProviderKind,
   SessionRecord,
@@ -1070,6 +1072,7 @@ export class SessionManager {
   private readonly oauthTokens: string[];
   // Codex 다중 계정 풀(CODEX_HOME 디렉터리 기준, sticky 선택 + reactive 페일오버).
   private readonly codexAccountPool: CodexAccountPool;
+  private readonly codexUsageByHome = new Map<string, CodexUsageSnapshot>();
 
   constructor(
     private readonly store: StateStore,
@@ -1268,6 +1271,37 @@ export class SessionManager {
 
   async fetchCurrentUsageSnapshot(cwd: string): Promise<UsageLookupResult> {
     return this.fetchUsageSnapshotForToken(cwd, this.tokenPool.select());
+  }
+
+  getCodexUsageSnapshots(now: number = Date.now()): CodexAccountUsageSnapshot[] {
+    return this.codexAccountPool.statuses(now).map((status) => ({
+      accountIndex: status.index,
+      available: status.available,
+      exhaustedUntil: status.available ? null : status.exhaustedUntil,
+      latestUsage: this.codexUsageByHome.get(status.home) ?? null
+    }));
+  }
+
+  private recordCodexUsage(
+    home: string,
+    usage: CodexSdkUsage,
+    model: string,
+    reasoning: string
+  ): void {
+    const inputTokens = usage.input_tokens;
+    const cachedInputTokens = usage.cached_input_tokens;
+    const outputTokens = usage.output_tokens;
+    const reasoningOutputTokens = usage.reasoning_output_tokens;
+    this.codexUsageByHome.set(home, {
+      capturedAt: Date.now(),
+      model,
+      reasoning,
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+      reasoningOutputTokens,
+      totalTokens: inputTokens + outputTokens
+    });
   }
 
   private async fetchUsageSnapshotForToken(
@@ -2338,6 +2372,7 @@ export class SessionManager {
                 if (event.item.type === "agent_message") renderer.partial(event.item.text);
               } else if (event.type === "turn.completed") {
                 completed = true;
+                this.recordCodexUsage(codexHome, event.usage, codexModel, codexReasoning);
               } else if (event.type === "turn.failed") {
                 throw new Error(`Codex 실행 실패: ${event.error.message}`);
               } else if (event.type === "error") {
