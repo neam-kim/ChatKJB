@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,6 +9,9 @@ const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const nodePath = process.execPath;
 const agentDir = join(homedir(), "Library", "LaunchAgents");
 const agentPath = join(agentDir, `${label}.plist`);
+const runtimeDir = join(homedir(), ".local", "share", "telegram-claude-orchestrator", "runtime");
+const runtimeDist = join(runtimeDir, "dist");
+const runtimePreload = join(runtimeDir, "ensure-local-node-modules.mjs");
 const uid = process.getuid?.();
 
 function xml(value) {
@@ -22,6 +25,11 @@ function xml(value) {
 
 mkdirSync(join(projectDir, "data"), { recursive: true });
 mkdirSync(agentDir, { recursive: true });
+mkdirSync(runtimeDir, { recursive: true });
+rmSync(runtimeDist, { recursive: true, force: true });
+cpSync(join(projectDir, "dist"), runtimeDist, { recursive: true });
+copyFileSync(join(projectDir, "scripts", "ensure-local-node-modules.mjs"), runtimePreload);
+chmodSync(runtimePreload, 0o644);
 
 // 프로젝트가 iCloud/SynologyDrive 등 File Provider(CloudStorage) 경로에 있으면,
 // launchd(xpcproxy)는 exec 전에 StandardOut/ErrPath 로그 파일을 그 경로에 직접 열려다
@@ -39,12 +47,17 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <dict>
   <key>Label</key>
   <string>${label}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CHATKJB_PROJECT_DIR</key>
+    <string>${xml(projectDir)}</string>
+  </dict>
   <key>ProgramArguments</key>
   <array>
     <string>${xml(nodePath)}</string>
     <string>--import</string>
-    <string>${xml(pathToFileURL(join(projectDir, "scripts", "ensure-local-node-modules.mjs")).href)}</string>
-    <string>${xml(join(projectDir, "dist", "index.js"))}</string>
+    <string>${xml(pathToFileURL(runtimePreload).href)}</string>
+    <string>${xml(join(runtimeDist, "index.js"))}</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${xml(projectDir)}</string>

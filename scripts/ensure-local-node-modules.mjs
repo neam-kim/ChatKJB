@@ -15,7 +15,9 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const projectDir = process.env.CHATKJB_PROJECT_DIR
+  ? resolve(process.env.CHATKJB_PROJECT_DIR)
+  : resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const nm = join(projectDir, "node_modules");
 const localNm = join(homedir(), ".local", "share", "telegram-claude-orchestrator", "node_modules");
 

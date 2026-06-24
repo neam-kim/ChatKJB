@@ -57,7 +57,7 @@ async function main(): Promise<void> {
     { command: "projects", description: "등록 프로젝트 목록" },
     { command: "steer", description: "실행 중 작업에 즉시 지시" },
     { command: "next", description: "현재 작업 뒤 후속 작업 예약" },
-    { command: "goal", description: "목표 조건 달성까지 자동으로 턴 이어가기" },
+    { command: "goal", description: "조건 충족까지 자동 진행 — check: 결정론 검증 후 판관이 판정" },
     { command: "route", description: "작업에 적합한 제공자(Claude/Codex/agy) 추천" },
     { command: "synth", description: "여러 제공자 답을 비교·심사 후 장점 통합" },
     { command: "query", description: "LLM-Wiki에 질문 (인용 포함 답변)" },
