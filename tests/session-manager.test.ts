@@ -23,6 +23,7 @@ import {
   CLAUDE_THINKING,
   CODEX_MODEL,
   CODEX_REASONING_EFFORT,
+  isNoRolloutError,
   isOverloadedError,
   isRateLimitError,
   loadProjectInstructions,
@@ -1153,5 +1154,67 @@ describe("extractAgyAttachments — fileMessage에서 첨부 파싱", () => {
     const result = extractAgyAttachments(prompt);
     expect(result).toHaveLength(1);
     expect(result[0]).toEqual({ path: "/inbox/report.pdf", mimeType: "application/pdf" });
+  });
+});
+
+describe("reset timestamp parsing", () => {
+  it("parses Codex 'try again at' with an absolute date and year", () => {
+    const snapshot = snapshotFromRateLimitError(
+      new Error(
+        "You've hit your usage limit. Upgrade to Pro, visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Jun 27th, 2026 3:57 PM."
+      ),
+      Date.parse("2026-06-24T05:00:00.000Z")
+    );
+    expect(snapshot?.fiveHour).toEqual({
+      utilization: 100,
+      resetsAt: "2026-06-27T06:57:00.000Z"
+    });
+  });
+
+  it("parses Codex 'try again at' with a time only", () => {
+    const snapshot = snapshotFromRateLimitError(
+      new Error("You've hit your usage limit. Try again at 5:28 PM."),
+      Date.parse("2026-06-24T02:00:00.000Z")
+    );
+    expect(snapshot?.fiveHour).toEqual({
+      utilization: 100,
+      resetsAt: "2026-06-24T08:28:00.000Z"
+    });
+  });
+
+  it("parses a Claude weekly limit with a month/day and no year", () => {
+    const snapshot = snapshotFromRateLimitError(
+      new Error("You've hit your weekly limit · resets Jun 25 at 9am (Asia/Seoul)"),
+      Date.parse("2026-06-24T02:20:00.000Z")
+    );
+    expect(snapshot?.fiveHour).toEqual({
+      utilization: 100,
+      resetsAt: "2026-06-25T00:00:00.000Z"
+    });
+  });
+
+  it("still parses the bare 'resets 2pm (TZ)' form", () => {
+    const snapshot = snapshotFromRateLimitError(
+      new Error("You've hit your session limit · resets 2pm (Asia/Seoul)"),
+      Date.parse("2026-06-16T02:20:00.000Z")
+    );
+    expect(snapshot?.fiveHour).toEqual({
+      utilization: 100,
+      resetsAt: "2026-06-16T05:00:00.000Z"
+    });
+  });
+});
+
+describe("no-rollout classification", () => {
+  it("detects a missing Codex rollout as a resumable error", () => {
+    expect(
+      isNoRolloutError(
+        new Error(
+          "Codex Exec exited with code 1: Reading prompt from stdin...\nError: thread/resume: thread/resume failed: no rollout found for thread id 019ef7fa-e0a6-7a51-9189-8b656aa0aa5f (code -32600)"
+        )
+      )
+    ).toBe(true);
+    expect(isNoRolloutError(new Error("You've hit your usage limit"))).toBe(false);
+    expect(isNoRolloutError(new Error("turn aborted"))).toBe(false);
   });
 });

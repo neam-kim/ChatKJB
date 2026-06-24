@@ -332,6 +332,8 @@ interface RunRequest {
   autoSwitchCount?: number;
   // 일시적 과부하(Overloaded/5xx)로 백오프 후 자동 재시도한 횟수. 무한 재시도를 막는 가드.
   retryCount?: number;
+  // Codex rollout 유실(no rollout found)로 스레드를 버리고 새 스레드로 재실행한 횟수. 무한 루프 가드.
+  rolloutResetCount?: number;
 }
 
 interface SessionManagerOptions {
@@ -821,29 +823,59 @@ function nextResetInTimeZone(
   return new Date(reset).toISOString();
 }
 
+const RESET_MONTHS: Record<string, number> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
+};
+
+// 한도 메시지에서 회복 시각(ISO)을 파싱한다. 지원하는 표현:
+//  - Claude 5시간 한도: "resets 2pm (Asia/Seoul)", "resets 4:40pm"
+//  - Claude 주간 한도:  "resets Jun 25 at 9am (Asia/Seoul)" (연도 생략 → 가까운 미래로 보정)
+//  - Codex 사용 한도:   "...try again at Jun 27th, 2026 3:57 PM.", "...try again at 5:28 PM."
+// 시간만 주어지면 다음 도래 시각, 날짜가 함께 오면 그 절대 시각을 쓴다. 시간대 미표기 시
+// 로컬(Asia/Seoul)로 가정한다(Codex/Claude 모두 사용자 로컬 표기를 따른다).
+export function parseResetTimestamp(message: string, capturedAt = Date.now()): string | null {
+  const anchor = message.match(/(?:resets?|try again at)\s+(.+?)(?:[.\n]|$)/i);
+  const tail = anchor?.[1];
+  if (!tail) return null;
+  const detail = tail.match(
+    /(?:(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})?\s*(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\))?/i
+  );
+  if (!detail) return null;
+  const [, monthName, dayStr, yearStr, hourStr, minuteStr, meridiem] = detail;
+  let hour = Number(hourStr);
+  const minute = minuteStr ? Number(minuteStr) : 0;
+  const ampm = meridiem?.toLowerCase();
+  if (ampm === "pm" && hour < 12) hour += 12;
+  if (ampm === "am" && hour === 12) hour = 0;
+  if (hour > 23) return null;
+  const timeZone = normalizeResetTimeZone(detail[7]);
+
+  const month = monthName ? RESET_MONTHS[monthName.toLowerCase().slice(0, 3)] : undefined;
+  if (monthName && month !== undefined) {
+    const day = Number(dayStr);
+    const year = yearStr ? Number(yearStr) : datePartsInTimeZone(capturedAt, timeZone).year;
+    let reset = zonedDateTimeToEpoch(year, month, day, hour, minute, timeZone);
+    // 연도가 생략된 형식(예: Claude 주간 한도 "resets Jun 25 at 9am")에서 이미 지난
+    // 날짜면 다음 해로 넘긴다. 연도가 명시된 Codex 메시지는 그대로 쓴다.
+    if (!yearStr && reset <= capturedAt) {
+      reset = zonedDateTimeToEpoch(year + 1, month, day, hour, minute, timeZone);
+    }
+    return new Date(reset).toISOString();
+  }
+  return nextResetInTimeZone(hour, minute, timeZone, capturedAt);
+}
+
 export function snapshotFromRateLimitError(error: unknown, capturedAt = Date.now()): UsageSnapshot | null {
   const message = error instanceof Error ? error.message : String(error);
   if (!isRateLimitError(message)) return null;
-  const resetMatch = message.match(
-    /resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\))?/i
-  );
-  let resetsAt: string | null = null;
-  if (resetMatch) {
-    let hour = Number(resetMatch[1]);
-    const minute = resetMatch[2] ? Number(resetMatch[2]) : 0;
-    const meridiem = resetMatch[3]?.toLowerCase();
-    if (meridiem === "pm" && hour < 12) hour += 12;
-    if (meridiem === "am" && hour === 12) hour = 0;
-    const timeZone = normalizeResetTimeZone(resetMatch[4]);
-    resetsAt = nextResetInTimeZone(hour, minute, timeZone, capturedAt);
-  }
   return {
     capturedAt,
     subscriptionType: null,
     rateLimitsAvailable: true,
     fiveHour: {
       utilization: 100,
-      resetsAt
+      resetsAt: parseResetTimestamp(message, capturedAt)
     }
   };
 }
@@ -860,6 +892,14 @@ export function isRateLimitError(error: unknown): boolean {
     || message.includes("quota")
     || (message.includes("limit") && message.includes("reset"))
   );
+}
+
+// Codex 스레드 재개(thread/resume) 시 해당 rollout 파일이 사라져 재개가 불가능한지 판별한다.
+// 계정 홈을 바꿨거나 rollout이 정리/만료된 경우 "no rollout found ... (code -32600)"로 실패하며,
+// 이때는 기존 codexThreadId를 버리고 새 스레드로 다시 시작하면 복구된다(맥락은 부트스트랩으로 보강).
+export function isNoRolloutError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return message.includes("no rollout found") || message.includes("thread/resume failed");
 }
 
 // 일시적 서버 과부하/장애로 턴이 실패했는지 판별한다. 토큰 한도가 아니라 Anthropic
@@ -2162,6 +2202,9 @@ export class SessionManager {
     let timedOut = false;
     let turnTimeout: NodeJS.Timeout | undefined;
     let lastResponse = "";
+    // 턴이 완료 이벤트 없이 끊겨도(SIGTERM·타임아웃 등) 직전에 포착한 최종 답변을 잃지 않도록
+    // try 바깥에 둔다. catch에서 텔레그램으로 강제 전송하는 복구 경로의 소스가 된다.
+    let lastAgentMessage = "";
     let codexThreadId = session.codexThreadId;
     // catch의 한도 페일오버에서 봉인 대상으로 참조하려고 try 바깥에 둔다.
     let codexHome = this.codexAccountPool.select();
@@ -2224,6 +2267,7 @@ export class SessionManager {
             if (event.type === "item.completed") {
               if (event.item.type === "agent_message") {
                 attemptResponse = event.item.text;
+                lastAgentMessage = event.item.text;
                 await renderer.text(event.item.text);
               }
               const progress = codexProgress(event.item);
@@ -2283,14 +2327,30 @@ export class SessionManager {
         safeErrorMessage(error, this.oauthTokens)
       );
       if (timedOut) {
+        // task_complete 후 자식 프로세스가 안 끝나 타임아웃된 경우, 직전에 받은 최종 답변이
+        // 있으면 버리지 않고 텔레그램으로 강제 전송한다(렌더러가 중복은 자동 무시).
+        if (lastAgentMessage.trim()) await renderer.text(lastAgentMessage).catch(() => undefined);
         const minutes = Math.round(this.options.codexMcpTimeoutMs / 60_000);
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", `Codex 턴이 ${minutes}분 제한을 초과해 중단되었습니다.`);
         await this.safeRename(session, `[STALL] ${session.title}`);
       } else if (controller.signal.aborted) {
+        if (lastAgentMessage.trim()) await renderer.text(lastAgentMessage).catch(() => undefined);
         this.store.updateSession(session.id, { status: "aborted" });
         await renderer.finish("aborted", "사용자가 작업을 중단했습니다.");
         await this.safeRename(session, `[STOP] ${session.title}`);
+      } else if (isNoRolloutError(error) && codexThreadId && (request.rolloutResetCount ?? 0) < 1) {
+        // Codex rollout(스레드 기록)이 유실돼 재개가 불가능하다. 기존 스레드를 버리고 새 스레드로
+        // 한 번만 재실행한다(대화 맥락은 메모리/요약 부트스트랩으로 보강). 무한 루프는 카운터로 막는다.
+        await this.transport.sendText(
+          session.chatId,
+          session.topicId,
+          "Codex 스레드 기록(rollout)이 유실되어 새 스레드로 이어서 다시 실행합니다."
+        ).catch(() => undefined);
+        await this.safeRename(session, `[RETRY] ${session.title}`);
+        this.store.updateSession(session.id, { codexThreadId: null });
+        this.enqueue({ ...request, rolloutResetCount: (request.rolloutResetCount ?? 0) + 1 });
+        return;
       } else if (isRateLimitError(error)) {
         // 현재 계정이 한도에 도달했다. 봉인하고, 살아있는 다른 계정이 있으면 같은 작업을
         // 그 계정으로 자동 재실행한다. 스레드는 계정 홈(CODEX_HOME)별로 저장되므로, 다른
@@ -2332,10 +2392,12 @@ export class SessionManager {
           this.scheduleLimitResume(session, request, null, resumeAt);
           return;
         }
+        if (lastAgentMessage.trim()) await renderer.text(lastAgentMessage).catch(() => undefined);
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", `Codex 실행 실패: ${safeErrorMessage(error)}`);
         await this.safeRename(session, `[ERROR] ${session.title}`);
       } else {
+        if (lastAgentMessage.trim()) await renderer.text(lastAgentMessage).catch(() => undefined);
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", `Codex 실행 실패: ${safeErrorMessage(error)}`);
         await this.safeRename(session, `[ERROR] ${session.title}`);
