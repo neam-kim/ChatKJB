@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// 매일 03:00에 dump-transcripts.mjs를 실행하는 LaunchAgent를 설치한다.
+// 09:00~03:00(다음날) 한 시간 간격으로 dump-transcripts.mjs를 실행하는 LaunchAgent를 설치한다.
 // 오케스트레이터 본체 LaunchAgent(install-launch-agent.mjs)와 같은 규약을 따른다:
 //   - node 경로는 이 스크립트를 실행한 런타임(process.execPath)을 사용.
 //   - CloudStorage(File Provider) 경로에 launchd가 직접 로그를 열면 EX_CONFIG(78)로
 //     실패하므로 StandardOut/ErrPath는 ~/Library/Logs/<label>/ 로 뺀다.
 //
 // 사용: node scripts/install-transcript-dump-agent.mjs
-//       node scripts/install-transcript-dump-agent.mjs --hour 3 --minute 0
+//       node scripts/install-transcript-dump-agent.mjs --start-hour 9 --end-hour 3 --minute 0
 
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
@@ -23,8 +23,22 @@ function argval(name, fallback) {
   const i = process.argv.indexOf(name);
   return i >= 0 && process.argv[i + 1] ? Number(process.argv[i + 1]) : fallback;
 }
-const hour = argval("--hour", 3);
+// 09:00부터 03:00까지(다음날) 한 시간 간격으로 실행한다. 04~08시는 건너뛴다.
+const startHour = argval("--start-hour", 9);
+const endHour = argval("--end-hour", 3);
 const minute = argval("--minute", 0);
+
+function hourRange(start, end) {
+  const hours = [];
+  let h = start;
+  for (let i = 0; i < 24; i++) {
+    hours.push(h);
+    if (h === end) break;
+    h = (h + 1) % 24;
+  }
+  return hours;
+}
+const hours = hourRange(startHour, endHour);
 
 const agentDir = join(homedir(), "Library", "LaunchAgents");
 const agentPath = join(agentDir, `${label}.plist`);
@@ -61,12 +75,14 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
   <key>WorkingDirectory</key>
   <string>${xml(projectDir)}</string>
   <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>${hour}</integer>
-    <key>Minute</key>
-    <integer>${minute}</integer>
-  </dict>
+  <array>
+${hours
+  .map(
+    (h) =>
+      `    <dict>\n      <key>Hour</key>\n      <integer>${h}</integer>\n      <key>Minute</key>\n      <integer>${minute}</integer>\n    </dict>`
+  )
+  .join("\n")}
+  </array>
   <key>RunAtLoad</key>
   <false/>
   <key>StandardOutPath</key>
@@ -91,7 +107,9 @@ execFileSync("launchctl", ["bootstrap", `gui/${uid}`, agentPath], {
 });
 
 console.log(`Transcript-dump LaunchAgent installed: ${agentPath}`);
-console.log(`  schedule: 매일 ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`);
+console.log(
+  `  schedule: 매시 ${hours.map((h) => String(h).padStart(2, "0")).join(",")}:${String(minute).padStart(2, "0")} (${hours.length}회/일)`
+);
 console.log(`  runs: ${nodePath} ${scriptPath}`);
 console.log(`  logs: ${logDir}`);
 console.log(`수동 실행: launchctl kickstart -k ${target}`);

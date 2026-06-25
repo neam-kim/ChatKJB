@@ -26,11 +26,19 @@
 //   DUMP_DRY_RUN=1 (파일 쓰지 않고 계획만 출력)
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { execFileSync } from "node:child_process";
 
 // node 내장 SQLite(node:sqlite)를 쓴다 — better-sqlite3 네이티브 빌드와 달리
 // node 버전 ABI에 묶이지 않아 어떤 런타임으로 실행해도 동작한다.
@@ -68,6 +76,15 @@ const RESULT_MERGED_FILE =
   join(INBOX_DIR, "global-project-results.md");
 const FORCE = process.env.DUMP_FORCE === "1";
 const DRY_RUN = process.env.DUMP_DRY_RUN === "1";
+// 오케스트레이터를 거치지 않은 데스크톱 단독 세션(Claude Code / Codex)도 덤프한다.
+// DUMP_INCLUDE_DESKTOP=0 으로 끌 수 있다(기본 켜짐).
+const INCLUDE_DESKTOP = process.env.DUMP_INCLUDE_DESKTOP !== "0";
+// 진행 중 세션을 중간에 덤프하지 않도록, 파일이 이만큼 조용해진(정착된) 세션만 처리한다.
+const DESKTOP_SETTLE_MS =
+  Math.max(0, Number(process.env.DUMP_DESKTOP_SETTLE_MINUTES || 30)) * 60_000;
+// 실행 요약 텔레그램 통지(.env의 TELEGRAM_BOT_TOKEN/CHAT_ID). DUMP_NOTIFY=0 으로 끈다.
+const NOTIFY = process.env.DUMP_NOTIFY !== "0";
+const ENV_FILE = join(REPO_ROOT, ".env");
 
 const log = (...a) => console.log("[dump-transcripts]", ...a);
 const TERMINAL_STATUSES = new Set([
@@ -100,7 +117,7 @@ function loadSessions() {
 // ── 증분 워터마크 ───────────────────────────────────────────────────────────
 function loadWatermark() {
   if (FORCE || !existsSync(STATE_FILE)) {
-    return { version: 2, sessions: {}, emittedChunkHashes: {} };
+    return { version: 2, sessions: {}, emittedChunkHashes: {}, emittedResultHashes: [] };
   }
   try {
     const parsed = JSON.parse(readFileSync(STATE_FILE, "utf8"));
@@ -108,9 +125,10 @@ function loadWatermark() {
       version: 2,
       sessions: parsed.sessions || {},
       emittedChunkHashes: parsed.emittedChunkHashes || {},
+      emittedResultHashes: parsed.emittedResultHashes || [],
     };
   } catch {
-    return { version: 2, sessions: {}, emittedChunkHashes: {} };
+    return { version: 2, sessions: {}, emittedChunkHashes: {}, emittedResultHashes: [] };
   }
 }
 
@@ -125,6 +143,7 @@ function saveWatermark(state) {
         updatedAt: new Date().toISOString(),
         sessions: state.sessions,
         emittedChunkHashes: state.emittedChunkHashes,
+        emittedResultHashes: state.emittedResultHashes || [],
       },
       null,
       2
@@ -785,23 +804,322 @@ function buildMergedResultsMarkdown(
   );
 }
 
-function dumpMergedResults() {
+// 결과 로그 병합본도 트랜스크립트와 동일한 증분 방식으로 떨군다.
+// 이미 inbox/raw로 나간 항목(frontmatter entry_hashes_json) + 상태파일에 누적된
+// 지문을 제외하고 신규 항목만 델타 파일로 쓴다. 신규가 없으면 쓰지 않는다.
+// raw 파일명 충돌을 피하려 타임스탬프 파일명을 쓰되 source_key는 고정이라
+// 컴파일이 같은 논리 소스의 증분으로 처리한다.
+function scanEmittedResultHashes(directories = [INBOX_DIR, RAW_DIR]) {
+  const hashes = new Set();
+  for (const dir of directories) {
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+      const fm = readFrontmatter(join(dir, entry.name));
+      if (!fm?.entry_hashes_json) continue;
+      try {
+        const arr = JSON.parse(fm.entry_hashes_json);
+        if (Array.isArray(arr)) for (const h of arr) hashes.add(h);
+      } catch {
+        // 손상되거나 수동 편집된 frontmatter는 건너뛴다.
+      }
+    }
+  }
+  return hashes;
+}
+
+function dumpMergedResults(state) {
   const files = collectResultFiles();
   const merged = collectMergedResultEntries(RESULT_SEARCH_ROOTS, files);
-  const markdown = buildMergedResultsMarkdown(merged);
+
+  const emitted = new Set(state?.emittedResultHashes || []);
+  for (const h of scanEmittedResultHashes()) emitted.add(h);
+
+  // 이미 나간 항목을 제외하고 신규 항목만 남긴다(소스별로 비면 통째로 제외).
+  const newSources = [];
+  const newHashes = [];
+  for (const source of merged.sources) {
+    const entries = source.entries.filter((e) => !emitted.has(e.hash));
+    if (!entries.length) continue;
+    for (const e of entries) newHashes.push(e.hash);
+    newSources.push({ ...source, entries });
+  }
+
+  if (!newHashes.length) {
+    log(`result merge — 신규 항목 없음, 건너뜀 (files=${files.length})`);
+    return;
+  }
+
+  const delta = { sources: newSources, hashes: newHashes };
+  const markdown = buildMergedResultsMarkdown(delta);
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  const dest = join(
+    dirname(RESULT_MERGED_FILE),
+    `global-project-results-${stamp}.md`
+  );
+
   if (DRY_RUN) {
     log(
-      `would write ${RESULT_MERGED_FILE} ` +
-        `(${files.length} result files, ${merged.hashes.length} unique entries)`
+      `would write ${dest} ` +
+        `(${files.length} result files, ${newHashes.length} new entries)`
     );
     return;
   }
-  mkdirSync(dirname(RESULT_MERGED_FILE), { recursive: true });
-  writeFileSync(RESULT_MERGED_FILE, markdown, "utf8");
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, markdown, "utf8");
+  if (state) state.emittedResultHashes = [...emitted, ...newHashes];
   log(
-    `result merge — files=${files.length} unique-entries=${merged.hashes.length} ` +
-      `dest=${RESULT_MERGED_FILE}`
+    `result merge — files=${files.length} new-entries=${newHashes.length} dest=${dest}`
   );
+}
+
+// ── 데스크톱 단독 세션(오케스트레이터 미경유) 열거 ──────────────────────────
+// 오케스트레이터 state.sqlite에 없는 Claude Code / Codex 세션을 디스크에서 직접
+// 찾아 합성 세션 레코드로 만든다. 이미 오케스트레이터가 가진 ID는 제외하고,
+// mtime이 DESKTOP_SETTLE_MS 이상 지난(=진행 종료로 간주) 파일만 처리한다.
+const CODEX_UUID_RE =
+  /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
+
+function scanClaudeMeta(file) {
+  let cwd = "";
+  let model = "";
+  let firstUser = "";
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!cwd && typeof o.cwd === "string") cwd = o.cwd;
+    if (!model && o.type === "assistant" && o.message?.model) model = o.message.model;
+    if (!firstUser && o.type === "user" && o.message?.role === "user") {
+      const t = extractClaudeText(o.message.content);
+      if (t) firstUser = t;
+    }
+    if (cwd && model && firstUser) break;
+  }
+  return { cwd, model, firstUser };
+}
+
+function scanCodexMeta(file) {
+  let cwd = "";
+  let model = "";
+  let firstUser = "";
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const p = o.payload;
+    if (!cwd) {
+      const c = p?.cwd || o.cwd || p?.turn_context?.cwd;
+      if (typeof c === "string") cwd = c;
+    }
+    if (!model) {
+      const m = p?.model || o.model;
+      if (typeof m === "string") model = m;
+    }
+    if (
+      !firstUser &&
+      o.type === "response_item" &&
+      p?.type === "message" &&
+      p.role === "user"
+    ) {
+      const t = stripCodexPreamble(extractCodexText(p.content));
+      if (t) firstUser = t;
+    }
+    if (cwd && model && firstUser) break;
+  }
+  return { cwd, model, firstUser };
+}
+
+function makeDesktopRecord({ provider, id, cwd, st, model, firstUser }) {
+  const projectName = cwd
+    ? cwd.split(sep).filter(Boolean).pop() || `${provider}-desktop`
+    : `${provider}-desktop`;
+  const title =
+    (firstUser || projectName).replace(/\s+/g, " ").trim().slice(0, 80) ||
+    projectName;
+  const created =
+    Number.isFinite(st.birthtimeMs) && st.birthtimeMs > 0
+      ? st.birthtimeMs
+      : st.mtimeMs;
+  return {
+    id,
+    provider,
+    project_name: projectName,
+    title,
+    status: "done", // 정착된 파일만 들어오므로 종료로 간주
+    cwd: cwd || "",
+    sdk_session_id: provider === "claude" ? id : null,
+    codex_thread_id: provider === "codex" ? id : null,
+    agy_conversation_id: null,
+    model: provider === "claude" ? model || "" : "",
+    codex_model: provider === "codex" ? model || "" : "",
+    agy_model: "",
+    created_at: Math.round(created),
+    updated_at: Math.round(st.mtimeMs),
+    desktop: true,
+  };
+}
+
+function enumerateDesktopSessions(orchestratorSessions) {
+  if (!INCLUDE_DESKTOP) return [];
+  const claudeOwned = new Set(
+    orchestratorSessions.map((s) => s.sdk_session_id).filter(Boolean)
+  );
+  const codexOwned = new Set(
+    orchestratorSessions.map((s) => s.codex_thread_id).filter(Boolean)
+  );
+  const now = Date.now();
+  const out = [];
+
+  // claude: ~/.claude/projects/<encoded-cwd>/<sdk_session_id>.jsonl
+  if (existsSync(CLAUDE_PROJECTS_DIR)) {
+    for (const dir of readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true })) {
+      if (!dir.isDirectory()) continue;
+      const dirPath = join(CLAUDE_PROJECTS_DIR, dir.name);
+      let files;
+      try {
+        files = readdirSync(dirPath);
+      } catch {
+        continue;
+      }
+      for (const name of files) {
+        if (!name.endsWith(".jsonl")) continue;
+        const id = name.slice(0, -6);
+        if (claudeOwned.has(id)) continue;
+        const file = join(dirPath, name);
+        let st;
+        try {
+          st = statSync(file);
+        } catch {
+          continue;
+        }
+        if (now - st.mtimeMs < DESKTOP_SETTLE_MS) continue;
+        let meta;
+        try {
+          meta = scanClaudeMeta(file);
+        } catch {
+          continue;
+        }
+        if (!meta.cwd && !meta.firstUser) continue;
+        out.push(
+          makeDesktopRecord({ provider: "claude", id, cwd: meta.cwd, st, ...meta })
+        );
+      }
+    }
+  }
+
+  // codex: ~/.codex/sessions/**/rollout-*-<thread_id>.jsonl
+  if (existsSync(CODEX_SESSIONS_DIR)) {
+    const stack = [CODEX_SESSIONS_DIR];
+    while (stack.length) {
+      const d = stack.pop();
+      let entries;
+      try {
+        entries = readdirSync(d, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) {
+          stack.push(p);
+          continue;
+        }
+        if (!e.isFile() || !e.name.endsWith(".jsonl")) continue;
+        const m = e.name.match(CODEX_UUID_RE);
+        if (!m) continue;
+        const id = m[1];
+        if (codexOwned.has(id)) continue;
+        let st;
+        try {
+          st = statSync(p);
+        } catch {
+          continue;
+        }
+        if (now - st.mtimeMs < DESKTOP_SETTLE_MS) continue;
+        let meta;
+        try {
+          meta = scanCodexMeta(p);
+        } catch {
+          continue;
+        }
+        if (!meta.cwd && !meta.firstUser) continue;
+        out.push(
+          makeDesktopRecord({ provider: "codex", id, cwd: meta.cwd, st, ...meta })
+        );
+      }
+    }
+  }
+  return out;
+}
+
+// ── 텔레그램 통지 ────────────────────────────────────────────────────────────
+function readEnvValue(key) {
+  try {
+    for (const line of readFileSync(ENV_FILE, "utf8").split("\n")) {
+      const m = line.match(/^([A-Z0-9_]+)\s*=\s*(.*)$/);
+      if (m && m[1] === key) return m[2].trim().replace(/^["']|["']$/g, "");
+    }
+  } catch {
+    // .env 없으면 프로세스 환경으로 폴백
+  }
+  return process.env[key] || "";
+}
+
+async function notifyTelegram(text) {
+  if (!NOTIFY || DRY_RUN) return;
+  const token = readEnvValue("TELEGRAM_BOT_TOKEN");
+  const chatId = readEnvValue("TELEGRAM_CHAT_ID");
+  if (!token || !chatId) {
+    log("telegram 통지 건너뜀: 토큰/chat_id 없음");
+    return;
+  }
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  const payload = JSON.stringify({ chat_id: Number(chatId), text });
+  // 1차: fetch. 일부 실행 환경의 undici가 ETIMEDOUT을 내므로 실패 시 curl로 폴백한다.
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    });
+    if (res.ok) return;
+    log(`telegram fetch HTTP ${res.status} — curl 폴백`);
+  } catch (e) {
+    log(`telegram fetch 실패(${e?.cause?.code || e?.message || e}) — curl 폴백`);
+  }
+  // 2차: curl(시스템 경로). macOS 기본 /usr/bin/curl, 없으면 PATH의 curl.
+  for (const bin of ["/usr/bin/curl", "curl"]) {
+    try {
+      execFileSync(
+        bin,
+        [
+          "-sS",
+          "-m",
+          "15",
+          "-X",
+          "POST",
+          url,
+          "-H",
+          "content-type: application/json",
+          "-d",
+          payload,
+        ],
+        { stdio: "ignore" }
+      );
+      return;
+    } catch (e) {
+      if (bin === "curl") log("telegram 통지 실패(curl):", e?.message || e);
+    }
+  }
 }
 
 // ── provider 디스패치 ───────────────────────────────────────────────────────
@@ -826,20 +1144,23 @@ function findAndParse(session) {
 }
 
 // ── main ────────────────────────────────────────────────────────────────────
-function main() {
-  dumpMergedResults();
+async function main() {
+  const state = loadWatermark();
+  dumpMergedResults(state);
   if (!existsSync(STATE_DB)) {
     log("orchestrator DB 없음:", STATE_DB);
     process.exit(1);
   }
   const sessions = loadSessions();
-  const state = loadWatermark();
+  const desktopSessions = enumerateDesktopSessions(sessions);
+  const allSessions = sessions.concat(desktopSessions);
   const existing = scanExistingTranscriptSources();
   for (const [hash, owner] of Object.entries(existing.emittedChunkHashes)) {
     state.emittedChunkHashes[hash] ||= owner;
   }
 
   let written = 0;
+  let desktopWritten = 0;
   let skipped = 0;
   let missing = 0;
   let deferred = 0;
@@ -847,7 +1168,7 @@ function main() {
 
   if (!DRY_RUN) mkdirSync(INBOX_DIR, { recursive: true });
 
-  for (const s of sessions) {
+  for (const s of allSessions) {
     if (!TERMINAL_STATUSES.has(s.status)) {
       deferred++;
       continue;
@@ -943,18 +1264,33 @@ function main() {
       nextPart: nextPart + 1,
     };
     written++;
+    if (s.desktop) desktopWritten++;
   }
 
   saveWatermark(state);
-  log(
-    `done — written=${written} skipped=${skipped} deferred=${deferred} ` +
-      `duplicate-chunks=${duplicateChunks} source-missing=${missing} total=${sessions.length}` +
-      (DRY_RUN ? " [DRY RUN]" : "")
-  );
+  const summaryLine =
+    `done — written=${written} (desktop=${desktopWritten}) skipped=${skipped} ` +
+    `deferred=${deferred} duplicate-chunks=${duplicateChunks} ` +
+    `source-missing=${missing} total=${allSessions.length}` +
+    (DRY_RUN ? " [DRY RUN]" : "");
+  log(summaryLine);
 
   // 덤프가 inbox/결과 로그를 갱신한 직후 같은 실행에서 강점 사전을 재집계한다.
   // 집계 실패는 덤프 결과를 가리지 않도록 격리한다(파이프라인 본체는 덤프).
-  return refreshAgentStrengths();
+  await refreshAgentStrengths();
+
+  // 실행 요약을 텔레그램으로 best-effort 통지(실패해도 덤프 결과엔 영향 없음).
+  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+  const flag = missing > 0 ? "⚠️" : "✅";
+  await notifyTelegram(
+    `${flag} transcript-dump ${stamp}\n` +
+      `· 새 소스: ${written}건 (데스크톱 ${desktopWritten})\n` +
+      `· 건너뜀: ${skipped} · 보류: ${deferred} · 중복청크: ${duplicateChunks}\n` +
+      `· 소스누락: ${missing} · 총 세션: ${allSessions.length}` +
+      (desktopSessions.length
+        ? `\n· 데스크톱 후보: ${desktopSessions.length}건`
+        : "")
+  );
 }
 
 async function refreshAgentStrengths() {
