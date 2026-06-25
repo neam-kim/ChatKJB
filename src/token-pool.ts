@@ -229,7 +229,7 @@ export class TokenPool {
     return this.slots
       .map((slot, index) => {
         const state = this.isExhausted(slot.token, now)
-          ? `소진 (${new Date(slot.exhaustedUntil as number).toISOString()} 회복)`
+          ? `소진 (${new Date(slot.exhaustedUntil as number).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })} 회복)`
           : "사용 가능";
         const util = slot.lastUtilization === null
           ? ""

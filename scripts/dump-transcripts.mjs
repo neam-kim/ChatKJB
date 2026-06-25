@@ -602,8 +602,29 @@ function yamlEscape(s) {
   return String(s ?? "").replace(/"/g, '\\"').replace(/\n/g, " ");
 }
 
+// 모든 표기는 KST(Asia/Seoul) 기준. toISOString()은 UTC라 표기가 어긋나므로 쓰지 않는다.
+const KST = "Asia/Seoul";
 function isoDate(ms) {
-  return new Date(ms).toISOString().slice(0, 10);
+  // sv-SE 로케일은 "YYYY-MM-DD" 형식을 보장한다.
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: KST,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(ms));
+}
+
+function kstStamp(date = new Date()) {
+  // "YYYY-MM-DD HH:MM" (KST). sv-SE는 공백 구분 24시간 표기를 준다.
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: KST,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
 }
 
 function pickModel(session) {
@@ -793,7 +814,7 @@ function buildMergedResultsMarkdown(
     "source_file: 20-raw/",
     'topic: "project results"',
     'summary: "로컬 홈과 Synology Drive의 .result.md 기록을 하나로 병합하고 정규화 지문으로 중복 제거한 전역 작업 결과 로그."',
-    `ingested: ${generatedAt.toISOString().slice(0, 10)}`,
+    `ingested: ${isoDate(generatedAt.getTime())}`,
     'author: "local agents"',
     'url: ""',
     "tags: [result-log, local, synology-drive]",
@@ -1306,7 +1327,7 @@ async function main() {
   await refreshAgentStrengths();
 
   // 실행 요약을 텔레그램으로 best-effort 통지(실패해도 덤프 결과엔 영향 없음).
-  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+  const stamp = kstStamp();
   const flag = missing > 0 ? "⚠️" : "✅";
   await notifyTelegram(
     `${flag} transcript-dump ${stamp}\n` +

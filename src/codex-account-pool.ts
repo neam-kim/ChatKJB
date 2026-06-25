@@ -118,7 +118,7 @@ export class CodexAccountPool {
       if (slot.exhaustedUntil === null) {
         lines.push(`Codex 계정 #${i + 1}: 사용 가능`);
       } else if (slot.exhaustedUntil > now) {
-        const recoverTime = new Date(slot.exhaustedUntil).toISOString();
+        const recoverTime = new Date(slot.exhaustedUntil).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
         lines.push(`Codex 계정 #${i + 1}: 소진 (${recoverTime} 회복)`);
       } else {
         lines.push(`Codex 계정 #${i + 1}: 사용 가능`);
