@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { UsageSnapshot, UsageWindow } from "./types.js";
 
 // 한 토큰을 "소진"으로 볼 사용률 임계값. SDK는 utilization을 0~100으로 클램프하므로
@@ -9,13 +10,26 @@ const DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 export interface TokenPoolOptions {
   exhaustionUtilization?: number;
   defaultBackoffMs?: number;
+  // 슬롯의 소진 시각(exhaustedUntil)이 실제로 바뀔 때마다 호출된다. 이를 통해 한도 상태를
+  // 외부(SQLite)에 영속화한다. observe/noteRateLimited가 상태를 바꾼 경우에만 발화한다.
+  onExhaustionChange?: () => void;
 }
 
 interface TokenSlot {
   token: string;
+  // 토큰 식별용 비가역 지문(sha256 앞 16자). OAuth 토큰 원문은 비밀이라 영속 저장하지 않고,
+  // 재시작 후 소진 상태 복원은 이 지문으로 매칭한다.
+  fingerprint: string;
   // epoch ms. 이 시각 전까지는 소진 상태로 간주하고 선택에서 제외한다.
   exhaustedUntil: number | null;
   lastUtilization: number | null;
+}
+
+/** 영속/복원에 쓰는 토큰별 비밀-없는 상태 요약. */
+export interface TokenSlotStatus {
+  index: number;
+  fingerprint: string;
+  exhaustedUntil: number | null;
 }
 
 function parseResetsAt(resetsAt: string | null | undefined): number | null {
@@ -36,6 +50,7 @@ export class TokenPool {
   private readonly slots: TokenSlot[];
   private readonly exhaustionUtilization: number;
   private readonly defaultBackoffMs: number;
+  private readonly onExhaustionChange: (() => void) | undefined;
   // 직전 select()가 고른 토큰. scope별로 살아있는 한 계속 같은 토큰을 쓰는(sticky) 선택의 기준이 된다.
   private readonly lastSelectedByScope = new Map<string, string>();
 
@@ -46,12 +61,34 @@ export class TokenPool {
     }
     this.slots = unique.map((token) => ({
       token,
+      fingerprint: createHash("sha256").update(token).digest("hex").slice(0, 16),
       exhaustedUntil: null,
       lastUtilization: null
     }));
     this.exhaustionUtilization =
       options.exhaustionUtilization ?? DEFAULT_EXHAUSTION_UTILIZATION;
     this.defaultBackoffMs = options.defaultBackoffMs ?? DEFAULT_BACKOFF_MS;
+    this.onExhaustionChange = options.onExhaustionChange;
+  }
+
+  /** 영속용 토큰별 상태(비밀 없음). 등록 순서대로 지문과 소진 시각만 노출한다. */
+  statuses(): TokenSlotStatus[] {
+    return this.slots.map((slot, index) => ({
+      index: index + 1,
+      fingerprint: slot.fingerprint,
+      exhaustedUntil: slot.exhaustedUntil
+    }));
+  }
+
+  /**
+   * 영속 상태 복원용: 지문으로 슬롯을 찾아 소진 시각을 되살린다. 모르는 지문(토큰 구성이
+   * 바뀐 경우)이나 이미 회복된 시각은 무시한다. 복원은 onExhaustionChange를 발화하지 않는다.
+   */
+  restoreExhaustion(fingerprint: string, exhaustedUntil: number, now: number = Date.now()): void {
+    if (!Number.isFinite(exhaustedUntil) || exhaustedUntil <= now) return;
+    const slot = this.slots.find((item) => item.fingerprint === fingerprint);
+    if (!slot) return;
+    slot.exhaustedUntil = Math.max(slot.exhaustedUntil ?? 0, exhaustedUntil);
   }
 
   get size(): number {
@@ -161,7 +198,9 @@ export class TokenPool {
 
     slot.lastUtilization = maxUtilization;
     if (blockedUntil !== null && blockedUntil > now) {
+      const before = slot.exhaustedUntil;
       slot.exhaustedUntil = Math.max(slot.exhaustedUntil ?? 0, blockedUntil);
+      if (slot.exhaustedUntil !== before) this.onExhaustionChange?.();
     }
   }
 
@@ -180,7 +219,9 @@ export class TokenPool {
       return;
     }
     const target = until ?? now + this.defaultBackoffMs;
+    const before = slot.exhaustedUntil;
     slot.exhaustedUntil = Math.max(slot.exhaustedUntil ?? 0, target);
+    if (slot.exhaustedUntil !== before) this.onExhaustionChange?.();
   }
 
   /** 진단/로그용 요약. */

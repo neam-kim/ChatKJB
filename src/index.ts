@@ -46,6 +46,24 @@ async function main(): Promise<void> {
 
   const { bot } = createBot(config, store);
 
+  // 전역 안전망: 단일 요청(특히 /synth의 Claude·Codex·agy 병렬 실행)에서 처리되지 못한
+  // 예외가 새어 나와도 데몬 전체를 죽이지 않는다. Node 기본 동작은 uncaughtException·
+  // unhandledRejection 시 프로세스 종료이므로, 가드가 없으면 그 한 번의 결함으로 진행 중이던
+  // 모든 토픽의 대화가 함께 죽고 launchd 재시작에 의존하게 된다(실제 /synth 실행 중
+  // 모듈 로딩 단계 저수준 read 실패 errno 11로 봇이 통째로 내려간 사례). 상태 손상
+  // 가능성이 있는 uncaughtException도 여기서는 로깅·통지 후 생존을 택한다 — 멀티 토픽 봇에서
+  // 한 작업의 결함으로 전체를 내리는 것이 더 큰 손해다.
+  const notifyFault = (label: string, error: unknown) => {
+    const message = safeErrorMessage(error);
+    console.error(`[guard] 처리되지 않은 ${label} 가드: ${message}`);
+    void bot.api.sendMessage(
+      config.chatId,
+      `[안정성] 처리되지 않은 ${label}를 가드했습니다. 봇은 계속 실행 중입니다.\n${message}`
+    ).catch(() => {});
+  };
+  process.on("unhandledRejection", (reason) => notifyFault("unhandledRejection", reason));
+  process.on("uncaughtException", (error) => notifyFault("uncaughtException", error));
+
   await bot.api.setMyCommands([
     { command: "new", description: "새 작업 시작 (Claude/Codex/agy)" },
     { command: "status", description: "오케스트레이터와 현재 작업 상태" },

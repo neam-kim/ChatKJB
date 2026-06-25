@@ -71,6 +71,14 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
   <true/>
   <key>ThrottleInterval</key>
   <integer>10</integer>
+  <!-- launchd가 띄운 프로세스의 기본 NOFILE 소프트 리밋은 256이다. /synth는 Claude·Codex·agy
+       서브프로세스(각자 파이프 fd)와 다수의 동시 모듈 읽기를 한꺼번에 일으켜 그 한계를 건드릴
+       수 있고, 그 순간 저수준 read 실패(errno 11)가 봇을 내린 정황이 있다. 넉넉히 올린다. -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>8192</integer>
+  </dict>
   <key>StandardOutPath</key>
   <string>${xml(stdoutLog)}</string>
   <key>StandardErrorPath</key>

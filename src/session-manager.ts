@@ -109,7 +109,13 @@ const GOAL_ROUNDS_BY_RISK: Record<RiskLevel, number> = {
 const SYNTH_JUDGE_CLAUDE_MODEL = "claude-opus-4-8";
 const SYNTH_JUDGE_CLAUDE_THINKING = "high";
 const SYNTH_JUDGE_CLAUDE_EFFORT = "high";
+// /synth는 Claude·Codex·agy를 동시에 띄운다. 세 SDK의 초기화(모듈 동적 import + 서브프로세스
+// spawn)가 같은 순간에 겹치면 저수준 read 실패(errno 11)·fd 스파이크로 데몬이 내려간 정황이
+// 있었다. 시작을 이 간격만큼 어긋나게 해 초기화 버스트를 분산한다. 정상 대기 구간은 여전히
+// 병렬이므로 전체 지연은 (가장 느린 제공자 + 2×간격) 수준에 그친다.
+const SYNTH_PROVIDER_STAGGER_MS = 400;
 const CODEX_ACCOUNT_STATE_SETTING = "codex.accountState.v1";
+const CLAUDE_TOKEN_STATE_SETTING = "claude.tokenState.v1";
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
 export const CODEX_MODEL = DEFAULT_CODEX_MODEL;
 export const CODEX_REASONING_EFFORT = DEFAULT_CODEX_REASONING;
@@ -401,6 +407,16 @@ interface PersistedCodexAccountState {
     home: string;
     exhaustedUntil: number | null;
     latestUsage: CodexUsageSnapshot | null;
+  }>;
+}
+
+// Claude 토큰 한도 상태를 SQLite에 영속화한다. OAuth 토큰 원문은 비밀이라 저장하지 않고,
+// TokenPool이 만든 비가역 지문(fingerprint)으로만 슬롯을 식별·복원한다.
+interface PersistedClaudeTokenState {
+  version: 1;
+  tokens: Array<{
+    fingerprint: string;
+    exhaustedUntil: number | null;
   }>;
 }
 
@@ -1095,7 +1111,11 @@ export class SessionManager {
       options.claudeCodeOauthToken,
       ...(options.additionalOauthTokens ?? [])
     ];
-    this.tokenPool = new TokenPool(this.oauthTokens);
+    this.tokenPool = new TokenPool(this.oauthTokens, {
+      // 소진 상태가 바뀔 때마다 SQLite에 영속화해 데몬 재시작 후에도 살아있는 토큰을 바로 고른다.
+      onExhaustionChange: () => this.persistClaudeTokenState()
+    });
+    this.restoreClaudeTokenState();
     // 계정 홈이 주어지지 않으면 기본 홈(CODEX_HOME 또는 ~/.codex) 1개로 단일 계정 동작.
     const codexHomes = options.codexAccountHomes && options.codexAccountHomes.length > 0
       ? options.codexAccountHomes
@@ -1325,6 +1345,34 @@ export class SessionManager {
       }))
     };
     this.store.setAppSetting(CODEX_ACCOUNT_STATE_SETTING, JSON.stringify(state));
+  }
+
+  private restoreClaudeTokenState(): void {
+    const raw = this.store.getAppSetting(CLAUDE_TOKEN_STATE_SETTING);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as Partial<PersistedClaudeTokenState>;
+      if (parsed.version !== 1 || !Array.isArray(parsed.tokens)) return;
+      for (const token of parsed.tokens) {
+        if (!token || typeof token.fingerprint !== "string") continue;
+        if (typeof token.exhaustedUntil === "number" && Number.isFinite(token.exhaustedUntil)) {
+          this.tokenPool.restoreExhaustion(token.fingerprint, token.exhaustedUntil);
+        }
+      }
+    } catch (error) {
+      console.error("Claude token state restore failed:", safeErrorMessage(error));
+    }
+  }
+
+  private persistClaudeTokenState(): void {
+    const state: PersistedClaudeTokenState = {
+      version: 1,
+      tokens: this.tokenPool.statuses().map((status) => ({
+        fingerprint: status.fingerprint,
+        exhaustedUntil: status.exhaustedUntil
+      }))
+    };
+    this.store.setAppSetting(CLAUDE_TOKEN_STATE_SETTING, JSON.stringify(state));
   }
 
   private recordCodexUsage(
@@ -3081,8 +3129,17 @@ export class SessionManager {
       return { ok: false, reason: "실행 중에는 병렬 종합을 시작할 수 없습니다. 작업 완료 또는 /stop 후 다시 시도하세요." };
     }
     const providers: ProviderKind[] = ["claude", "codex", "agy"];
+    // 세 제공자를 동시에 시작하되 초기화 버스트만 SYNTH_PROVIDER_STAGGER_MS 간격으로 어긋나게
+    // 한다(동시 모듈 로딩·spawn 스파이크로 인한 errno 11 크래시 완화). 일단 시작된 뒤의 대기는
+    // 병렬로 진행된다.
     const settled = await Promise.allSettled(
-      providers.map((provider) => this.runSilentReadOnly(session, provider, prompt))
+      providers.map(async (provider, index) => {
+        if (index > 0) {
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, index * SYNTH_PROVIDER_STAGGER_MS));
+        }
+        return this.runSilentReadOnly(session, provider, prompt);
+      })
     );
     const candidates: JudgeCandidate[] = [];
     for (const [index, result] of settled.entries()) {
@@ -3138,27 +3195,13 @@ export class SessionManager {
     const judgePrompt = buildJudgePrompt(question, candidates);
 
     try {
-      const controller = new AbortController();
-      const run: ActiveRun = {
-        controller,
-        input: new MessageQueue(),
-        pendingTurns: 0,
-        startedAt: Date.now(),
-        codexTimers: new Map(),
-        codexStarts: new Map(),
-        mcpFailures: new Map()
-      };
-      const text = await this.runReadOnlyClaude(
-        session,
-        controller,
-        run,
-        judgePrompt,
-        this.tokenPool.select(),
-        false,
-        SYNTH_JUDGE_CLAUDE_MODEL,
-        SYNTH_JUDGE_CLAUDE_THINKING,
-        SYNTH_JUDGE_CLAUDE_EFFORT
-      );
+      // 판관(Opus 4.8 high)도 runSilentReadOnly를 통해 토큰을 회전한다: 한 토큰이 한도여도
+      // 살아있는 다른 토큰이 있으면 첫 후보 폴백 대신 정상 심사를 마친다.
+      const text = await this.runSilentReadOnly(session, "claude", judgePrompt, {
+        claudeModelOverride: SYNTH_JUDGE_CLAUDE_MODEL,
+        claudeThinkingOverride: SYNTH_JUDGE_CLAUDE_THINKING,
+        claudeEffortOverride: SYNTH_JUDGE_CLAUDE_EFFORT
+      });
       const parsed = parseJudgeResponse(text, candidates.length);
       if (parsed) return { ...parsed, judge: "claude" };
     } catch (error) {
@@ -3179,47 +3222,91 @@ export class SessionManager {
     options: SilentReadOnlyOptions = {}
   ): Promise<string> {
     if (provider === "claude") {
-      const controller = new AbortController();
-      const run: ActiveRun = {
-        controller,
-        input: new MessageQueue(),
-        pendingTurns: 0,
-        startedAt: Date.now(),
-        codexTimers: new Map(),
-        codexStarts: new Map(),
-        mcpFailures: new Map()
-      };
-      return this.runReadOnlyClaude(
-        session,
-        controller,
-        run,
-        prompt,
-        this.tokenPool.select(),
-        false,
-        options.claudeModelOverride,
-        options.claudeThinkingOverride,
-        options.claudeEffortOverride
-      );
+      // synth 조용한 경로도 일반 실행처럼 토큰을 회전한다: 고른 토큰이 한도(rate-limit)면
+      // 그 토큰을 봉인(noteRateLimited)하고 풀의 다음 살아있는 토큰으로 즉시 재시도한다.
+      // 살아있는 토큰이 2개 이상이면 한 토큰 한도로 후보가 통째로 탈락하는 일이 줄어든다.
+      // 한도 외 오류는 회전하지 않고 그대로 던지고, 모든 토큰이 소진됐으면 마지막 오류를 던진다.
+      const tried = new Set<string>();
+      let lastError: unknown;
+      for (let attempt = 0; attempt < this.tokenPool.size; attempt += 1) {
+        const oauthToken = this.tokenPool.select();
+        if (tried.has(oauthToken)) break; // 더 시도할 새 토큰이 없다(전부 소진).
+        tried.add(oauthToken);
+        const controller = new AbortController();
+        const run: ActiveRun = {
+          controller,
+          input: new MessageQueue(),
+          pendingTurns: 0,
+          startedAt: Date.now(),
+          codexTimers: new Map(),
+          codexStarts: new Map(),
+          mcpFailures: new Map()
+        };
+        try {
+          return await this.runReadOnlyClaude(
+            session,
+            controller,
+            run,
+            prompt,
+            oauthToken,
+            false,
+            options.claudeModelOverride,
+            options.claudeThinkingOverride,
+            options.claudeEffortOverride
+          );
+        } catch (error) {
+          lastError = error;
+          if (!isRateLimitError(error)) throw error;
+          const resetsAt = snapshotFromRateLimitError(error)?.fiveHour?.resetsAt;
+          this.tokenPool.noteRateLimited(
+            oauthToken,
+            Date.now(),
+            resetsAt ? Date.parse(resetsAt) : undefined
+          );
+        }
+      }
+      throw lastError ?? new Error("Claude 읽기 전용 단계 실패: 사용 가능한 토큰이 없습니다.");
     }
     if (provider === "codex") {
-      const codexHome = this.codexAccountPool.select();
-      requireCodexSubscriptionAuth(codexHome);
-      const codex = new Codex({
-        env: buildCodexEnvironment(codexHome),
-        config: codexSharedResourceConfig()
-      });
-      const thread = codex.startThread({
-        model: options.codexModelOverride ?? session.codexModel ?? DEFAULT_CODEX_MODEL,
-        modelReasoningEffort: options.codexReasoningOverride
-          ?? (session.codexReasoning as CodexReasoningEffort | null)
-          ?? DEFAULT_CODEX_REASONING,
-        workingDirectory: session.cwd,
-        skipGitRepoCheck: true,
-        sandboxMode: "read-only",
-        approvalPolicy: "never"
-      });
-      const result = await thread.run(prompt);
-      return result.finalResponse.trim();
+      // Codex 계정도 동일하게 회전한다: 현재 계정이 한도면 markFailed로 봉인(+SQLite 영속)하고
+      // 다음 살아있는 계정으로 재시도한다. 한도 외 오류(예: auth 만료)는 그대로 던진다.
+      const tried = new Set<string>();
+      let lastError: unknown;
+      for (let attempt = 0; attempt < this.codexAccountPool.size; attempt += 1) {
+        const codexHome = this.codexAccountPool.select();
+        if (tried.has(codexHome)) break;
+        tried.add(codexHome);
+        try {
+          requireCodexSubscriptionAuth(codexHome);
+          const codex = new Codex({
+            env: buildCodexEnvironment(codexHome),
+            config: codexSharedResourceConfig()
+          });
+          const thread = codex.startThread({
+            model: options.codexModelOverride ?? session.codexModel ?? DEFAULT_CODEX_MODEL,
+            modelReasoningEffort: options.codexReasoningOverride
+              ?? (session.codexReasoning as CodexReasoningEffort | null)
+              ?? DEFAULT_CODEX_REASONING,
+            workingDirectory: session.cwd,
+            skipGitRepoCheck: true,
+            sandboxMode: "read-only",
+            approvalPolicy: "never"
+          });
+          const result = await thread.run(prompt);
+          return result.finalResponse.trim();
+        } catch (error) {
+          lastError = error;
+          if (!isRateLimitError(error)) throw error;
+          const resetsAt = snapshotFromRateLimitError(error)?.fiveHour?.resetsAt;
+          this.codexAccountPool.markFailed(
+            codexHome,
+            Date.now(),
+            resetsAt ? Date.parse(resetsAt) : undefined
+          );
+          this.persistCodexAccountState();
+        }
+      }
+      throw lastError ?? new Error("Codex 읽기 전용 단계 실패: 사용 가능한 계정이 없습니다.");
     }
     // agy: 새 plan(읽기 전용) interactive 세션 한 턴. 종합용 임시 세션이므로 사용자 세션의
     // agyConversationId를 건드리지 않도록 conversationId 없이 새로 만들고 끝나면 닫는다.

@@ -173,4 +173,83 @@ describe("TokenPool", () => {
     expect(pool.isExhausted(A, now)).toBe(false);
     expect(pool.select(now)).toBe(A);
   });
+
+  it("statuses() exposes a stable 16-char hex fingerprint and never the raw token", () => {
+    const pool = new TokenPool([A, B]);
+    const statuses = pool.statuses();
+    expect(statuses).toHaveLength(2);
+    expect(statuses[0]!.fingerprint).toMatch(/^[a-f0-9]{16}$/);
+    expect(statuses[1]!.fingerprint).toMatch(/^[a-f0-9]{16}$/);
+    expect(statuses[0]!.fingerprint).not.toBe(statuses[1]!.fingerprint);
+    // 토큰 원문(비밀)은 영속 상태에 절대 노출되지 않는다.
+    const json = JSON.stringify(statuses);
+    expect(json).not.toContain(A);
+    expect(json).not.toContain(B);
+    expect(statuses[0]!.exhaustedUntil).toBeNull();
+    expect(statuses[1]!.exhaustedUntil).toBeNull();
+  });
+
+  it("statuses() reflects exhaustedUntil after noteRateLimited", () => {
+    const pool = new TokenPool([A, B]);
+    const now = 1_000_000;
+    pool.noteRateLimited(A, now, now + 5_000);
+    const statuses = pool.statuses();
+    expect(statuses[0]!.exhaustedUntil).toBe(now + 5_000);
+    expect(statuses[1]!.exhaustedUntil).toBeNull();
+  });
+
+  it("fires onExhaustionChange when noteRateLimited changes state", () => {
+    let calls = 0;
+    const pool = new TokenPool([A, B], { onExhaustionChange: () => { calls += 1; } });
+    const now = 1_000_000;
+    pool.noteRateLimited(A, now, now + 5_000);
+    expect(calls).toBe(1);
+  });
+
+  it("does not fire onExhaustionChange when observe stays below the threshold", () => {
+    let calls = 0;
+    const pool = new TokenPool([A, B], { onExhaustionChange: () => { calls += 1; } });
+    const now = 1_000_000;
+    const resetsAt = new Date(now + 3_600_000).toISOString();
+    pool.observe(A, snapshot({ fiveHour: { utilization: 99, resetsAt } }), now);
+    expect(calls).toBe(0);
+  });
+
+  it("does not fire onExhaustionChange again when the exhaustion time is unchanged", () => {
+    let calls = 0;
+    const pool = new TokenPool([A, B], { onExhaustionChange: () => { calls += 1; } });
+    const now = 1_000_000;
+    pool.noteRateLimited(A, now, now + 5_000);
+    // 더 이른 until은 Math.max로 무시되어 상태가 바뀌지 않으므로 콜백도 다시 울리지 않는다.
+    pool.noteRateLimited(A, now, now + 3_000);
+    expect(calls).toBe(1);
+  });
+
+  it("round-trips exhaustion across pools via fingerprint without firing the restore callback", () => {
+    const now = 1_000_000;
+    const pool1 = new TokenPool([A, B]);
+    pool1.noteRateLimited(A, now, now + 5_000);
+    const statusA = pool1.statuses()[0]!;
+
+    // 재시작을 흉내: 같은 토큰 구성의 새 풀에 지문으로 소진 상태를 복원한다.
+    let restoreCalls = 0;
+    const pool2 = new TokenPool([A, B], { onExhaustionChange: () => { restoreCalls += 1; } });
+    pool2.restoreExhaustion(statusA.fingerprint, statusA.exhaustedUntil!, now);
+
+    expect(pool2.isExhausted(A, now)).toBe(true);
+    expect(pool2.select(now + 1_000)).toBe(B);
+    // 복원은 콜백을 울리지 않는다(되먹임 영속 쓰기 방지).
+    expect(restoreCalls).toBe(0);
+  });
+
+  it("restoreExhaustion ignores unknown fingerprints and already-recovered times", () => {
+    let calls = 0;
+    const pool = new TokenPool([A, B], { onExhaustionChange: () => { calls += 1; } });
+    const now = 1_000_000;
+    const fpA = pool.statuses()[0]!.fingerprint;
+    pool.restoreExhaustion("0".repeat(16), now + 5_000, now); // 모르는 지문
+    pool.restoreExhaustion(fpA, now - 1_000, now);            // 이미 회복된 시각
+    expect(pool.isExhausted(A, now)).toBe(false);
+    expect(calls).toBe(0);
+  });
 });
