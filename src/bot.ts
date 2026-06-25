@@ -162,6 +162,10 @@ function providerDisplayLabel(provider: ProviderKind): string {
   return "Claude";
 }
 
+// 아직 배선되지 않은 빈 패널 슬롯 라벨. 추후 제공자별 추가 선택 항목을 여기에 연결한다.
+// (user 요청: 빈 패널은 '-' 표기, 추후 배선 가능성만 열어둔다.)
+const RESERVED_SLOT_LABEL = "➖";
+
 function defaultsKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): Keyboard {
   const providerLabel = providerDisplayLabel(defaults.provider);
   const modelText = defaults.provider === "codex"
@@ -174,12 +178,22 @@ function defaultsKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): Key
     : defaults.provider === "agy"
     ? `💭 추론: ${agyThinkingLabel(defaults.agyThinkingLevel)}`
     : `💭 thinking: ${defaults.thinking === "off" ? "off" : "on"}`;
+  // 5번째 슬롯: Claude는 작업량(effort)을 thinking과 별개 축으로 토글한다.
+  // Codex·agy는 추론 강도(💭)가 작업량을 겸하므로 추가로 고를 게 없어 예약('-') 처리한다.
+  const fifth = defaults.provider === "claude"
+    ? `🛠️ 작업량: ${claudeEffortLabel(defaults.claudeEffort)}`
+    : RESERVED_SLOT_LABEL;
+  // 6번째 슬롯: 현재 모든 제공자 공통 예약. 추후 추가 선택 항목 배선용.
+  const sixth = RESERVED_SLOT_LABEL;
   return new Keyboard()
     .text("⚙️ 새 세션 기본값")
     .text(`🧠 모델: ${modelText}`)
     .row()
     .text(`🤖 제공자: ${providerLabel}`)
     .text(fourth)
+    .row()
+    .text(fifth)
+    .text(sixth)
     .resized()
     .persistent();
 }
@@ -221,6 +235,20 @@ function defaultsReasoningKeyboard(defaults: SessionDefaults, catalog: ModelCata
   return keyboard;
 }
 
+// 기본값 패널의 Claude 작업량(effort) 선택용 인라인 키보드. sete:<provider>:<id>
+// thinking(💭, on/off)과는 별개의 축이며 Claude 전용이다. 현재 선택값에는 ✅를 붙인다.
+function defaultsEffortKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const options = claudeEffortOptionsForModel(catalog, defaults.claudeModel)
+    .map((option) => ({ id: option.id, label: option.label, current: option.id === defaults.claudeEffort }));
+  for (const [index, option] of options.entries()) {
+    const mark = option.current ? "✅ " : "";
+    keyboard.text(`${mark}${option.label}`, `sete:${defaults.provider}:${option.id}`);
+    if (index < options.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
 function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): string {
   if (defaults.provider === "codex") {
     return `Codex · ${codexModelLabel(catalog, defaults.codexModel)} · reasoning ${codexReasoningLabel(defaults.codexReasoning)}`;
@@ -228,7 +256,7 @@ function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): stri
   if (defaults.provider === "agy") {
     return `agy · ${agyModelLabel(catalog, defaults.agyModel)} · 추론 ${agyThinkingLabel(defaults.agyThinkingLevel)}`;
   }
-  return `Claude · ${modelLabel(catalog, defaults.claudeModel)} · thinking ${defaults.thinking === "off" ? "off" : "on"}`;
+  return `Claude · ${modelLabel(catalog, defaults.claudeModel)} · thinking ${defaults.thinking === "off" ? "off" : "on"} · 작업량 ${claudeEffortLabel(defaults.claudeEffort)}`;
 }
 
 // 새 세션 기본값을 PendingStart 필드로 변환한다. provider에 따라 해당 제공자 설정만 채운다.
@@ -572,7 +600,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   bot.command("start", async (ctx) => {
     const defaults = store.getSessionDefaults();
     await ctx.reply(
-      "Claude/Codex/agy 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /reset, /fork, /compact, /memory, /mode, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론)을 클릭만으로 바꿀 수 있습니다.",
+      "Claude/Codex/agy 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /reset, /fork, /compact, /memory, /mode, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론·작업량)을 클릭만으로 바꿀 수 있습니다.",
       { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
     );
   });
@@ -1365,7 +1393,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   });
 
   // /synth <작업>: 병렬 종합. Claude·Codex·agy를 읽기 전용으로 동시에 시키고, Claude
-  // Opus 4.8 high 심사자(실패 시 Codex 5.5 high 폴백)가 최우수 답을 고른 뒤 승자가
+  // Opus 4.8 high 심사자(실패 시 첫 후보 채택)가 최우수 답을 고른 뒤 승자가
   // 통합해 최종답을 낸다.
   // 읽기·조언 작업 전용(파일 수정 안 함). 토큰·시간이 N배인 비싼 경로.
   bot.command("synth", async (ctx) => {
@@ -1379,7 +1407,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (!arg) {
       await ctx.reply(
         "작업 설명과 함께 사용하세요.\n예: /synth 이 설계의 위험 요소를 분석해줘\n"
-        + "Claude·Codex·agy를 읽기 전용으로 동시에 실행하고 로컬 심사자가 최우수 답을 골라 통합합니다. "
+        + "Claude·Codex·agy를 읽기 전용으로 동시에 실행하고 Opus 4.8 high 심사자가 최우수 답을 골라 통합합니다. "
         + "읽기·조언 작업 전용이며 토큰·시간이 더 듭니다."
       );
       return;
@@ -1397,9 +1425,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       const judgeLabel = result.verdict
         ? result.verdict.judge === "claude"
           ? "Claude Opus 4.8 high"
-          : result.verdict.judge === "codex"
-            ? "Codex 5.5 high 폴백"
-            : "폴백(첫 후보)"
+          : "폴백(첫 후보)"
         : "단일 후보(심사 생략)";
       const candidateLabels = (result.candidates ?? [])
         .map((p) => providerDisplayLabel(p))
@@ -1921,6 +1947,31 @@ export function createBot(config: AppConfig, store: StateStore) {
     });
   });
 
+  // 새 세션 기본값 패널: Claude 작업량(effort) 선택. sete:<provider>:<id>
+  // thinking(setr:)과 별개 축이며 Claude 전용이다.
+  bot.callbackQuery(/^sete:/, async (ctx) => {
+    const rest = ctx.callbackQuery.data.slice("sete:".length);
+    const sep = rest.indexOf(":");
+    const provider = rest.slice(0, sep) as ProviderKind;
+    const valueId = rest.slice(sep + 1);
+    if (provider !== "claude") {
+      await ctx.answerCallbackQuery({ text: "작업량은 Claude 기본값 전용입니다.", show_alert: true });
+      return;
+    }
+    const current = store.getSessionDefaults();
+    const option = claudeEffortOptionsForModel(config.modelCatalog, current.claudeModel)
+      .find((item) => item.id === valueId);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 작업량입니다.", show_alert: true });
+      return;
+    }
+    const defaults = store.updateSessionDefaults({ claudeEffort: option.id });
+    await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
+    await ctx.reply(`새 세션 기본 Claude 작업량: ${option.label}`, {
+      reply_markup: defaultsKeyboard(defaults, config.modelCatalog)
+    });
+  });
+
   bot.callbackQuery(/^delp:/, async (ctx) => {
     const index = Number.parseInt(ctx.callbackQuery.data.slice("delp:".length), 10);
     const project = Number.isInteger(index) ? config.projects[index] : undefined;
@@ -2050,6 +2101,26 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply(prompt, {
       reply_markup: defaultsReasoningKeyboard(defaults, config.modelCatalog)
     });
+  });
+
+  bot.hears(/^🛠️ 작업량/, async (ctx) => {
+    // Claude의 작업량(effort)은 thinking(💭)과 별개 축이다. 개별 버튼으로 노출한다.
+    const defaults = store.getSessionDefaults();
+    if (defaults.provider !== "claude") {
+      await ctx.reply(
+        "작업량(effort)은 Claude 기본값 전용입니다. Codex·agy는 추론 강도(💭)가 작업량을 겸합니다.",
+        { reply_markup: defaultsKeyboard(defaults, config.modelCatalog) }
+      );
+      return;
+    }
+    await ctx.reply("새 세션 기본 Claude 작업량을 선택하세요. (thinking과 별개 축)", {
+      reply_markup: defaultsEffortKeyboard(defaults, config.modelCatalog)
+    });
+  });
+
+  bot.hears(/^➖/, async (ctx) => {
+    // 예약 슬롯: 아직 배선되지 않았다. 추후 제공자별 추가 선택 항목을 여기에 연결한다.
+    await ctx.reply("아직 배선되지 않은 예약 슬롯입니다(추후 추가 예정).");
   });
 
   bot.on("message:text", async (ctx) => {

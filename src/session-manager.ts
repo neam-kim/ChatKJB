@@ -38,11 +38,6 @@ import {
   runGoalChecks,
   type CheckRunResult
 } from "./goal-checks.js";
-import {
-  callOllama,
-  ollamaConfig,
-  TIER2_MODEL
-} from "./orchestration/local-tiers.js";
 import type { RiskLevel } from "./orchestration/types.js";
 import {
   sharedMemoryBridgePath,
@@ -108,19 +103,12 @@ const GOAL_ROUNDS_BY_RISK: Record<RiskLevel, number> = {
   L3: 20,
   L4: 30
 };
-// /synth 다중후보 판관. 후보 생성·통합과 별개로 심사만 고정 고성능 모델에 맡긴다.
+// /synth 다중후보 판관. 후보 생성·통합과 별개로 심사만 고정 고성능 모델(Opus 4.8 high)에
+// 맡긴다. Opus 판관이 실패하면 다른 모델로 폴백하지 않고 첫 후보를 그대로 채택한다.
 // /goal 평가와는 무관하다(Tier 5 판관 = 세션 모델).
 const SYNTH_JUDGE_CLAUDE_MODEL = "claude-opus-4-8";
 const SYNTH_JUDGE_CLAUDE_THINKING = "high";
 const SYNTH_JUDGE_CLAUDE_EFFORT = "high";
-const SYNTH_JUDGE_CODEX_MODEL = "gpt-5.5";
-const SYNTH_JUDGE_CODEX_REASONING: CodexReasoningEffort = "high";
-// 로컬 Tier 2 판관에게 전달하는 시스템 프롬프트. 저장소 파일에 직접 접근할 수 없으므로
-// 결정론적 검증 결과(객관 사실)에만 근거해 판정하도록 지시한다.
-const LOCAL_GOAL_JUDGE_SYSTEM =
-  "너는 목표 충족 여부만 판정하는 읽기 전용 심판이다. "
-  + "저장소 파일을 직접 볼 수 없으니, 아래 제공된 결정론적 검증 결과(객관 사실)에만 근거해 판정하라. "
-  + "사실에 없는 것은 추측하지 말고, 마지막 줄에 정확히 GOAL_MET: <근거> 또는 GOAL_UNMET: <남은점> 한 줄로만 답하라.";
 const CODEX_ACCOUNT_STATE_SETTING = "codex.accountState.v1";
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
 export const CODEX_MODEL = DEFAULT_CODEX_MODEL;
@@ -2853,21 +2841,10 @@ export class SessionManager {
     const condition = this.store.getSession(session.id)?.goalCondition;
     if (!condition || this.deleting.has(session.id)) return;
 
-    // 모든 토큰이 한도면 충족 여부 평가 자체가 불가능하다. 먼저 로컬 Tier 2 판정을 시도하고,
-    // 달성이 확인되면 즉시 완료한다. 그렇지 않으면 가장 먼저 회복되는 시각에 다시 예약한다.
+    // 모든 토큰이 한도면 판관(세션 모델)을 부를 수 없으므로 충족 여부 평가 자체가 불가능하다.
+    // 다른 모델로 대신 판정하지 않고, 가장 먼저 회복되는 시각에 다시 예약한다.
     const recoversAt = this.tokenPool.recoversAt();
     if (recoversAt !== null) {
-      const local = await this.tryLocalGoalVerdict(session, condition);
-      if (local?.met) {
-        this.goalRounds.delete(session.id);
-        this.store.updateSession(session.id, { goalCondition: null });
-        await this.transport.sendText(
-          session.chatId,
-          session.topicId,
-          `목표를 달성했습니다 ✅ (Claude 한도 중 로컬 Tier2 판정)\n조건: ${condition}\n근거: ${local.reason}`
-        ).catch(() => undefined);
-        return;
-      }
       this.scheduleGoalRecheck(session, request, sdkSessionId, recoversAt);
       return;
     }
@@ -2876,21 +2853,11 @@ export class SessionManager {
     try {
       verdict = await this.evaluateGoal(session, condition);
     } catch (error) {
-      // 평가 도중 모든 토큰이 한도에 닿았으면 로컬 Tier 2 판정을 먼저 시도한다.
+      // 평가 도중 모든 토큰이 한도에 닿았으면 판관(세션 모델)을 부를 수 없으므로
+      // 다른 모델로 대신 판정하지 않고 회복 시각에 다시 예약한다.
       if (isRateLimitError(error)) {
         const at = this.tokenPool.recoversAt();
         if (at !== null) {
-          const local = await this.tryLocalGoalVerdict(session, condition);
-          if (local?.met) {
-            this.goalRounds.delete(session.id);
-            this.store.updateSession(session.id, { goalCondition: null });
-            await this.transport.sendText(
-              session.chatId,
-              session.topicId,
-              `목표를 달성했습니다 ✅ (Claude 한도 중 로컬 Tier2 판정)\n조건: ${condition}\n근거: ${local.reason}`
-            ).catch(() => undefined);
-            return;
-          }
           this.scheduleGoalRecheck(session, request, sdkSessionId, at);
           return;
         }
@@ -2946,49 +2913,13 @@ export class SessionManager {
   }
 
   /**
-   * Claude 토큰이 모두 한도에 도달했을 때 로컬 Tier 2(qwen3.6)로 목표 달성 여부를 판정한다.
-   * 결정론적 check: 게이트가 하나 이상 있는 경우에만 신뢰 가능한 판정이 가능하다.
-   * 자유 서술형 목표(check: 없음)는 로컬 모델이 저장소를 볼 수 없으므로 null을 반환한다.
-   */
-  private async tryLocalGoalVerdict(
-    session: SessionRecord,
-    condition: string
-  ): Promise<{ met: boolean; reason: string } | null> {
-    const spec = parseGoalChecks(condition);
-    const checkRun = await runGoalChecks(spec.checks, session.cwd);
-    if (!checkRun.allPassed) {
-      const failed = checkRun.results.filter((r) => !r.passed).map((r) => r.command);
-      return { met: false, reason: `결정론적 검증 실패: ${failed.join(", ")}` };
-    }
-    if (spec.checks.length > 0 && !spec.description) {
-      return { met: true, reason: `결정론적 검증 ${spec.checks.length}건 모두 통과` };
-    }
-    // 자유 서술형 목표: 로컬 모델은 저장소에 직접 접근할 수 없으므로 판정 불가.
-    if (spec.checks.length === 0) {
-      return null;
-    }
-    // check: 게이트 + 사람용 설명이 함께 있는 경우: 결정론적 결과를 packet으로 넘겨 로컬 모델 판정.
-    try {
-      const raw = await callOllama(
-        TIER2_MODEL,
-        { system: LOCAL_GOAL_JUDGE_SYSTEM, user: buildGoalCheckPrompt(spec.description, checkRun) },
-        ollamaConfig()
-      );
-      return parseGoalVerdict(raw);
-    } catch {
-      return null;
-    }
-  }
-
-  /**
    * 목표 충족 여부를 판정한다(Structure2.md Tier 0 + Tier 5 판관).
    * 1) 목표에 `check:` 결정론적 게이트가 있으면 먼저 실행한다.
    * 2) 게이트가 하나라도 실패하면 LLM을 부르지 않고 즉시 미충족으로 본다(사실은 추측하지 않는다).
    * 3) 게이트가 모두 통과(또는 게이트 없음)면 그 객관적 결과를 packet으로 판관에 넘겨
    *    목표 설명(description)의 나머지 충족 여부를 읽기 전용으로 판정한다.
-   *    판관 = Tier 5 = "이 세션이 도는 모델 그 자체"(session.model). 옛 Haiku 고정 평가는 폐지.
-   *    단, 결정론 게이트가 있는 경우 먼저 로컬 Tier 2(qwen3.6)로 사실기반 판정을 시도해
-   *    프런티어(클라우드) 호출을 아낀다(local-first). 로컬이 판정 불가면 Tier 5로 승격한다.
+   *    판관 = Tier 5 = "이 세션이 도는 모델 그 자체"(session.model). 옛 Haiku 고정 평가 및
+   *    로컬 Tier 2(qwen3.6) 사전 판정은 폐지했다. 목표 판관은 항상 세션 모델이다.
    */
   private async evaluateGoal(
     session: SessionRecord,
@@ -3011,14 +2942,8 @@ export class SessionManager {
       };
     }
 
-    // 결정론 게이트가 통과한 상태에서 사람용 설명이 남은 경우: 먼저 로컬 Tier 2 판정을 시도한다.
-    // (저장소 직접 접근이 필요 없는 사실기반 판정이므로 로컬로 충분하다.) 로컬이 판정 불가(null)면
-    // 자유서술형이므로 Tier 5(세션 모델)로 읽기 전용 판정한다.
-    if (spec.checks.length > 0) {
-      const local = await this.tryLocalGoalVerdict(session, condition);
-      if (local) return local;
-    }
-
+    // 결정론 게이트가 통과한 뒤(또는 게이트 없는 자유서술형) 사람용 설명이 남은 경우:
+    // 판관 = Tier 5(세션 모델)로 읽기 전용 판정한다.
     const controller = new AbortController();
     const run: ActiveRun = {
       controller,
@@ -3240,18 +3165,9 @@ export class SessionManager {
       console.error("Claude synthesis judge failed:", safeErrorMessage(error, this.oauthTokens));
     }
 
-    try {
-      const text = await this.runSilentReadOnly(session, "codex", judgePrompt, {
-        codexModelOverride: SYNTH_JUDGE_CODEX_MODEL,
-        codexReasoningOverride: SYNTH_JUDGE_CODEX_REASONING
-      });
-      const parsed = parseJudgeResponse(text, candidates.length);
-      if (parsed) return { ...parsed, judge: "codex" };
-    } catch (error) {
-      console.error("Codex synthesis judge fallback failed:", safeErrorMessage(error, this.oauthTokens));
-    }
-
-    return { winner: 1, reason: "심사자를 사용할 수 없어 첫 후보를 선택했습니다.", judge: "fallback" };
+    // 판관은 Opus 4.8 high로 고정한다. Opus 판정이 실패하면 다른 모델로 폴백하지 않고
+    // 첫 후보를 그대로 채택한다(투명성을 위해 judge: "fallback"으로 표기).
+    return { winner: 1, reason: "심사자(Opus 4.8)를 사용할 수 없어 첫 후보를 선택했습니다.", judge: "fallback" };
   }
 
   // provider 하나에 같은 프롬프트를 읽기 전용·새 맥락으로 1회 실행해 최종 텍스트만 받는다.

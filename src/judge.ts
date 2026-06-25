@@ -1,8 +1,8 @@
 import type { ProviderKind } from "./types.js";
 
 // 병렬 종합의 심사 프롬프트와 응답 파서. 여러 provider가 같은 작업을 푼 후보 답들을 받아
-// 가장 정확·완전한 것을 고르게 한다. 실제 심사 실행 순서(Claude → Codex)는
-// session-manager가 담당하므로 이 모듈은 SDK에 의존하지 않는다.
+// 가장 정확·완전한 것을 고르게 한다. 실제 심사는 Opus 4.8 high 단일 판관이 수행하며
+// (실패 시 첫 후보 폴백), session-manager가 담당하므로 이 모듈은 SDK에 의존하지 않는다.
 
 export interface JudgeCandidate {
   provider: ProviderKind;
@@ -13,8 +13,8 @@ export interface JudgeVerdict {
   // 1-based 후보 번호.
   winner: number;
   reason: string;
-  // 어느 심사자가 판정했는지(투명성).
-  judge: "claude" | "codex" | "fallback";
+  // 어느 심사자가 판정했는지(투명성). "claude" = Opus 4.8 high, "fallback" = 첫 후보 채택.
+  judge: "claude" | "fallback";
 }
 
 const JUDGE_SYSTEM =
