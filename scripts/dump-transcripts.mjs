@@ -44,6 +44,15 @@ import { execFileSync } from "node:child_process";
 // node 버전 ABI에 묶이지 않아 어떤 런타임으로 실행해도 동작한다.
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+// 스케줄(launchd) 실행 시엔 셸 환경이 없어 CODEX_ACCOUNT_HOMES 같은 설정이 비어 있다.
+// 오케스트레이터와 같은 프로젝트 .env를 Node 내장 loader로 읽어 채운다(무의존성). 이미 설정된
+// 환경변수는 덮어쓰지 않으며, .env가 없으면 기본값으로 진행한다.
+try {
+  process.loadEnvFile(join(REPO_ROOT, ".env"));
+} catch {
+  /* .env 없음 — 기본값 유지 */
+}
+
 const STATE_DB =
   process.env.ORCH_STATE_DB || join(REPO_ROOT, "data", "state.sqlite");
 const WIKI_VAULT =
@@ -51,8 +60,19 @@ const WIKI_VAULT =
   "/Users/neam/Library/CloudStorage/SynologyDrive-neam/AI/LLM-Wiki";
 const CLAUDE_PROJECTS_DIR =
   process.env.CLAUDE_PROJECTS_DIR || join(homedir(), ".claude", "projects");
-const CODEX_SESSIONS_DIR =
-  process.env.CODEX_SESSIONS_DIR || join(homedir(), ".codex", "sessions");
+// Codex는 계정 풀(여러 CODEX_HOME)로 실행될 수 있고, rollout은 그 세션을 실행한 홈의
+// sessions/ 아래에만 저장된다. 오케스트레이터와 동일한 CODEX_ACCOUNT_HOMES를 읽어 모든 홈의
+// sessions 디렉토리를 스캔 대상으로 삼는다(기본 ~/.codex 또는 CODEX_SESSIONS_DIR override 포함,
+// 중복 제거). 한 곳만 보던 과거엔 다계정 rollout이 통째로 "소스누락"으로 잡혔다.
+const CODEX_SESSIONS_DIRS = (() => {
+  const dirs = (process.env.CODEX_ACCOUNT_HOMES || "")
+    .split(",")
+    .map((h) => h.trim())
+    .filter(Boolean)
+    .map((h) => join(h, "sessions"));
+  dirs.push(process.env.CODEX_SESSIONS_DIR || join(homedir(), ".codex", "sessions"));
+  return [...new Set(dirs)];
+})();
 const AGY_CONV_DIR =
   process.env.AGY_CONV_DIR ||
   join(
@@ -257,7 +277,6 @@ function extractClaudeText(content) {
 // ── codex: rollout-*-<thread_id>.jsonl 찾기 ─────────────────────────────────
 function findCodexFile(session) {
   if (!session.codex_thread_id) return null;
-  if (!existsSync(CODEX_SESSIONS_DIR)) return null;
   const id = session.codex_thread_id;
   let found = null;
   const walk = (dir) => {
@@ -268,7 +287,13 @@ function findCodexFile(session) {
       else if (e.isFile() && e.name.endsWith(`${id}.jsonl`)) found = p;
     }
   };
-  walk(CODEX_SESSIONS_DIR);
+  // 모든 Codex 계정 홈의 sessions/를 순회한다. 어느 홈에서 실행됐는지 DB에 별도 기록이 없으므로
+  // 전 홈을 훑되, 찾는 즉시 멈춘다.
+  for (const root of CODEX_SESSIONS_DIRS) {
+    if (found) break;
+    if (!existsSync(root)) continue;
+    walk(root);
+  }
   return found;
 }
 
@@ -1016,9 +1041,10 @@ function enumerateDesktopSessions(orchestratorSessions) {
     }
   }
 
-  // codex: ~/.codex/sessions/**/rollout-*-<thread_id>.jsonl
-  if (existsSync(CODEX_SESSIONS_DIR)) {
-    const stack = [CODEX_SESSIONS_DIR];
+  // codex: 모든 계정 홈의 sessions/**/rollout-*-<thread_id>.jsonl
+  const codexRoots = CODEX_SESSIONS_DIRS.filter((root) => existsSync(root));
+  if (codexRoots.length) {
+    const stack = [...codexRoots];
     while (stack.length) {
       const d = stack.pop();
       let entries;
