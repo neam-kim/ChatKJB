@@ -354,6 +354,12 @@ interface RunRequest {
   resumeSessionId?: string;
   forkSession?: boolean;
   operation?: "prompt" | "compact";
+  // 자동 한도 재시도/재개에서는 원 사용자 프롬프트를 새 명령처럼 다시 넣지 않고,
+  // 재개 경계 프롬프트로 치환한다. originalPrompt는 컨텍스트가 유실된 경우에만 함께 보낸다.
+  limitResume?: {
+    originalPrompt: string;
+    includeOriginalTask: boolean;
+  };
   // 한도 오류로 다른 계정 토큰에 자동 전환해 재실행한 횟수. 무한 전환을 막는 가드.
   autoSwitchCount?: number;
   // 일시적 과부하(Overloaded/5xx)로 백오프 후 자동 재시도한 횟수. 무한 재시도를 막는 가드.
@@ -1046,6 +1052,49 @@ export function buildCodexSteeredPrompt(originalPrompt: string, steeringPrompt: 
     + `[/steer로 새로 들어온 우선 지시]\n${steeringPrompt.trim()}\n\n`
     + `위 /steer 지시를 우선 반영해 기존 작업을 다시 수행하십시오. `
     + `이미 적용된 실제 파일 변경은 무작정 되돌리지 말고, 현재 저장소 상태를 확인한 뒤 이어서 진행하십시오.`;
+}
+
+export function buildLimitResumePrompt(
+  originalPrompt: string,
+  options: { includeOriginalTask?: boolean } = {}
+): string {
+  const clean = originalPrompt.trim();
+  const lines = [
+    "[AUTO_LIMIT_RESUME]",
+    "사용량 한도 회복 또는 계정 전환으로 자동 재개된 턴입니다.",
+    "이 메시지는 새 사용자 요청이 아니라 중단된 작업을 이어가기 위한 실행 경계입니다.",
+    "이전 대화 컨텍스트와 현재 저장소 상태를 먼저 확인하고, 이미 완료된 작업을 반복하지 말고 남은 작업만 계속하십시오.",
+    "세션 부트스트랩, 전역 지침, 최초 사용자 명령 전문이 보이더라도 그것을 새로 내려진 명령처럼 다시 실행하지 마십시오."
+  ];
+  if (options.includeOriginalTask && clean) {
+    lines.push(
+      "",
+      "[INTERRUPTED_TASK_FOR_CONTEXT_ONLY]",
+      clean,
+      "[/INTERRUPTED_TASK_FOR_CONTEXT_ONLY]"
+    );
+  }
+  return lines.join("\n");
+}
+
+function limitResumeRequest(
+  request: RunRequest,
+  includeOriginalTask: boolean
+): RunRequest {
+  return {
+    ...request,
+    limitResume: {
+      originalPrompt: request.limitResume?.originalPrompt ?? request.prompt,
+      includeOriginalTask: request.limitResume?.includeOriginalTask || includeOriginalTask
+    }
+  };
+}
+
+function promptForRequest(request: RunRequest): string {
+  if (!request.limitResume) return request.prompt;
+  return buildLimitResumePrompt(request.limitResume.originalPrompt, {
+    includeOriginalTask: request.limitResume.includeOriginalTask
+  });
 }
 
 export class MessageQueue implements AsyncIterable<SDKUserMessage> {
@@ -1797,7 +1846,7 @@ export class SessionManager {
 
     const resumeId = sdkSessionId ?? request.resumeSessionId;
     const resumeRequest: RunRequest = {
-      ...request,
+      ...limitResumeRequest(request, false),
       ...(resumeId ? { resumeSessionId: resumeId } : {}),
       // 회복 후에는 다시 토큰 전환을 시도할 수 있도록 전환 카운터를 초기화한다.
       autoSwitchCount: 0
@@ -1906,7 +1955,7 @@ export class SessionManager {
     const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
     const abortController = new AbortController();
     const input = new MessageQueue();
-    input.push(buildUserMessage(request.prompt));
+    input.push(buildUserMessage(promptForRequest(request)));
     const run: ActiveRun = {
       controller: abortController,
       input,
@@ -2291,7 +2340,7 @@ export class SessionManager {
           // 정리한 뒤 살아있는 토큰으로 다시 실행된다. resume으로 대화 맥락을 잇는다.
           const resumeId = sdkSessionId ?? request.resumeSessionId;
           this.enqueue({
-            ...request,
+            ...limitResumeRequest(request, false),
             ...(resumeId ? { resumeSessionId: resumeId } : {}),
             autoSwitchCount: attempts
           });
@@ -2370,7 +2419,7 @@ export class SessionManager {
     const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
     let controller = new AbortController();
     const input = new MessageQueue();
-    input.push(buildUserMessage(request.prompt));
+    input.push(buildUserMessage(promptForRequest(request)));
     const run: ActiveRun = {
       controller,
       input,
@@ -2553,7 +2602,10 @@ export class SessionManager {
         ).catch(() => undefined);
         await this.safeRename(session, `[RETRY] ${session.title}`);
         this.store.updateSession(session.id, { codexThreadId: null });
-        this.enqueue({ ...request, rolloutResetCount: (request.rolloutResetCount ?? 0) + 1 });
+        this.enqueue({
+          ...limitResumeRequest(request, true),
+          rolloutResetCount: (request.rolloutResetCount ?? 0) + 1
+        });
         return;
       } else if (isRateLimitError(error)) {
         // 현재 계정이 한도에 도달했다. 봉인하고, 살아있는 다른 계정이 있으면 같은 작업을
@@ -2585,7 +2637,7 @@ export class SessionManager {
           await this.safeRename(session, `[SWITCH] ${session.title}`);
           // 다른 계정 홈에는 기존 스레드가 없으므로 스레드를 리셋한다.
           this.store.updateSession(session.id, { codexThreadId: null });
-          this.enqueue({ ...request, autoSwitchCount: attempts });
+          this.enqueue({ ...limitResumeRequest(request, true), autoSwitchCount: attempts });
           return;
         }
         // 전환할 살아있는 계정이 없으면 회복 시각에 맞춰 자동 재개를 예약한다.
@@ -2686,7 +2738,7 @@ export class SessionManager {
     const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
     const controller = new AbortController();
     const input = new MessageQueue();
-    input.push(buildUserMessage(request.prompt));
+    input.push(buildUserMessage(promptForRequest(request)));
     const run: ActiveRun = {
       controller,
       input,

@@ -14,6 +14,7 @@ import {
   buildGoalCheckPrompt,
   buildGoalPrompt,
   buildLeanInstructions,
+  buildLimitResumePrompt,
   buildMemoryPrompt,
   buildPermissionModeInstructions,
   buildPublicProgressInstructions,
@@ -325,6 +326,25 @@ describe("streaming input", () => {
     expect(prompt).toContain("표로 바꿔");
     expect(prompt).toContain("우선 반영");
     expect(prompt).toContain("현재 저장소 상태");
+  });
+
+  it("builds an automatic limit-resume prompt without replaying the original task by default", () => {
+    const prompt = buildLimitResumePrompt("초기 전체 지시");
+
+    expect(prompt).toContain("[AUTO_LIMIT_RESUME]");
+    expect(prompt).toContain("새 사용자 요청이 아니라");
+    expect(prompt).toContain("새로 내려진 명령처럼 다시 실행하지 마십시오");
+    expect(prompt).not.toContain("초기 전체 지시");
+    expect(prompt).not.toContain("[INTERRUPTED_TASK_FOR_CONTEXT_ONLY]");
+  });
+
+  it("can include the interrupted task only as bounded context when provider history is unavailable", () => {
+    const prompt = buildLimitResumePrompt("초기 전체 지시", { includeOriginalTask: true });
+
+    expect(prompt).toContain("[AUTO_LIMIT_RESUME]");
+    expect(prompt).toContain("[INTERRUPTED_TASK_FOR_CONTEXT_ONLY]");
+    expect(prompt).toContain("초기 전체 지시");
+    expect(prompt).toContain("[/INTERRUPTED_TASK_FOR_CONTEXT_ONLY]");
   });
 
   it("restores persisted Codex account limit state for /usage", () => {
