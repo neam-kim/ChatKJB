@@ -91,7 +91,7 @@ const OVERLOAD_RETRY_CAP_MS = 60_000;
 // 한도 초기화 직후의 미세한 시계 오차로 또 거부당하는 것을 막는다.
 const LIMIT_RESUME_BUFFER_MS = 10_000;
 // /goal: 한 목표를 향해 자동으로 이어 도는 최대 턴 수(폭주·무한 반복 방지).
-// Structure2.md는 고정 턴 상한 대신 Risk_Level별 checkpoint 경로로 진행을 통제한다.
+// 오케스트레이션 설계는 고정 턴 상한 대신 Risk_Level별 checkpoint 경로로 진행을 통제한다.
 // 위험도를 추정할 수 없을 때(자유서술형 목표 등)의 안전 상한으로만 남긴다.
 export const MAX_GOAL_ROUNDS = 25;
 // Risk_Level별 자동 진행 턴 상한. checkpointsForRisk 단계 수에 여유를 둔 값으로,
@@ -643,7 +643,7 @@ export function buildGoalPrompt(condition: string, reason?: string): string {
 
 /**
  * /goal 충족 여부를 빠른 모델(판관)로 판정시키기 위한 읽기 전용 프롬프트.
- * Structure2.md의 Tier 0 철학에 따라, 결정론적 게이트(`check:` 명령) 실행 결과가 있으면
+ * Tier 0 결정론 검증 원칙에 따라, 결정론적 게이트(`check:` 명령) 실행 결과가 있으면
  * 그 사실을 packet으로 함께 전달해 판관이 사실을 추측하지 않게 한다. description은 목표에서
  * check 줄을 뺀 사람용 텍스트다.
  */
@@ -2983,7 +2983,7 @@ export class SessionManager {
     }
 
     const rounds = this.goalRounds.get(session.id) ?? 0;
-    // Structure2.md: 고정 상한이 아니라 추정된 Risk_Level별 상한으로 자동 진행을 통제한다.
+    // 고정 상한이 아니라 추정된 Risk_Level별 상한으로 자동 진행을 통제한다.
     const limit = Math.min(this.goalRoundLimit(condition), MAX_GOAL_ROUNDS);
     if (rounds + 1 >= limit) {
       this.goalRounds.delete(session.id);
@@ -3013,7 +3013,7 @@ export class SessionManager {
   }
 
   /**
-   * 목표 충족 여부를 판정한다(Structure2.md Tier 0 + Tier 5 판관).
+   * 목표 충족 여부를 판정한다(Tier 0 결정론 검증 + Tier 5 판관).
    * 1) 목표에 `check:` 결정론적 게이트가 있으면 먼저 실행한다.
    * 2) 게이트가 하나라도 실패하면 LLM을 부르지 않고 즉시 미충족으로 본다(사실은 추측하지 않는다).
    * 3) 게이트가 모두 통과(또는 게이트 없음)면 그 객관적 결과를 packet으로 판관에 넘겨
@@ -3067,7 +3067,7 @@ export class SessionManager {
   }
 
   /**
-   * 목표 텍스트에서 Structure2.md Risk_Level을 추정해 자동 진행 턴 상한을 정한다.
+   * 목표 텍스트에서 Risk_Level을 추정해 자동 진행 턴 상한을 정한다.
    * 위험도 추정은 순수 함수(estimateGoalRisk)로 분리해 테스트 가능하게 했다.
    */
   private goalRoundLimit(condition: string): number {

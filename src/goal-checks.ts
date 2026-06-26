@@ -1,4 +1,4 @@
-// /goal 목표 평가를 Structure2.md의 Tier 0 철학에 맞게 보강하기 위한 모듈.
+// /goal 목표 평가를 Tier 0 결정론 검증 원칙에 맞게 보강하기 위한 모듈.
 // 목표 문자열에 `check: <명령>` 줄을 넣으면 그 명령을 결정론적 게이트로 먼저 실행하고,
 // 그 pass/fail 근거를 판관 LLM에 packet으로 전달한다(LLM이 사실을 추측하지 않게 한다).
 
@@ -10,7 +10,7 @@ import type { RiskLevel } from "./orchestration/types.js";
 const execAsync = promisify(exec);
 
 /**
- * 목표 텍스트에서 Structure2.md Risk_Level을 보수적으로 추정한다(순수 함수, 저장소 미접근).
+ * 목표 텍스트에서 Risk_Level을 보수적으로 추정한다(순수 함수, 저장소 미접근).
  * 목표 본문의 위험 키워드(security/migration/schema/architecture/public API/통합)와
  * check: 게이트 수만 신호로 쓴다. 키워드가 전혀 없으면 게이트 수에 따라 L1/L2로 떨어진다.
  */

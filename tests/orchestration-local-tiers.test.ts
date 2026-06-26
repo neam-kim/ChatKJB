@@ -3,35 +3,60 @@ import type { TaskContract } from "../src/orchestration/types.js";
 import {
   ollamaConfig,
   ollamaTimeoutForModel,
-  TIER2_JUDGE_TIMEOUT_MS,
+  estimateNumCtx,
+  OLLAMA_DEFAULT_TIMEOUT_MS,
+  OLLAMA_MAX_NUM_CTX,
+  OLLAMA_MIN_NUM_CTX,
   buildTier1Prompt,
   buildTier3Prompt,
   extractCodeBlocks,
 } from "../src/orchestration/local-tiers.js";
 
 describe("ollamaConfig", () => {
-  it("returns defaults when env is empty", () => {
+  it("defaults timeout to 300 seconds when env is empty", () => {
     const config = ollamaConfig({});
     expect(config).toEqual({
       url: "http://localhost:11434/api/chat",
-      timeoutMs: 120000,
+      timeoutMs: OLLAMA_DEFAULT_TIMEOUT_MS,
     });
+    expect(OLLAMA_DEFAULT_TIMEOUT_MS).toBe(300000);
+  });
+
+  it("honors OLLAMA_TIMEOUT_MS override", () => {
+    expect(ollamaConfig({ OLLAMA_TIMEOUT_MS: "45000" }).timeoutMs).toBe(45000);
   });
 });
 
 describe("ollamaTimeoutForModel", () => {
-  it("forces qwen3.6 judge calls to 300 seconds", () => {
-    expect(ollamaTimeoutForModel("qwen3.6:27b-96k", {
-      url: "http://localhost:11434/api/chat",
-      timeoutMs: 120000,
-    })).toBe(TIER2_JUDGE_TIMEOUT_MS);
+  it("returns config timeout regardless of model", () => {
+    const config = { url: "x", timeoutMs: 300000 };
+    expect(ollamaTimeoutForModel("qwen3.6:27b-96k", config)).toBe(300000);
+    expect(ollamaTimeoutForModel("qwen3-coder:30b-96k", config)).toBe(300000);
   });
 
-  it("keeps configured timeout for other local models", () => {
-    expect(ollamaTimeoutForModel("qwen3-coder:30b-96k", {
-      url: "http://localhost:11434/api/chat",
-      timeoutMs: 45000,
-    })).toBe(45000);
+  it("does not special-case any model", () => {
+    const config = { url: "x", timeoutMs: 45000 };
+    expect(ollamaTimeoutForModel("qwen3.6:27b-96k", config)).toBe(45000);
+    expect(ollamaTimeoutForModel("qwen3-coder:30b-96k", config)).toBe(45000);
+  });
+});
+
+describe("estimateNumCtx", () => {
+  it("clamps tiny prompts to the minimum context", () => {
+    expect(estimateNumCtx({ system: "a", user: "b" })).toBe(OLLAMA_MIN_NUM_CTX);
+  });
+
+  it("clamps huge prompts to the 96k maximum", () => {
+    expect(estimateNumCtx({ system: "a".repeat(500000), user: "b".repeat(500000) })).toBe(
+      OLLAMA_MAX_NUM_CTX,
+    );
+  });
+
+  it("scales between min and max for medium prompts and rounds to 1024", () => {
+    const ctx = estimateNumCtx({ system: "a".repeat(30000), user: "b".repeat(30000) });
+    expect(ctx).toBeGreaterThan(OLLAMA_MIN_NUM_CTX);
+    expect(ctx).toBeLessThan(OLLAMA_MAX_NUM_CTX);
+    expect(ctx % 1024).toBe(0);
   });
 });
 
