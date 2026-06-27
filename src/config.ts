@@ -25,9 +25,15 @@ const optionalOauthToken = z.preprocess(
   ).optional()
 );
 
+const optionalTelegramAllowedUserIds = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.string().optional()
+);
+
 const environmentSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(10),
-  TELEGRAM_ALLOWED_USER_ID: z.coerce.number().int(),
+  TELEGRAM_ALLOWED_USER_ID: z.coerce.number().int().optional(),
+  TELEGRAM_ALLOWED_USER_IDS: optionalTelegramAllowedUserIds,
   TELEGRAM_CHAT_ID: z.coerce.number().int(),
   CLAUDE_CODE_OAUTH_TOKEN: z.string().regex(
     CLAUDE_OAUTH_TOKEN_PATTERN,
@@ -86,6 +92,28 @@ export type AppConfig = Awaited<ReturnType<typeof loadConfig>>;
 function absolutePath(path: string): string {
   const expanded = path.trim().replace(/^~(?=\/|$)/, homedir());
   return isAbsolute(expanded) ? expanded : resolve(process.cwd(), expanded);
+}
+
+export function parseTelegramAllowedUserIds(
+  singleUserId: number | undefined,
+  rawUserIds: string | undefined
+): number[] {
+  const ids = [
+    singleUserId,
+    ...(rawUserIds
+      ? rawUserIds.split(",").map((part) => {
+          const trimmed = part.trim();
+          if (!/^-?\d+$/.test(trimmed)) {
+            throw new Error(`텔레그램 사용자 ID가 정수가 아닙니다: ${part}`);
+          }
+          return Number(trimmed);
+        })
+      : [])
+  ].filter((id): id is number => id !== undefined);
+  if (ids.length === 0) {
+    throw new Error("TELEGRAM_ALLOWED_USER_ID 또는 TELEGRAM_ALLOWED_USER_IDS가 필요합니다.");
+  }
+  return [...new Set(ids)];
 }
 
 // 여러 Codex 계정의 CODEX_HOME 디렉터리(CSV)를 파싱·검증한다. 각 홈은 디렉터리여야 하고
@@ -313,6 +341,10 @@ export async function removeProject(
 export async function loadConfig() {
   validateEnvironmentFile();
   const env = environmentSchema.parse(process.env);
+  const allowedUserIds = parseTelegramAllowedUserIds(
+    env.TELEGRAM_ALLOWED_USER_ID,
+    env.TELEGRAM_ALLOWED_USER_IDS
+  );
   const projectsPath = absolutePath(env.PROJECTS_PATH);
   const projects = await loadProjects(projectsPath);
 
@@ -338,7 +370,8 @@ export async function loadConfig() {
 
   return {
     telegramBotToken: env.TELEGRAM_BOT_TOKEN,
-    allowedUserId: env.TELEGRAM_ALLOWED_USER_ID,
+    allowedUserId: allowedUserIds[0]!,
+    allowedUserIds,
     chatId: env.TELEGRAM_CHAT_ID,
     claudeCodeOauthToken: env.CLAUDE_CODE_OAUTH_TOKEN,
     claudeCodeOauthTokens,

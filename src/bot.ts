@@ -493,7 +493,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     + `${project.name}\n${project.cwd}`;
 
   bot.use(async (ctx, next) => {
-    if (ctx.from?.id !== config.allowedUserId) return;
+    if (!ctx.from || !config.allowedUserIds.includes(ctx.from.id)) return;
     if (ctx.chat?.id !== config.chatId) return;
     await next();
   });

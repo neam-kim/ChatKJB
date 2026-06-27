@@ -21,7 +21,12 @@ afterEach(() => {
   }
 });
 
-async function setup(token?: string, extra?: { token2?: string; token3?: string }) {
+async function setup(token?: string, extra?: {
+  token2?: string;
+  token3?: string;
+  telegramAllowedUserId?: string | undefined;
+  telegramAllowedUserIds?: string;
+}) {
   const directory = mkdtempSync(join(tmpdir(), "telegram-claude-config-"));
   directories.push(directory);
   const project = join(directory, "project");
@@ -32,7 +37,12 @@ async function setup(token?: string, extra?: { token2?: string; token3?: string 
   ]));
   process.env = {
     TELEGRAM_BOT_TOKEN: "1234567890:test-token",
-    TELEGRAM_ALLOWED_USER_ID: "1",
+    ...(extra && Object.hasOwn(extra, "telegramAllowedUserId")
+      ? { TELEGRAM_ALLOWED_USER_ID: extra.telegramAllowedUserId }
+      : { TELEGRAM_ALLOWED_USER_ID: "1" }),
+    ...(extra?.telegramAllowedUserIds !== undefined
+      ? { TELEGRAM_ALLOWED_USER_IDS: extra.telegramAllowedUserIds }
+      : {}),
     TELEGRAM_CHAT_ID: "-1001",
     PROJECTS_PATH: projectsPath,
     CLAUDE_CODE_OAUTH_TOKEN: token ?? "",
@@ -81,6 +91,37 @@ describe("OAuth configuration", () => {
     await expect(
       setup("sk-ant-oat01-primary-1", { token2: "nope" })
     ).rejects.toThrow();
+  });
+});
+
+describe("Telegram user authorization configuration", () => {
+  it("keeps the existing single allowed user ID behavior", async () => {
+    const config = await setup("sk-ant-oat01-test_token-123");
+    expect(config.allowedUserId).toBe(1);
+    expect(config.allowedUserIds).toEqual([1]);
+  });
+
+  it("loads multiple allowed user IDs from CSV", async () => {
+    const config = await setup("sk-ant-oat01-test_token-123", {
+      telegramAllowedUserIds: "1, 2,3"
+    });
+    expect(config.allowedUserId).toBe(1);
+    expect(config.allowedUserIds).toEqual([1, 2, 3]);
+  });
+
+  it("supports plural user IDs without the legacy single setting", async () => {
+    const config = await setup("sk-ant-oat01-test_token-123", {
+      telegramAllowedUserId: undefined,
+      telegramAllowedUserIds: "7,8,7"
+    });
+    expect(config.allowedUserId).toBe(7);
+    expect(config.allowedUserIds).toEqual([7, 8]);
+  });
+
+  it("rejects malformed allowed user IDs", async () => {
+    await expect(
+      setup("sk-ant-oat01-test_token-123", { telegramAllowedUserIds: "1,nope" })
+    ).rejects.toThrow("텔레그램 사용자 ID가 정수가 아닙니다");
   });
 });
 

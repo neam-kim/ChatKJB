@@ -50,6 +50,7 @@ function botSetup() {
   const config = {
     telegramBotToken: "123456789:test-token",
     allowedUserId: 7,
+    allowedUserIds: [7],
     chatId: -1001,
     claudeCodeOauthToken: "test-oauth-token",
     claudeCodeOauthTokens: ["test-oauth-token"],

@@ -253,7 +253,7 @@ npm install
 4. 봇에 `Manage Topics`, `Delete Messages` 권한을 줍니다.
 5. 본인 Telegram user ID와 그룹 chat ID를 확인합니다.
 
-ChatKJB는 `.env`의 user ID와 chat ID가 모두 맞는 업데이트만 처리합니다.
+ChatKJB는 `.env`의 허용 user ID와 chat ID가 모두 맞는 업데이트만 처리합니다.
 
 ## 환경 파일 만들기
 
@@ -270,6 +270,12 @@ TELEGRAM_ALLOWED_USER_ID=...
 TELEGRAM_CHAT_ID=-100...
 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 GEMINI_API_KEY=...
+```
+
+두 Telegram 계정에서 같은 그룹을 쓰려면 쉼표로 추가 허용 ID를 등록합니다.
+
+```dotenv
+TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 ```
 
 Claude OAuth 토큰은 다음 명령으로 설정할 수 있습니다.
