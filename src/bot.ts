@@ -303,6 +303,16 @@ function defaultsEffortKeyboard(defaults: SessionDefaults, catalog: ModelCatalog
   return keyboard;
 }
 
+function defaultsTokenKeyboard(provider: "claude" | "codex", currentIndex: number, count: number): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (let index = 0; index < count; index += 1) {
+    const mark = index === currentIndex ? "✅ " : "";
+    keyboard.text(`${mark}#${index + 1}`, `sett:${provider}:${index}`);
+    if (index < count - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
 function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): string {
   if (defaults.provider === "codex") {
     return `Codex · ${codexModelLabel(catalog, defaults.codexModel)} · reasoning ${codexReasoningLabel(defaults.codexReasoning)}`;
@@ -1976,6 +1986,51 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply("승인되어 후속 작업을 시작했습니다.");
   });
 
+  // 새 세션 기본값 패널: 토큰 선택. sett:claude|codex:<0-based-index>
+  bot.callbackQuery(/^sett:/, async (ctx) => {
+    const rest = ctx.callbackQuery.data.slice("sett:".length);
+    const sep = rest.indexOf(":");
+    const provider = rest.slice(0, sep);
+    const index = Number.parseInt(rest.slice(sep + 1), 10);
+    const pendingKey = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
+    const pending = pendingStarts.get(pendingKey);
+
+    if (provider === "claude") {
+      if (!Number.isInteger(index) || index < 0 || index >= config.claudeCodeOauthTokens.length) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 Claude 토큰입니다.", show_alert: true });
+        return;
+      }
+      const defaults = store.updateSessionDefaults({ claudeTokenIndex: index });
+      if (pending && (pending.provider ?? "claude") === "claude") {
+        pendingStarts.set(pendingKey, { ...pending, claudeTokenIndex: index });
+      }
+      await ctx.answerCallbackQuery({ text: `Claude 토큰 #${index + 1} 선택` });
+      await ctx.reply(`새 Claude 세션 기본 토큰: #${index + 1}`, {
+        reply_markup: defaultPanelKeyboard(defaults)
+      });
+      return;
+    }
+
+    if (provider === "codex") {
+      if (!Number.isInteger(index) || index < 0 || index >= config.codexAccountHomes.length) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 Codex 토큰입니다.", show_alert: true });
+        return;
+      }
+      const codexHome = config.codexAccountHomes[index] ?? null;
+      const defaults = store.updateSessionDefaults({ codexHome });
+      if (pending && (pending.provider ?? "claude") === "codex") {
+        pendingStarts.set(pendingKey, { ...pending, codexHome });
+      }
+      await ctx.answerCallbackQuery({ text: `Codex 토큰 #${index + 1} 선택` });
+      await ctx.reply(`새 Codex 세션 기본 토큰: #${index + 1}`, {
+        reply_markup: defaultPanelKeyboard(defaults)
+      });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: "지원하지 않는 토큰 선택입니다.", show_alert: true });
+  });
+
   // 새 세션 기본값 패널: 모델 선택. setm:<provider>:<id>
   bot.callbackQuery(/^setm:/, async (ctx) => {
     const rest = ctx.callbackQuery.data.slice("setm:".length);
@@ -2247,15 +2302,8 @@ export function createBot(config: AppConfig, store: StateStore) {
         return;
       }
       const currentIndex = selectedClaudeTokenIndex(defaults.claudeTokenIndex, config.claudeCodeOauthTokens.length);
-      const nextIndex = (Math.max(0, currentIndex) + 1) % config.claudeCodeOauthTokens.length;
-      const updated = store.updateSessionDefaults({ claudeTokenIndex: nextIndex });
-      const pendingKey = pendingStartKey(config.allowedUserId, ctx.message?.message_thread_id);
-      const pending = pendingStarts.get(pendingKey);
-      if (pending && (pending.provider ?? "claude") === "claude") {
-        pendingStarts.set(pendingKey, { ...pending, claudeTokenIndex: nextIndex });
-      }
-      await ctx.reply(`새 Claude 세션 기본 토큰: #${nextIndex + 1}`, {
-        reply_markup: defaultPanelKeyboard(updated)
+      await ctx.reply("새 세션 기본 Claude 토큰을 선택하세요.", {
+        reply_markup: defaultsTokenKeyboard("claude", currentIndex, config.claudeCodeOauthTokens.length)
       });
       return;
     }
@@ -2272,16 +2320,8 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     const currentIndex = selectedCodexAccountIndex(defaults.codexHome, config.codexAccountHomes);
-    const nextIndex = (Math.max(0, currentIndex) + 1) % config.codexAccountHomes.length;
-    const nextHome = config.codexAccountHomes[nextIndex] ?? null;
-    const updated = store.updateSessionDefaults({ codexHome: nextHome });
-    const pendingKey = pendingStartKey(config.allowedUserId, ctx.message?.message_thread_id);
-    const pending = pendingStarts.get(pendingKey);
-    if (pending && (pending.provider ?? "claude") === "codex") {
-      pendingStarts.set(pendingKey, { ...pending, codexHome: nextHome });
-    }
-    await ctx.reply(`새 Codex 세션 기본 토큰: #${nextIndex + 1}`, {
-      reply_markup: defaultPanelKeyboard(updated)
+    await ctx.reply("새 세션 기본 Codex 토큰을 선택하세요.", {
+      reply_markup: defaultsTokenKeyboard("codex", currentIndex, config.codexAccountHomes.length)
     });
   });
 

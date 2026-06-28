@@ -424,7 +424,7 @@ describe("/new defaults fast path", () => {
     expect(created?.codexHome).toBeDefined();
   });
 
-  it("cycles the Codex token from the sixth defaults panel slot", async () => {
+  it("shows Codex token choices from the sixth defaults panel slot", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-codex-homes-"));
     rmSync(directory, { recursive: true, force: true });
     const codexHomes = [join(directory, "codex-a"), join(directory, "codex-b")];
@@ -433,19 +433,48 @@ describe("/new defaults fast path", () => {
 
     await bot.handleUpdate(textMessage("🔑 토큰: #1"));
 
+    expect(store.getSessionDefaults().codexHome).toBe(codexHomes[0]);
+    const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
+    expect(reply?.text).toContain("새 세션 기본 Codex 토큰을 선택하세요");
+    expect(JSON.stringify(reply?.reply_markup)).toContain("sett:codex:1");
+  });
+
+  it("selects a Codex token from the token choices", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-codex-homes-"));
+    rmSync(directory, { recursive: true, force: true });
+    const codexHomes = [join(directory, "codex-a"), join(directory, "codex-b")];
+    const { bot, store, calls } = botSetup({ codexAccountHomes: codexHomes });
+    store.updateSessionDefaults({ provider: "codex", codexHome: codexHomes[0]! });
+
+    await bot.handleUpdate(callbackUpdate("sett:codex:1"));
+
     expect(store.getSessionDefaults().codexHome).toBe(codexHomes[1]);
     const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
     expect(reply?.text).toContain("새 Codex 세션 기본 토큰: #2");
     expect(JSON.stringify(reply?.reply_markup)).toContain("🔑 토큰: #2");
   });
 
-  it("cycles the Claude token from the sixth defaults panel slot", async () => {
+  it("shows Claude token choices from the sixth defaults panel slot", async () => {
     const { bot, store, calls } = botSetup({
       claudeCodeOauthTokens: ["test-oauth-token-a", "test-oauth-token-b"]
     });
     store.updateSessionDefaults({ provider: "claude", claudeTokenIndex: 0 });
 
     await bot.handleUpdate(textMessage("🔑 토큰: #1"));
+
+    expect(store.getSessionDefaults().claudeTokenIndex).toBe(0);
+    const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
+    expect(reply?.text).toContain("새 세션 기본 Claude 토큰을 선택하세요");
+    expect(JSON.stringify(reply?.reply_markup)).toContain("sett:claude:1");
+  });
+
+  it("selects a Claude token from the token choices", async () => {
+    const { bot, store, calls } = botSetup({
+      claudeCodeOauthTokens: ["test-oauth-token-a", "test-oauth-token-b"]
+    });
+    store.updateSessionDefaults({ provider: "claude", claudeTokenIndex: 0 });
+
+    await bot.handleUpdate(callbackUpdate("sett:claude:1"));
 
     expect(store.getSessionDefaults().claudeTokenIndex).toBe(1);
     const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
