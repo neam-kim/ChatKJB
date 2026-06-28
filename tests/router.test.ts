@@ -76,7 +76,9 @@ describe("LLM-Wiki 경로", () => {
   });
 
   it("WIKI_VAULT가 없으면 기본 경로로 폴백한다", () => {
-    expect(wikiVaultPath({} as NodeJS.ProcessEnv)).toContain("LLM-Wiki");
+    expect(wikiVaultPath({} as NodeJS.ProcessEnv)).toBe(
+      "/Volumes/homes/mac_neam96/AI/LLM-Wiki"
+    );
   });
 
   it("강점 사전 경로는 vault 아래 _meta/agent-strengths.md다", () => {

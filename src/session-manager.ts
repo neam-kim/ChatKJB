@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -11,7 +11,6 @@ import {
   type Options,
   type Query,
   type ThinkingConfig,
-  type SDKUserMessage,
   type SDKMessage
 } from "@anthropic-ai/claude-agent-sdk";
 import { Codex, type ThreadItem, type Usage as CodexSdkUsage } from "@openai/codex-sdk";
@@ -35,8 +34,7 @@ import {
   normalizeGoalCondition,
   parseGoalChecks,
   parseGoalVerdict,
-  runGoalChecks,
-  type CheckRunResult
+  runGoalChecks
 } from "./goal-checks.js";
 import type { RiskLevel } from "./orchestration/types.js";
 import {
@@ -53,12 +51,9 @@ import {
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING,
-  DEFAULT_THINKING_LEVEL,
   type CodexReasoningEffort,
   type ModelCatalog,
-  modelLabel,
-  normalizeThinkingForModel,
-  thinkingLabel
+  normalizeThinkingForModel
 } from "./model-catalog.js";
 import type {
   MessageTransport,
@@ -71,9 +66,94 @@ import type {
 } from "./types.js";
 import {
   mergeUsageSnapshots,
-  snapshotFromRateLimitInfo,
-  snapshotFromUsageResponse
+  snapshotFromRateLimitInfo
 } from "./usage.js";
+import {
+  hasUsageWindows,
+  readUsageSnapshot
+} from "./session-usage.js";
+// 한도/사용량 파서는 session-usage.ts로 이동했으나 기존 import 경로 호환을 위해 재export한다.
+export {
+  isNoRolloutError,
+  isOverloadedError,
+  isRateLimitError,
+  parseResetTimestamp,
+  readUsageSnapshot,
+  snapshotFromRateLimitError,
+  hasUsageWindows,
+  type TokenUsageLookupResult,
+  type UsageLookupResult
+} from "./session-usage.js";
+import {
+  isNoRolloutError,
+  isOverloadedError,
+  isRateLimitError,
+  snapshotFromRateLimitError,
+  type TokenUsageLookupResult,
+  type UsageLookupResult
+} from "./session-usage.js";
+// 프롬프트·지침 빌더는 session-prompts.ts로 이동했으나 기존 import 경로 호환을 위해 재export한다.
+export {
+  buildLeanInstructions,
+  buildPublicProgressInstructions,
+  buildPermissionModeInstructions,
+  buildCompactCommand,
+  buildRolloverSummaryPrompt,
+  buildGoalPrompt,
+  buildGoalCheckPrompt,
+  buildMemoryPrompt,
+  buildUserMessage,
+  buildCodexSteeredPrompt,
+  buildLimitResumePrompt,
+  loadProjectInstructions,
+  loadGlobalInstructions,
+  resultSummary
+} from "./session-prompts.js";
+import {
+  assistantBlocks,
+  buildCodexSteeredPrompt,
+  buildCompactCommand,
+  buildGoalCheckPrompt,
+  buildGoalPrompt,
+  buildLeanInstructions,
+  buildLimitResumePrompt,
+  buildPermissionModeInstructions,
+  buildProviderBootstrap,
+  buildPublicProgressInstructions,
+  buildRolloverSummaryPrompt,
+  buildUserMessage,
+  loadGlobalInstructions,
+  loadProjectInstructions,
+  resultSummary,
+  resultText
+} from "./session-prompts.js";
+// 실행 환경·권한 매핑 빌더는 session-environment.ts로 이동했으나 기존 import 경로 호환을 위해 재export한다.
+export {
+  buildCodexEnvironment,
+  requireCodexSubscriptionAuth,
+  codexSharedResourceConfig,
+  codexSandboxMode,
+  agyPermissionArgs,
+  buildClaudeEnvironment
+} from "./session-environment.js";
+import {
+  buildClaudeEnvironment,
+  buildCodexEnvironment,
+  codexSandboxMode,
+  codexSharedResourceConfig,
+  requireCodexSubscriptionAuth
+} from "./session-environment.js";
+// 스트리밍 수집기·입력 큐는 session-collectors.ts로 이동했으나 기존 import 경로 호환을 위해 재export한다.
+export {
+  ProgressiveParagraphCollector,
+  StreamingTextCollector,
+  MessageQueue
+} from "./session-collectors.js";
+import {
+  MessageQueue,
+  ProgressiveParagraphCollector,
+  StreamingTextCollector
+} from "./session-collectors.js";
 import { AgyInteractiveSession, type AgyAttachment, type AgyLiveStatus } from "./agy-interactive.js";
 import {
   buildJudgePrompt,
@@ -234,100 +314,6 @@ export function extractAgyAttachments(prompt: string): AgyAttachment[] {
   return attachments;
 }
 
-export function buildLeanInstructions(enabled: boolean): string {
-  if (!enabled) return "";
-  return [
-    "[LEAN_IMPLEMENTATION_POLICY]",
-    "구현 전에 아래 순서에서 처음으로 충분한 해법을 선택한다.",
-    "1. 실제로 만들 필요가 없는 요구라면 만들지 않고 이유를 짧게 설명한다.",
-    "2. 표준 라이브러리로 해결되면 그것을 사용한다.",
-    "3. 운영체제, 런타임, 브라우저, DB 등 플랫폼 기본 기능으로 해결되면 그것을 사용한다.",
-    "4. 이미 설치된 의존성으로 해결되면 새 의존성을 추가하지 않는다.",
-    "5. 그 다음에만 동작하는 최소 범위의 코드를 작성한다.",
-    "요청하지 않은 추상화, 미래용 확장점, 중복 래퍼, 불필요한 설정과 의존성을 만들지 않는다.",
-    "단, 신뢰 경계 입력 검증, 보안, 데이터 손실 방지 오류 처리, 접근성, 사용자가 명시한 요구사항과 실행 가능한 검증은 축소하지 않는다."
-  ].join("\n");
-}
-
-export function buildPublicProgressInstructions(): string {
-  return [
-    "작업 중에는 내부 사고 과정이나 숨은 reasoning을 노출하지 마십시오.",
-    "대신 주요 단계의 시작, 확인된 중간 결과, 다음 행동을 공개 가능한 짧은 진행 설명으로 작성하십시오.",
-    "각 진행 설명은 독립된 문단으로 출력하고, 실제 작업 결과와 최종 답변도 명확히 구분하십시오."
-  ].join("\n");
-}
-
-export function buildPermissionModeInstructions(mode: SessionRecord["permissionMode"]): string {
-  if (mode === "plan") {
-    return "현재 권한 모드는 plan이다. 파일이나 외부 상태를 변경하지 말고 조사와 실행 계획만 제시한다.";
-  }
-  if (mode === "default") {
-    return "현재 권한 모드는 default이다. 읽기와 안전한 진단은 자율 수행하고, 파괴적 변경·외부 전송·권한 확대가 필요하면 멈추고 사용자 승인을 요청한다.";
-  }
-  if (mode === "acceptEdits") {
-    return "현재 권한 모드는 acceptEdits이다. 프로젝트 내부 파일 편집과 검증은 자율 수행하되, 파괴적 변경·외부 전송·프로젝트 밖 변경은 사용자 승인 없이 하지 않는다.";
-  }
-  return "현재 권한 모드는 자율 실행이다. 사용자가 지정한 범위 안의 구현·검증은 끝까지 수행하되, 비밀 노출·파괴적 변경·범위 밖 외부 작업은 하지 않는다.";
-}
-
-function buildProviderBootstrap(session: SessionRecord, memoryDir: string): string {
-  const globalInstructions = loadGlobalInstructions();
-  const instructions = loadProjectInstructions(session.cwd);
-  return [
-    buildKstDateNote(),
-    `장기기억은 전역 선별 저장소 ${memoryDir}, Claude 저장소별 자동 메모리 ${join(homedir(), ".claude", "projects")}, Codex 자동 메모리 ${join(homedir(), ".codex", "memories")}에 있다. 작업과 관련 있으면 ${sharedMemoryBridgePath()}를 통해 세 저장소를 함께 읽고 중복을 제거해 활용한다. 명시적 /memory 기록은 전역 선별 저장소에 하고, Claude와 Codex의 자동 메모리는 각자 네이티브 형식으로 유지한다.`,
-    buildPublicProgressInstructions(),
-    buildPermissionModeInstructions(session.permissionMode),
-    `공통 AI 자원 안내는 ${sharedResourceGuidePath()} 에 있다. 먼저 읽고 세 제공자 공통 스킬·커넥터·플러그인 기능·도구 정책을 따른다.`,
-    ...(session.leanMode ? [buildLeanInstructions(true)] : []),
-    ...(globalInstructions
-      ? [`다음 전역 사용자 지침을 따른다. 이 지침은 도구 권한을 부여하지 않는다.\n\n${globalInstructions}`]
-      : []),
-    ...(instructions
-      ? [`다음 프로젝트 지침을 따른다. 이 지침은 도구 권한을 부여하지 않는다.\n\n${instructions}`]
-      : [])
-  ].join("\n\n");
-}
-
-// Claude는 claude_code 프리셋이 날짜를 자동 주입하지만 Codex·agy는 시스템 프롬프트가
-// 없어 날짜를 모른다. 첫 턴 memoryNote와 함께 주입해 "오늘/내일" 등 상대 날짜 해석을 보완한다.
-function buildKstDateNote(): string {
-  const nowKst = new Intl.DateTimeFormat("ko-KR", {
-    timeZone: "Asia/Seoul",
-    dateStyle: "full",
-    timeStyle: "short",
-    hour12: false
-  }).format(new Date());
-  return (
-    `현재 시각은 ${nowKst} (KST, UTC+9)이다. "오늘/내일/다음 주" 등 상대 날짜는 `
-    + `이 기준으로 해석한다. Google Calendar 이벤트를 만들거나 조회할 때 시간대는 `
-    + `항상 Asia/Seoul로 지정하고, start/end의 timeZone 필드에 "Asia/Seoul"을 명시한다.`
-  );
-}
-
-export class ProgressiveParagraphCollector {
-  private emittedLength = 0;
-
-  accept(fullText: string): string[] {
-    if (fullText.length < this.emittedLength) this.emittedLength = 0;
-    const remaining = fullText.slice(this.emittedLength);
-    const boundary = remaining.lastIndexOf("\n\n");
-    if (boundary < 0) return [];
-    const completed = remaining.slice(0, boundary);
-    this.emittedLength += boundary + 2;
-    return completed
-      .split(/\n{2,}/)
-      .map((paragraph) => paragraph.trim())
-      .filter(Boolean);
-  }
-
-  finish(fullText: string): string[] {
-    const completed = this.accept(`${fullText}\n\n`);
-    this.emittedLength = fullText.length;
-    return completed;
-  }
-}
-
 export function agyRequestsProceed(text: string): boolean {
   return /\bProceed\b[\s\S]{0,100}(?:버튼|승인)/iu.test(text)
     || /(?:진행|승인)[\s\S]{0,50}버튼/u.test(text);
@@ -480,17 +466,6 @@ interface SilentReadOnlyOptions {
   codexReasoningOverride?: CodexReasoningEffort;
 }
 
-function assistantBlocks(message: SDKMessage): Array<Record<string, unknown>> {
-  if (message.type !== "assistant" || !Array.isArray(message.message.content)) return [];
-  return message.message.content as unknown as Array<Record<string, unknown>>;
-}
-
-function resultText(message: SDKMessage): string {
-  if (message.type !== "result") return "";
-  if (message.subtype === "success") return message.result;
-  return message.errors.join("\n");
-}
-
 function codexProgress(item: ThreadItem): string | null {
   if (item.type === "command_execution") {
     return `Codex 명령 완료: ${item.command.split("\n")[0]?.slice(0, 180) ?? ""}`;
@@ -507,489 +482,6 @@ function codexProgress(item: ThreadItem): string | null {
   if (item.type === "mcp_tool_call") return `Codex MCP 완료: ${item.server}/${item.tool}`;
   if (item.type === "error") return `Codex 오류: ${item.message.slice(0, 180)}`;
   return null;
-}
-
-export function buildCodexEnvironment(
-  targetHome?: string,
-  source: NodeJS.ProcessEnv = process.env
-): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const [key, value] of Object.entries(source)) {
-    if (value === undefined) continue;
-    if ([
-      "OPENAI_API_KEY",
-      "CODEX_API_KEY",
-      "OPENAI_BASE_URL",
-      "OPENAI_API_BASE"
-    ].includes(key)) {
-      continue;
-    }
-    result[key] = value;
-  }
-  // 다중 계정: 선택된 계정의 CODEX_HOME으로 강제 덮어쓴다. SDK에 env를 통째로 넘기면
-  // 자식 프로세스는 process.env를 상속하지 않으므로, 여기서 지정한 값이 인증 디렉터리를 결정한다.
-  if (targetHome && targetHome.trim()) {
-    result["CODEX_HOME"] = targetHome;
-  }
-  return result;
-}
-
-export function requireCodexSubscriptionAuth(
-  home?: string,
-  source: NodeJS.ProcessEnv = process.env
-): void {
-  // 명시된 계정 홈이 있으면 그 홈을, 없으면 기존 단일 계정 해석(CODEX_HOME 또는 ~/.codex)을 검사한다.
-  const codexHome = home?.trim() || source.CODEX_HOME?.trim() || join(homedir(), ".codex");
-  const authPath = join(codexHome, "auth.json");
-  let auth: unknown;
-  try {
-    auth = JSON.parse(readFileSync(authPath, "utf8")) as unknown;
-  } catch {
-    throw new Error(
-      "Codex 구독 로그인을 확인할 수 없습니다. 로컬 Codex CLI에서 Sign in with ChatGPT를 완료하세요."
-    );
-  }
-  if (
-    typeof auth !== "object"
-    || auth === null
-    || Array.isArray(auth)
-    || (auth as Record<string, unknown>)["auth_mode"] !== "chatgpt"
-  ) {
-    throw new Error(
-      "Codex API 키 인증은 허용하지 않습니다. Codex CLI를 ChatGPT 구독 계정으로 로그인하세요."
-    );
-  }
-}
-
-function codexSharedResourceConfig() {
-  return {
-    features: { memories: true },
-    memories: {
-      generate_memories: true,
-      use_memories: true
-    }
-  };
-}
-
-function codexSandboxMode(mode: SessionRecord["permissionMode"]):
-  "read-only" | "workspace-write" | "danger-full-access" {
-  if (mode === "plan") return "read-only";
-  if (mode === "default" || mode === "acceptEdits") return "workspace-write";
-  return "danger-full-access";
-}
-
-function agyPermissionArgs(mode: SessionRecord["permissionMode"]): string[] {
-  return mode === "auto" || mode === "dontAsk"
-    ? ["--dangerously-skip-permissions"]
-    : ["--sandbox", "--dangerously-skip-permissions"];
-}
-
-export class StreamingTextCollector {
-  private readonly blocks = new Map<number, string>();
-
-  accept(message: SDKMessage): string | null {
-    if (message.type !== "stream_event" || message.parent_tool_use_id !== null) return null;
-    const event = message.event;
-    if (event.type === "content_block_start") {
-      if (event.content_block.type === "text") {
-        this.blocks.set(event.index, event.content_block.text);
-      }
-      return null;
-    }
-    if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-      this.blocks.set(event.index, (this.blocks.get(event.index) ?? "") + event.delta.text);
-      return null;
-    }
-    if (event.type !== "content_block_stop") return null;
-
-    const text = this.blocks.get(event.index)?.trim() ?? "";
-    this.blocks.delete(event.index);
-    return text || null;
-  }
-}
-
-export function buildCompactCommand(focus?: string): string {
-  const clean = focus?.replace(/\s+/g, " ").trim().slice(0, 500);
-  return clean ? `/compact ${clean}` : "/compact";
-}
-
-export function buildRolloverSummaryPrompt(focus?: string): string {
-  const clean = focus?.replace(/\s+/g, " ").trim().slice(0, 500);
-  return [
-    "현재 대화와 작업 문맥을 새 세션이 그대로 이어받을 수 있도록 한국어 인계 요약으로 압축하십시오.",
-    "목표, 사용자 의도, 결정사항, 수정 파일, 실행한 검증, 현재 상태, 남은 일, 위험과 주의점을 포함하십시오.",
-    "추측하지 말고 실제 확인된 내용만 쓰며 요약 본문만 출력하십시오.",
-    ...(clean ? [`특히 다음 내용을 보존하십시오: ${clean}`] : [])
-  ].join("\n");
-}
-
-/**
- * /goal 자동 진행 턴에 전달할 작업 프롬프트. reason은 직전 평가에서 무엇이 남았는지.
- * 목표 원문에 포함된 `check:` 결정론 게이트 줄은 작업 모델에게 노출하지 않는다(평가 전용).
- * 사람용 설명(description)만 목표로 제시한다.
- */
-export function buildGoalPrompt(condition: string, reason?: string): string {
-  const { description, checks } = parseGoalChecks(condition);
-  const clean = (description || condition).replace(/\s+/g, " ").trim();
-  const checkNote = checks.length > 0
-    ? `\n(완료 판정은 다음 명령으로 객관 검증됩니다: ${checks.join(" ; ")})`
-    : "";
-  const base = `[GOAL] 다음 목표가 완전히 충족될 때까지 작업을 진행하세요: ${clean}${checkNote}`;
-  const tail = reason
-    ? `\n직전 턴 평가에서 아직 충족되지 않았습니다: ${reason}\n남은 부분을 끝까지 완료하세요.`
-    : "";
-  return `${base}${tail}`;
-}
-
-/**
- * /goal 충족 여부를 빠른 모델(판관)로 판정시키기 위한 읽기 전용 프롬프트.
- * Tier 0 결정론 검증 원칙에 따라, 결정론적 게이트(`check:` 명령) 실행 결과가 있으면
- * 그 사실을 packet으로 함께 전달해 판관이 사실을 추측하지 않게 한다. description은 목표에서
- * check 줄을 뺀 사람용 텍스트다.
- */
-export function buildGoalCheckPrompt(
-  description: string,
-  checkRun?: CheckRunResult
-): string {
-  const clean = description.replace(/\s+/g, " ").trim();
-  const lines = [
-    "다음 목표가 현재 저장소 상태에서 이미 충족되었는지 읽기 전용으로만 확인해 판정하세요.",
-    "파일을 수정하지 말고, 필요한 파일·명령 결과를 확인한 뒤 마지막 줄에 정확히 아래 한 형식으로만 답하세요.",
-    "GOAL_MET: <한 줄 근거>",
-    "GOAL_UNMET: <무엇이 남았는지 한 줄>",
-    "",
-    `목표: ${clean || "(자유형 목표)"}`
-  ];
-  if (checkRun && checkRun.results.length > 0) {
-    lines.push(
-      "",
-      "[결정론적 검증 결과] 아래는 이미 실행된 명령의 객관적 결과입니다. 이 사실은 추측하지 말고 그대로 신뢰하세요."
-    );
-    for (const result of checkRun.results) {
-      const status = result.passed ? "PASS" : "FAIL";
-      lines.push(`- ${status}: ${result.command}`);
-      if (!result.passed && result.outputTail) {
-        lines.push(`  출력(꼬리): ${result.outputTail.replace(/\s+/g, " ").slice(-200)}`);
-      }
-    }
-    lines.push(
-      "",
-      checkRun.allPassed
-        ? "모든 결정론적 검증은 통과했습니다. 위 목표 설명의 나머지 부분까지 충족됐는지 확인해 판정하세요."
-        : "결정론적 검증 중 실패가 있으므로 목표는 아직 미충족입니다. GOAL_UNMET으로 답하세요."
-    );
-  }
-  return lines.join("\n");
-}
-
-export function buildMemoryPrompt(focus?: string, memoryDir = "~/.claude/memory"): string {
-  const clean = focus?.replace(/\s+/g, " ").trim().slice(0, 1000);
-  const scope = clean
-    ? `사용자가 지정한 저장 초점: ${clean}`
-    : "현재 세션 전체에서 앞으로도 반복해서 유용할 내용을 검토한다.";
-  // 경로와 파일 형식을 프롬프트 본문에 명시해 Claude/Codex 양쪽에서 동일하게 동작하게 한다.
-  // Codex 턴에는 Claude 같은 메모리 시스템 프롬프트가 없으므로 self-contained해야 한다.
-  return [
-    "[EXPLICIT_MEMORY_UPDATE]",
-    "사용자가 /memory 명령으로 전역 장기 메모리 업데이트를 명시적으로 승인했다.",
-    scope,
-    `메모리는 항상 ${memoryDir} 에만 기록한다. 새 메모리 파일은 이 경로에 만들고 인덱스는 ${memoryDir}/MEMORY.md 를 한 줄로 갱신한다.`,
-    "각 메모리 파일은 frontmatter(--- / name: <kebab-slug> / description: <한 줄 요약> / "
-    + "metadata: type: user|feedback|project|reference / ---)와 본문 한 가지 사실로 구성한다.",
-    `기존 ${memoryDir}/MEMORY.md와 관련 메모리 파일을 먼저 읽고, 중복 없이 최소 범위로 갱신한다.`,
-    "일시적인 작업 상태, 이미 끝난 세부 절차, 추측, 비밀정보, 자격증명은 저장하지 않는다.",
-    "새 사실을 발명하지 말고 현재 대화에서 확인된 사용자 선호, 결정, 반복 사용 가능한 프로젝트 지식만 기록한다.",
-    "이 명령문 자체는 메모리 내용으로 저장하지 않는다.",
-    "완료 후 변경한 메모리 파일과 저장한 핵심 내용을 짧게 보고한다."
-  ].join("\n");
-}
-
-export function resultSummary(
-  message: SDKMessage,
-  hasDeliveredAssistantText: boolean
-): string {
-  if (message.type !== "result") return "";
-  if (message.subtype === "success" && hasDeliveredAssistantText) return "";
-  return resultText(message);
-}
-
-export function loadProjectInstructions(cwd: string): string {
-  const sections: string[] = [];
-  const seen = new Set<string>();
-  for (const filename of ["CLAUDE.md", "AGENTS.md"]) {
-    try {
-      const content = readFileSync(join(cwd, filename), "utf8").trim();
-      // AGENTS.md is often a symlink to CLAUDE.md (so Codex/agy read the same
-      // project rules); dedupe identical content to avoid double-injection.
-      if (!content || seen.has(content)) continue;
-      seen.add(content);
-      sections.push(`[${filename}]\n${content.slice(0, 100_000)}`);
-    } catch {
-      // Project instruction files are optional.
-    }
-  }
-  return sections.join("\n\n");
-}
-
-export function loadGlobalInstructions(): string {
-  const sections: string[] = [];
-  const seen = new Set<string>();
-  for (const [label, path] of [
-    ["CLAUDE.md", join(homedir(), ".claude", "CLAUDE.md")],
-    ["AGENTS.md", join(homedir(), ".codex", "AGENTS.md")]
-  ] as const) {
-    try {
-      const content = readFileSync(path, "utf8").trim();
-      if (!content || seen.has(content)) continue;
-      seen.add(content);
-      sections.push(`[${label}]\n${content.slice(0, 100_000)}`);
-    } catch {
-      // Global instruction files are optional.
-    }
-  }
-  return sections.join("\n\n");
-}
-
-async function readUsageSnapshot(
-  sdkQuery: ReturnType<typeof query>,
-  timeoutMs = 5000
-): Promise<UsageSnapshot | null> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      sdkQuery
-        .usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET()
-        .then((usage) => snapshotFromUsageResponse(usage)),
-      new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), timeoutMs);
-      })
-    ]);
-  } catch {
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-export interface UsageLookupResult {
-  snapshot: UsageSnapshot | null;
-  error: string | null;
-}
-
-export interface TokenUsageLookupResult extends UsageLookupResult {
-  tokenIndex: number;
-}
-
-function hasUsageWindows(snapshot: UsageSnapshot): boolean {
-  return Boolean(
-    snapshot.fiveHour
-    || snapshot.sevenDay
-    || snapshot.sevenDayOpus
-    || snapshot.sevenDaySonnet
-    || snapshot.agentSdkWeekly
-    || snapshot.extraUsage
-  );
-}
-
-function datePartsInTimeZone(timestamp: number, timeZone: string): {
-  year: number;
-  month: number;
-  day: number;
-  hour: number;
-  minute: number;
-  second: number;
-} {
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23"
-  });
-  const values = Object.fromEntries(
-    formatter
-      .formatToParts(new Date(timestamp))
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, Number(part.value)])
-  );
-  return {
-    year: values.year ?? 0,
-    month: values.month ?? 0,
-    day: values.day ?? 0,
-    hour: values.hour ?? 0,
-    minute: values.minute ?? 0,
-    second: values.second ?? 0
-  };
-}
-
-function zonedDateTimeToEpoch(
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number,
-  timeZone: string
-): number {
-  const targetAsUtc = Date.UTC(year, month - 1, day, hour, minute);
-  let candidate = targetAsUtc;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const actual = datePartsInTimeZone(candidate, timeZone);
-    const actualAsUtc = Date.UTC(
-      actual.year,
-      actual.month - 1,
-      actual.day,
-      actual.hour,
-      actual.minute,
-      actual.second
-    );
-    const correction = targetAsUtc - actualAsUtc;
-    candidate += correction;
-    if (correction === 0) break;
-  }
-  return candidate;
-}
-
-function normalizeResetTimeZone(value: string | undefined): string {
-  const clean = value?.trim();
-  if (!clean) return "Asia/Seoul";
-  const aliases: Record<string, string> = {
-    KST: "Asia/Seoul",
-    UTC: "UTC",
-    GMT: "UTC"
-  };
-  const timeZone = aliases[clean.toUpperCase()] ?? clean;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
-    return timeZone;
-  } catch {
-    return "Asia/Seoul";
-  }
-}
-
-function nextResetInTimeZone(
-  hour: number,
-  minute: number,
-  timeZone: string,
-  now = Date.now()
-): string {
-  const current = datePartsInTimeZone(now, timeZone);
-  let reset = zonedDateTimeToEpoch(
-    current.year,
-    current.month,
-    current.day,
-    hour,
-    minute,
-    timeZone
-  );
-  if (reset <= now) {
-    const nextDate = new Date(Date.UTC(current.year, current.month - 1, current.day + 1));
-    reset = zonedDateTimeToEpoch(
-      nextDate.getUTCFullYear(),
-      nextDate.getUTCMonth() + 1,
-      nextDate.getUTCDate(),
-      hour,
-      minute,
-      timeZone
-    );
-  }
-  return new Date(reset).toISOString();
-}
-
-const RESET_MONTHS: Record<string, number> = {
-  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
-  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
-};
-
-// 한도 메시지에서 회복 시각(ISO)을 파싱한다. 지원하는 표현:
-//  - Claude 5시간 한도: "resets 2pm (Asia/Seoul)", "resets 4:40pm"
-//  - Claude 주간 한도:  "resets Jun 25 at 9am (Asia/Seoul)" (연도 생략 → 가까운 미래로 보정)
-//  - Codex 사용 한도:   "...try again at Jun 27th, 2026 3:57 PM.", "...try again at 5:28 PM."
-// 시간만 주어지면 다음 도래 시각, 날짜가 함께 오면 그 절대 시각을 쓴다. 시간대 미표기 시
-// 로컬(Asia/Seoul)로 가정한다(Codex/Claude 모두 사용자 로컬 표기를 따른다).
-export function parseResetTimestamp(message: string, capturedAt = Date.now()): string | null {
-  const anchor = message.match(/(?:resets?|try again at)\s+(.+?)(?:[.\n]|$)/i);
-  const tail = anchor?.[1];
-  if (!tail) return null;
-  const detail = tail.match(
-    /(?:(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})?\s*(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\))?/i
-  );
-  if (!detail) return null;
-  const [, monthName, dayStr, yearStr, hourStr, minuteStr, meridiem] = detail;
-  let hour = Number(hourStr);
-  const minute = minuteStr ? Number(minuteStr) : 0;
-  const ampm = meridiem?.toLowerCase();
-  if (ampm === "pm" && hour < 12) hour += 12;
-  if (ampm === "am" && hour === 12) hour = 0;
-  if (hour > 23) return null;
-  const timeZone = normalizeResetTimeZone(detail[7]);
-
-  const month = monthName ? RESET_MONTHS[monthName.toLowerCase().slice(0, 3)] : undefined;
-  if (monthName && month !== undefined) {
-    const day = Number(dayStr);
-    const year = yearStr ? Number(yearStr) : datePartsInTimeZone(capturedAt, timeZone).year;
-    let reset = zonedDateTimeToEpoch(year, month, day, hour, minute, timeZone);
-    // 연도가 생략된 형식(예: Claude 주간 한도 "resets Jun 25 at 9am")에서 이미 지난
-    // 날짜면 다음 해로 넘긴다. 연도가 명시된 Codex 메시지는 그대로 쓴다.
-    if (!yearStr && reset <= capturedAt) {
-      reset = zonedDateTimeToEpoch(year + 1, month, day, hour, minute, timeZone);
-    }
-    return new Date(reset).toISOString();
-  }
-  return nextResetInTimeZone(hour, minute, timeZone, capturedAt);
-}
-
-export function snapshotFromRateLimitError(error: unknown, capturedAt = Date.now()): UsageSnapshot | null {
-  const message = error instanceof Error ? error.message : String(error);
-  if (!isRateLimitError(message)) return null;
-  return {
-    capturedAt,
-    subscriptionType: null,
-    rateLimitsAvailable: true,
-    fiveHour: {
-      utilization: 100,
-      resetsAt: parseResetTimestamp(message, capturedAt)
-    }
-  };
-}
-
-// 한도/요금 한계로 턴이 실패했는지 휴리스틱으로 판별한다. utilization 100% 이벤트가
-// 오기 전에 곧장 에러로 끝나는 경우를 잡아 다음 세션을 다른 토큰으로 유도하기 위함이다.
-export function isRateLimitError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  return (
-    message.includes("rate limit")
-    || message.includes("rate_limit")
-    || message.includes("429")
-    || message.includes("usage limit")
-    || message.includes("quota")
-    || (message.includes("limit") && message.includes("reset"))
-  );
-}
-
-// Codex 스레드 재개(thread/resume) 시 해당 rollout 파일이 사라져 재개가 불가능한지 판별한다.
-// 계정 홈을 바꿨거나 rollout이 정리/만료된 경우 "no rollout found ... (code -32600)"로 실패하며,
-// 이때는 기존 codexThreadId를 버리고 새 스레드로 다시 시작하면 복구된다(맥락은 부트스트랩으로 보강).
-export function isNoRolloutError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  return message.includes("no rollout found") || message.includes("thread/resume failed");
-}
-
-// 일시적 서버 과부하/장애로 턴이 실패했는지 판별한다. 토큰 한도가 아니라 Anthropic
-// 백엔드 전역 과부하(529 Overloaded)나 일시 장애(5xx)이므로, 토큰을 봉인/전환하지 않고
-// 짧은 백오프 후 같은 토큰으로 같은 작업을 재시도하면 대부분 회복된다.
-export function isOverloadedError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  return (
-    message.includes("overloaded")
-    || message.includes("529")
-    || message.includes("503")
-    || message.includes("502")
-    || message.includes("service unavailable")
-    || message.includes("internal server error")
-  );
 }
 
 export function resultFailureText(
@@ -1016,66 +508,6 @@ export function resultFailureText(
   return message.subtype === "success" ? null : text || "Claude 실행이 실패했습니다.";
 }
 
-export function buildClaudeEnvironment(
-  oauthToken: string,
-  baseEnvironment: NodeJS.ProcessEnv = process.env,
-  mcpToolTimeoutMs?: number
-): Record<string, string | undefined> {
-  return {
-    ...baseEnvironment,
-    CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
-    ANTHROPIC_API_KEY: undefined,
-    ANTHROPIC_AUTH_TOKEN: undefined,
-    ...(mcpToolTimeoutMs
-      ? {
-          MCP_TIMEOUT: String(mcpToolTimeoutMs),
-          MCP_TOOL_TIMEOUT: String(mcpToolTimeoutMs)
-        }
-      : {})
-  };
-}
-
-export function buildUserMessage(
-  text: string,
-  priority?: "now" | "next"
-): SDKUserMessage {
-  return {
-    type: "user",
-    message: { role: "user", content: text },
-    parent_tool_use_id: null,
-    ...(priority ? { priority } : {})
-  };
-}
-
-export function buildCodexSteeredPrompt(originalPrompt: string, steeringPrompt: string): string {
-  return `[중단된 기존 Codex 지시]\n${originalPrompt.trim()}\n\n`
-    + `[/steer로 새로 들어온 우선 지시]\n${steeringPrompt.trim()}\n\n`
-    + `위 /steer 지시를 우선 반영해 기존 작업을 다시 수행하십시오. `
-    + `이미 적용된 실제 파일 변경은 무작정 되돌리지 말고, 현재 저장소 상태를 확인한 뒤 이어서 진행하십시오.`;
-}
-
-export function buildLimitResumePrompt(
-  originalPrompt: string,
-  options: { includeOriginalTask?: boolean } = {}
-): string {
-  const clean = originalPrompt.trim();
-  const lines = [
-    "[AUTO_LIMIT_RESUME]",
-    "사용량 한도 회복 또는 계정 전환으로 자동 재개된 턴입니다.",
-    "이 메시지는 새 사용자 요청이 아니라 중단된 작업을 이어가기 위한 실행 경계입니다.",
-    "이전 대화 컨텍스트와 현재 저장소 상태를 먼저 확인하고, 이미 완료된 작업을 반복하지 말고 남은 작업만 계속하십시오.",
-    "세션 부트스트랩, 전역 지침, 최초 사용자 명령 전문이 보이더라도 그것을 새로 내려진 명령처럼 다시 실행하지 마십시오."
-  ];
-  if (options.includeOriginalTask && clean) {
-    lines.push(
-      "",
-      "[INTERRUPTED_TASK_FOR_CONTEXT_ONLY]",
-      clean,
-      "[/INTERRUPTED_TASK_FOR_CONTEXT_ONLY]"
-    );
-  }
-  return lines.join("\n");
-}
 
 function limitResumeRequest(
   request: RunRequest,
@@ -1095,39 +527,6 @@ function promptForRequest(request: RunRequest): string {
   return buildLimitResumePrompt(request.limitResume.originalPrompt, {
     includeOriginalTask: request.limitResume.includeOriginalTask
   });
-}
-
-export class MessageQueue implements AsyncIterable<SDKUserMessage> {
-  private readonly values: SDKUserMessage[] = [];
-  private readonly waiters: Array<(value: IteratorResult<SDKUserMessage>) => void> = [];
-  private closed = false;
-
-  push(value: SDKUserMessage): boolean {
-    if (this.closed) return false;
-    const waiter = this.waiters.shift();
-    if (waiter) waiter({ value, done: false });
-    else this.values.push(value);
-    return true;
-  }
-
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    for (const waiter of this.waiters.splice(0)) {
-      waiter({ value: undefined, done: true });
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
-    return {
-      next: () => {
-        const value = this.values.shift();
-        if (value) return Promise.resolve({ value, done: false });
-        if (this.closed) return Promise.resolve({ value: undefined, done: true });
-        return new Promise((resolve) => this.waiters.push(resolve));
-      }
-    };
-  }
 }
 
 export class SessionManager {
@@ -1190,7 +589,9 @@ export class SessionManager {
     codexReasoning?: string | null,
     agyThinkingLevel?: string | null,
     agyModel?: string | null,
-    handoffSummary?: string | null
+    handoffSummary?: string | null,
+    codexHome?: string | null,
+    claudeTokenIndex?: number | null
   ): SessionRecord {
     const now = Date.now();
     const session: SessionRecord = {
@@ -1207,8 +608,10 @@ export class SessionManager {
       model: model ?? null,
       thinking: thinking ?? null,
       claudeEffort: claudeEffort ?? null,
+      claudeTokenIndex: claudeTokenIndex ?? null,
       codexModel: codexModel ?? null,
       codexReasoning: codexReasoning ?? null,
+      codexHome: codexHome ?? null,
       codexThreadId: null,
       agyModel: agyModel ?? null,
       agyThinkingLevel: agyThinkingLevel ?? null,
@@ -1229,6 +632,22 @@ export class SessionManager {
       ...(forkSession ? { forkSession: true } : {})
     });
     return session;
+  }
+
+  private selectCodexHome(session?: SessionRecord): string {
+    if (session?.codexHome && this.codexAccountPool.indexOf(session.codexHome) !== -1) {
+      return session.codexHome;
+    }
+    return this.codexAccountPool.select();
+  }
+
+  private selectClaudeToken(session: SessionRecord, claudeModel: string): string {
+    const index = session.claudeTokenIndex;
+    if (typeof index === "number" && Number.isInteger(index) && index >= 0) {
+      const preferred = this.oauthTokens[index];
+      if (preferred && !this.tokenPool.isExhausted(preferred)) return preferred;
+    }
+    return this.tokenPool.select(Date.now(), claudeModel);
   }
 
   resume(session: SessionRecord, prompt: string): boolean {
@@ -1698,7 +1117,7 @@ export class SessionManager {
     }
     // Codex: 직전 스레드를 재개해 비스트리밍으로 요약 한 턴을 받는다.
     if (!session.codexThreadId) return "";
-    const codexHome = this.codexAccountPool.select();
+    const codexHome = this.selectCodexHome(session);
     requireCodexSubscriptionAuth(codexHome);
     const codex = new Codex({
       env: buildCodexEnvironment(codexHome),
@@ -1969,7 +1388,7 @@ export class SessionManager {
     const claudeModel = session.model ?? DEFAULT_CLAUDE_MODEL;
     // 한도에 도달하지 않은 토큰을 고른다. 전부 소진이면 가장 빨리 회복될 토큰을 시도한다.
     // 마지막 사용 토큰은 Claude 모델별로 따로 유지한다.
-    const oauthToken = this.tokenPool.select(Date.now(), claudeModel);
+    const oauthToken = this.selectClaudeToken(session, claudeModel);
     const tokenIndex = this.tokenPool.indexOf(oauthToken);
     let sdkSessionId = request.resumeSessionId ?? session.sdkSessionId;
     // 세션의 usageSnapshot은 텔레그램 표시용 캐시이며 어느 계정 토큰에서 수집됐는지
@@ -1991,81 +1410,16 @@ export class SessionManager {
     try {
       await this.safeRename(session, `[RUNNING] ${session.title}`);
       await renderer.start(false);
-      if (this.tokenPool.size > 1 && tokenIndex > 0) {
+      if (this.tokenPool.size > 1 && tokenIndex > 0 && session.claudeTokenIndex === tokenIndex) {
+        renderer.note(`선택한 계정 토큰 #${tokenIndex + 1}로 실행합니다.`);
+      } else if (this.tokenPool.size > 1 && tokenIndex > 0) {
         renderer.note(`기본 토큰 한도 도달 → 계정 토큰 #${tokenIndex + 1}로 전환해 실행합니다.`);
       }
       if (this.deleting.has(session.id)) return;
       this.store.updateSession(session.id, { status: "running" });
 
-      const startCodexHeartbeat = (toolName: string, toolUseId: string): void => {
-        const serverName = mcpServerName(toolName)?.toLowerCase();
-        if (!serverName || !this.options.longRunningMcpServers.has(serverName)) return;
-        const timer = setInterval(() => {
-          void this.transport.sendText(
-            session.chatId,
-            session.topicId,
-            `[MCP RUNNING] ${toolName} 작업이 계속 진행 중입니다. 완료 또는 실제 연결 실패까지 기다립니다.`
-          ).catch(() => undefined);
-        }, this.options.codexMcpHeartbeatMs);
-        run.codexTimers.set(toolUseId, timer);
-        run.codexStarts.set(toolUseId, Date.now());
-      };
-
-      const clearToolTimer = (toolUseId: string): void => {
-        const timer = run.codexTimers.get(toolUseId);
-        if (timer) clearInterval(timer);
-        run.codexTimers.delete(toolUseId);
-        run.codexStarts.delete(toolUseId);
-      };
-
-      const postToolUse: HookCallback = async (hookInput) => {
-        if (hookInput.hook_event_name !== "PostToolUse") return {};
-        clearToolTimer(hookInput.tool_use_id);
-        run.mcpFailures.delete(mcpCallKey(hookInput.tool_name, hookInput.tool_input));
-        return {};
-      };
-
-      const postToolUseFailure: HookCallback = async (hookInput) => {
-        if (hookInput.hook_event_name !== "PostToolUseFailure") return {};
-        clearToolTimer(hookInput.tool_use_id);
-        if (!isRetryableMcpError(hookInput.tool_name, hookInput.error)) return {};
-
-        const key = mcpCallKey(hookInput.tool_name, hookInput.tool_input);
-        const failedAttempts = (run.mcpFailures.get(key) ?? 0) + 1;
-        run.mcpFailures.set(key, failedAttempts);
-        const server = mcpServerName(hookInput.tool_name) ?? "unknown";
-
-        if (failedAttempts < this.options.mcpMaxAttempts) {
-          renderer.note(
-            `MCP ${server} 재시도 ${failedAttempts + 1}/${this.options.mcpMaxAttempts}`
-          );
-          return {
-            continue: true,
-            hookSpecificOutput: {
-              hookEventName: "PostToolUseFailure",
-              additionalContext:
-                `[MCP_RETRY ${failedAttempts + 1}/${this.options.mcpMaxAttempts}] `
-                + `일시적 MCP 연결 오류입니다. 같은 도구와 같은 입력을 병렬 실행하지 말고 즉시 한 번만 다시 호출하세요.`
-            }
-          };
-        }
-
-        await this.transport.sendText(
-          session.chatId,
-          session.topicId,
-          `[MCP FAILED] ${server} 서버의 ${hookInput.tool_name} 호출이 `
-          + `${this.options.mcpMaxAttempts}회 모두 실패했습니다.\n${hookInput.error}`
-        ).catch(() => undefined);
-        return {
-          continue: true,
-          hookSpecificOutput: {
-            hookEventName: "PostToolUseFailure",
-            additionalContext:
-              `[MCP_FAILED] ${this.options.mcpMaxAttempts}회 모두 실패했습니다. `
-              + "같은 호출은 더 재시도하지 말고 사용자에게 실패 원인과 가능한 대안을 설명하세요."
-          }
-        };
-      };
+      const { startCodexHeartbeat, postToolUse, postToolUseFailure } =
+        this.buildClaudeHooks(session, run, renderer);
 
       const thinking = normalizeThinkingForModel(
         this.options.modelCatalog,
@@ -2313,81 +1667,18 @@ export class SessionManager {
         await renderer.finish("aborted", "사용자가 작업을 중단했습니다.");
         await this.safeRename(session, `[STOP] ${session.title}`);
       } else if (isRateLimitError(error)) {
-        // 한도 오류로 끝난 토큰을 봉인하고, 살아있는 다른 토큰이 있으면 같은 작업을
-        // 그 토큰으로 즉시 자동 재실행한다. 사용자가 "계속" 같은 추가 입력을 보낼 필요가 없다.
-        const limitSnapshot = snapshotFromRateLimitError(error);
-        const resetsAt = limitSnapshot?.fiveHour?.resetsAt;
-        this.tokenPool.noteRateLimited(
-          oauthToken,
-          Date.now(),
-          resetsAt ? Date.parse(resetsAt) : undefined
+        // 한도 오류: 토큰 봉인 후 자동 전환/재개를 시도한다. 처리됐으면 이 턴은 그대로 종료한다.
+        const handled = await this.handleClaudeRateLimit(
+          error, request, session, renderer, oauthToken, tokenIndex, claudeModel, sdkSessionId
         );
-        const attempts = (request.autoSwitchCount ?? 0) + 1;
-        const nextToken = this.tokenPool.select(Date.now(), claudeModel);
-        const canAutoSwitch =
-          this.tokenPool.size > 1
-          && attempts < this.tokenPool.size
-          && !this.tokenPool.isExhausted(nextToken);
-        if (canAutoSwitch) {
-          const nextIndex = this.tokenPool.indexOf(nextToken);
-          await this.transport.sendText(
-            session.chatId,
-            session.topicId,
-            `토큰 #${tokenIndex + 1} 한도 도달 → 계정 토큰 #${nextIndex + 1}로 자동 전환해 이어서 실행합니다.`
-          ).catch(() => undefined);
-          await this.safeRename(session, `[SWITCH] ${session.title}`);
-          // 같은 프로젝트 큐의 맨 뒤에 재투입한다. 현재 실행의 finally가 active/렌더러를
-          // 정리한 뒤 살아있는 토큰으로 다시 실행된다. resume으로 대화 맥락을 잇는다.
-          const resumeId = sdkSessionId ?? request.resumeSessionId;
-          this.enqueue({
-            ...limitResumeRequest(request, false),
-            ...(resumeId ? { resumeSessionId: resumeId } : {}),
-            autoSwitchCount: attempts
-          });
-          return;
-        }
-        // 전환할 살아있는 토큰이 없다. 에러로 끝내는 대신, 가장 먼저 회복되는 한도
-        // 시각에 맞춰 같은 작업을 자동으로 이어서 실행하도록 예약한다.
-        const resumeAt = this.tokenPool.recoversAt();
-        if (resumeAt !== null) {
-          if (this.tokenPool.size > 1) {
-            renderer.note("모든 계정 토큰이 한도에 도달했습니다. 회복 시각에 자동 재개를 예약합니다.");
-          }
-          this.scheduleLimitResume(session, request, sdkSessionId, resumeAt);
-          return;
-        }
+        if (handled) return;
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", String(error));
         await this.safeRename(session, `[ERROR] ${session.title}`);
       } else if (isOverloadedError(error)) {
-        // 일시적 서버 과부하/장애. 토큰을 봉인하지 않고 지수 백오프 후 같은 작업을
-        // 자동 재시도한다. 사용자가 직접 "계속"을 보낼 필요가 없다.
-        const attempt = (request.retryCount ?? 0) + 1;
-        if (attempt <= MAX_OVERLOAD_RETRIES) {
-          const delayMs = Math.min(
-            OVERLOAD_RETRY_BASE_MS * 2 ** (attempt - 1),
-            OVERLOAD_RETRY_CAP_MS
-          );
-          const seconds = Math.round(delayMs / 1000);
-          await this.transport.sendText(
-            session.chatId,
-            session.topicId,
-            `서버 과부하(Overloaded)로 일시 중단 → ${seconds}초 후 자동 재시도합니다. (${attempt}/${MAX_OVERLOAD_RETRIES})`
-          ).catch(() => undefined);
-          await this.safeRename(session, `[RETRY] ${session.title}`);
-          const resumeId = sdkSessionId ?? request.resumeSessionId;
-          const retryRequest: RunRequest = {
-            ...request,
-            ...(resumeId ? { resumeSessionId: resumeId } : {}),
-            retryCount: attempt
-          };
-          setTimeout(() => {
-            if (this.deleting.has(session.id)) return;
-            this.enqueue(retryRequest);
-          }, delayMs).unref();
-          return;
-        }
-        renderer.note(`과부하가 ${MAX_OVERLOAD_RETRIES}회 재시도 후에도 풀리지 않았습니다.`);
+        // 일시적 서버 과부하/장애: 지수 백오프 후 자동 재시도한다. 예약됐으면 이 턴은 종료한다.
+        const handled = await this.handleClaudeOverload(request, session, renderer, sdkSessionId);
+        if (handled) return;
         this.store.updateSession(session.id, { status: "error" });
         await renderer.finish("error", String(error));
         await this.safeRename(session, `[ERROR] ${session.title}`);
@@ -2439,14 +1730,18 @@ export class SessionManager {
     let lastAgentMessage = "";
     let codexThreadId = session.codexThreadId;
     // catch의 한도 페일오버에서 봉인 대상으로 참조하려고 try 바깥에 둔다.
-    let codexHome = this.codexAccountPool.select();
+    let codexHome = this.selectCodexHome(session);
 
     try {
       await this.safeRename(session, `[RUNNING] ${session.title}`);
       await renderer.start(false);
       this.store.updateSession(session.id, { status: "running" });
 
-      codexHome = this.codexAccountPool.select();
+      codexHome = this.selectCodexHome(session);
+      if (session.codexHome !== codexHome) {
+        this.store.updateSession(session.id, { codexHome });
+        session = this.store.getSession(session.id) ?? session;
+      }
       requireCodexSubscriptionAuth(codexHome);
       syncSharedResources();
       const codexModel = session.codexModel ?? DEFAULT_CODEX_MODEL;
@@ -2636,7 +1931,7 @@ export class SessionManager {
           ).catch(() => undefined);
           await this.safeRename(session, `[SWITCH] ${session.title}`);
           // 다른 계정 홈에는 기존 스레드가 없으므로 스레드를 리셋한다.
-          this.store.updateSession(session.id, { codexThreadId: null });
+          this.store.updateSession(session.id, { codexThreadId: null, codexHome: nextHome });
           this.enqueue({ ...limitResumeRequest(request, true), autoSwitchCount: attempts });
           return;
         }
@@ -3399,6 +2694,187 @@ export class SessionManager {
     } finally {
       client.interrupt();
     }
+  }
+
+  // execute()의 Claude 턴용 MCP 훅을 구성한다. 장기 실행 MCP 서버에는 진행 하트비트를 켜고,
+  // 일시적 MCP 실패는 mcpMaxAttempts까지 순차 재시도하도록 PostToolUseFailure 훅으로 유도한다.
+  // run/renderer/session을 캡처하므로 execute() 안에서 매 턴 새로 만들어진다.
+  private buildClaudeHooks(
+    session: SessionRecord,
+    run: ActiveRun,
+    renderer: StreamRenderer
+  ): {
+    startCodexHeartbeat: (toolName: string, toolUseId: string) => void;
+    postToolUse: HookCallback;
+    postToolUseFailure: HookCallback;
+  } {
+    const startCodexHeartbeat = (toolName: string, toolUseId: string): void => {
+      const serverName = mcpServerName(toolName)?.toLowerCase();
+      if (!serverName || !this.options.longRunningMcpServers.has(serverName)) return;
+      const timer = setInterval(() => {
+        void this.transport.sendText(
+          session.chatId,
+          session.topicId,
+          `[MCP RUNNING] ${toolName} 작업이 계속 진행 중입니다. 완료 또는 실제 연결 실패까지 기다립니다.`
+        ).catch(() => undefined);
+      }, this.options.codexMcpHeartbeatMs);
+      run.codexTimers.set(toolUseId, timer);
+      run.codexStarts.set(toolUseId, Date.now());
+    };
+
+    const clearToolTimer = (toolUseId: string): void => {
+      const timer = run.codexTimers.get(toolUseId);
+      if (timer) clearInterval(timer);
+      run.codexTimers.delete(toolUseId);
+      run.codexStarts.delete(toolUseId);
+    };
+
+    const postToolUse: HookCallback = async (hookInput) => {
+      if (hookInput.hook_event_name !== "PostToolUse") return {};
+      clearToolTimer(hookInput.tool_use_id);
+      run.mcpFailures.delete(mcpCallKey(hookInput.tool_name, hookInput.tool_input));
+      return {};
+    };
+
+    const postToolUseFailure: HookCallback = async (hookInput) => {
+      if (hookInput.hook_event_name !== "PostToolUseFailure") return {};
+      clearToolTimer(hookInput.tool_use_id);
+      if (!isRetryableMcpError(hookInput.tool_name, hookInput.error)) return {};
+
+      const key = mcpCallKey(hookInput.tool_name, hookInput.tool_input);
+      const failedAttempts = (run.mcpFailures.get(key) ?? 0) + 1;
+      run.mcpFailures.set(key, failedAttempts);
+      const server = mcpServerName(hookInput.tool_name) ?? "unknown";
+
+      if (failedAttempts < this.options.mcpMaxAttempts) {
+        renderer.note(
+          `MCP ${server} 재시도 ${failedAttempts + 1}/${this.options.mcpMaxAttempts}`
+        );
+        return {
+          continue: true,
+          hookSpecificOutput: {
+            hookEventName: "PostToolUseFailure",
+            additionalContext:
+              `[MCP_RETRY ${failedAttempts + 1}/${this.options.mcpMaxAttempts}] `
+              + `일시적 MCP 연결 오류입니다. 같은 도구와 같은 입력을 병렬 실행하지 말고 즉시 한 번만 다시 호출하세요.`
+          }
+        };
+      }
+
+      await this.transport.sendText(
+        session.chatId,
+        session.topicId,
+        `[MCP FAILED] ${server} 서버의 ${hookInput.tool_name} 호출이 `
+        + `${this.options.mcpMaxAttempts}회 모두 실패했습니다.\n${hookInput.error}`
+      ).catch(() => undefined);
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: "PostToolUseFailure",
+          additionalContext:
+            `[MCP_FAILED] ${this.options.mcpMaxAttempts}회 모두 실패했습니다. `
+            + "같은 호출은 더 재시도하지 말고 사용자에게 실패 원인과 가능한 대안을 설명하세요."
+        }
+      };
+    };
+
+    return { startCodexHeartbeat, postToolUse, postToolUseFailure };
+  }
+
+  // execute()의 한도(rate limit) catch 분기. 한도에 닿은 토큰을 봉인하고, 살아있는 다른
+  // 토큰이 있으면 같은 작업을 자동 재실행, 전부 소진이면 회복 시각에 자동 재개를 예약한다.
+  // 재실행/재개를 예약해 이 턴을 그대로 끝내야 하면 true(=execute가 즉시 return),
+  // 자동 처리할 수 없어 최종 에러로 마감해야 하면 false를 반환한다.
+  private async handleClaudeRateLimit(
+    error: unknown,
+    request: RunRequest,
+    session: SessionRecord,
+    renderer: StreamRenderer,
+    oauthToken: string,
+    tokenIndex: number,
+    claudeModel: string,
+    sdkSessionId: string | null
+  ): Promise<boolean> {
+    const limitSnapshot = snapshotFromRateLimitError(error);
+    const resetsAt = limitSnapshot?.fiveHour?.resetsAt;
+    this.tokenPool.noteRateLimited(
+      oauthToken,
+      Date.now(),
+      resetsAt ? Date.parse(resetsAt) : undefined
+    );
+    const attempts = (request.autoSwitchCount ?? 0) + 1;
+    const nextToken = this.tokenPool.select(Date.now(), claudeModel);
+    const canAutoSwitch =
+      this.tokenPool.size > 1
+      && attempts < this.tokenPool.size
+      && !this.tokenPool.isExhausted(nextToken);
+    if (canAutoSwitch) {
+      const nextIndex = this.tokenPool.indexOf(nextToken);
+      await this.transport.sendText(
+        session.chatId,
+        session.topicId,
+        `토큰 #${tokenIndex + 1} 한도 도달 → 계정 토큰 #${nextIndex + 1}로 자동 전환해 이어서 실행합니다.`
+      ).catch(() => undefined);
+      await this.safeRename(session, `[SWITCH] ${session.title}`);
+      // 같은 프로젝트 큐의 맨 뒤에 재투입한다. 현재 실행의 finally가 active/렌더러를
+      // 정리한 뒤 살아있는 토큰으로 다시 실행된다. resume으로 대화 맥락을 잇는다.
+      const resumeId = sdkSessionId ?? request.resumeSessionId;
+      this.enqueue({
+        ...limitResumeRequest(request, false),
+        ...(resumeId ? { resumeSessionId: resumeId } : {}),
+        autoSwitchCount: attempts
+      });
+      return true;
+    }
+    // 전환할 살아있는 토큰이 없다. 에러로 끝내는 대신, 가장 먼저 회복되는 한도
+    // 시각에 맞춰 같은 작업을 자동으로 이어서 실행하도록 예약한다.
+    const resumeAt = this.tokenPool.recoversAt();
+    if (resumeAt !== null) {
+      if (this.tokenPool.size > 1) {
+        renderer.note("모든 계정 토큰이 한도에 도달했습니다. 회복 시각에 자동 재개를 예약합니다.");
+      }
+      this.scheduleLimitResume(session, request, sdkSessionId, resumeAt);
+      return true;
+    }
+    return false;
+  }
+
+  // execute()의 과부하(Overloaded/5xx) catch 분기. 토큰을 봉인하지 않고 지수 백오프 후 같은
+  // 작업을 자동 재시도한다. 재시도를 예약해 이 턴을 끝내야 하면 true, 재시도 상한을 초과해
+  // 최종 에러로 마감해야 하면 false를 반환한다.
+  private async handleClaudeOverload(
+    request: RunRequest,
+    session: SessionRecord,
+    renderer: StreamRenderer,
+    sdkSessionId: string | null
+  ): Promise<boolean> {
+    const attempt = (request.retryCount ?? 0) + 1;
+    if (attempt <= MAX_OVERLOAD_RETRIES) {
+      const delayMs = Math.min(
+        OVERLOAD_RETRY_BASE_MS * 2 ** (attempt - 1),
+        OVERLOAD_RETRY_CAP_MS
+      );
+      const seconds = Math.round(delayMs / 1000);
+      await this.transport.sendText(
+        session.chatId,
+        session.topicId,
+        `서버 과부하(Overloaded)로 일시 중단 → ${seconds}초 후 자동 재시도합니다. (${attempt}/${MAX_OVERLOAD_RETRIES})`
+      ).catch(() => undefined);
+      await this.safeRename(session, `[RETRY] ${session.title}`);
+      const resumeId = sdkSessionId ?? request.resumeSessionId;
+      const retryRequest: RunRequest = {
+        ...request,
+        ...(resumeId ? { resumeSessionId: resumeId } : {}),
+        retryCount: attempt
+      };
+      setTimeout(() => {
+        if (this.deleting.has(session.id)) return;
+        this.enqueue(retryRequest);
+      }, delayMs).unref();
+      return true;
+    }
+    renderer.note(`과부하가 ${MAX_OVERLOAD_RETRIES}회 재시도 후에도 풀리지 않았습니다.`);
+    return false;
   }
 
   private async safeRename(session: SessionRecord, title: string): Promise<void> {

@@ -53,7 +53,7 @@ const STATE_DB =
   process.env.ORCH_STATE_DB || join(REPO_ROOT, "data", "state.sqlite");
 const WIKI_VAULT =
   process.env.WIKI_VAULT ||
-  "/Users/neam/Library/CloudStorage/SynologyDrive-neam/AI/LLM-Wiki";
+  "smb://JB_Kim._smb._tcp.local/homes/mac_neam96/AI/LLM-Wiki";
 const CLAUDE_PROJECTS_DIR =
   process.env.CLAUDE_PROJECTS_DIR || join(homedir(), ".claude", "projects");
 const CODEX_SESSIONS_DIRS = (() => {

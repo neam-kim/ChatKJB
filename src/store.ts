@@ -28,16 +28,23 @@ function normalizeProvider(value: string | null | undefined): ProviderKind {
 const SESSION_DEFAULT_SEED: SessionDefaults = {
   provider: "claude",
   claudeModel: DEFAULT_CLAUDE_MODEL,
+  claudeTokenIndex: 0,
   codexModel: DEFAULT_CODEX_MODEL,
   agyModel: DEFAULT_AGY_MODEL,
   thinking: DEFAULT_THINKING_LEVEL,
   claudeEffort: DEFAULT_CLAUDE_EFFORT,
   codexReasoning: DEFAULT_CODEX_REASONING,
+  codexHome: null,
   agyThinkingLevel: "minimal"
 };
 
 function normalizeDefaultAgyThinkingLevel(value: string | null | undefined): string {
   return resolveAgyThinkingLevel(value ?? "") ?? SESSION_DEFAULT_SEED.agyThinkingLevel;
+}
+
+function normalizeDefaultIndex(value: string | number | null | undefined): number {
+  const parsed = typeof value === "number" ? value : Number.parseInt(value ?? "", 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 interface SessionRow {
@@ -54,8 +61,10 @@ interface SessionRow {
   model: string | null;
   thinking: string | null;
   claude_effort: string | null;
+  claude_token_index: number | null;
   codex_model: string | null;
   codex_reasoning: string | null;
+  codex_home: string | null;
   codex_thread_id: string | null;
   agy_model: string | null;
   agy_thinking_level: string | null;
@@ -119,7 +128,9 @@ export class StateStore {
         provider TEXT NOT NULL DEFAULT 'claude',
         model TEXT,
         thinking TEXT,
+        claude_token_index INTEGER,
         codex_model TEXT,
+        codex_home TEXT,
         codex_thread_id TEXT,
         agy_model TEXT,
         agy_conversation_id TEXT,
@@ -177,8 +188,14 @@ export class StateStore {
     if (!sessionColumns.some((column) => column.name === "codex_reasoning")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN codex_reasoning TEXT");
     }
+    if (!sessionColumns.some((column) => column.name === "codex_home")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN codex_home TEXT");
+    }
     if (!sessionColumns.some((column) => column.name === "claude_effort")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN claude_effort TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "claude_token_index")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN claude_token_index INTEGER");
     }
     if (!sessionColumns.some((column) => column.name === "goal_condition")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN goal_condition TEXT");
@@ -284,10 +301,10 @@ export class StateStore {
       INSERT INTO sessions(
         id, sdk_session_id, chat_id, topic_id, project_name, cwd, title,
         status, permission_mode, provider, model, thinking, claude_effort,
-        codex_model, codex_reasoning, codex_thread_id, agy_model, agy_thinking_level,
+        claude_token_index, codex_model, codex_reasoning, codex_home, codex_thread_id, agy_model, agy_thinking_level,
         agy_conversation_id, agy_usage, handoff_summary, goal_condition, lean_mode, usage_snapshot,
         always_allowed_tools, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.sdkSessionId,
@@ -302,8 +319,10 @@ export class StateStore {
       session.model,
       session.thinking,
       session.claudeEffort ?? null,
+      session.claudeTokenIndex ?? null,
       session.codexModel ?? null,
       session.codexReasoning ?? null,
+      session.codexHome ?? null,
       session.codexThreadId ?? null,
       session.agyModel ?? null,
       session.agyThinkingLevel ?? null,
@@ -349,7 +368,7 @@ export class StateStore {
     id: string,
     fields: Partial<Pick<
       SessionRecord,
-      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "codexModel" | "codexReasoning" | "codexThreadId" | "agyModel" | "agyThinkingLevel" | "agyConversationId" | "agyUsage" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
+      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "claudeTokenIndex" | "codexModel" | "codexReasoning" | "codexHome" | "codexThreadId" | "agyModel" | "agyThinkingLevel" | "agyConversationId" | "agyUsage" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
     >>
   ): void {
     const entries: Array<[string, unknown]> = [];
@@ -361,8 +380,10 @@ export class StateStore {
     if ("model" in fields) entries.push(["model", fields.model]);
     if ("thinking" in fields) entries.push(["thinking", fields.thinking]);
     if ("claudeEffort" in fields) entries.push(["claude_effort", fields.claudeEffort]);
+    if ("claudeTokenIndex" in fields) entries.push(["claude_token_index", fields.claudeTokenIndex]);
     if ("codexModel" in fields) entries.push(["codex_model", fields.codexModel]);
     if ("codexReasoning" in fields) entries.push(["codex_reasoning", fields.codexReasoning]);
+    if ("codexHome" in fields) entries.push(["codex_home", fields.codexHome]);
     if ("codexThreadId" in fields) entries.push(["codex_thread_id", fields.codexThreadId]);
     if ("agyModel" in fields) entries.push(["agy_model", fields.agyModel]);
     if ("agyThinkingLevel" in fields) entries.push(["agy_thinking_level", fields.agyThinkingLevel]);
@@ -401,11 +422,13 @@ export class StateStore {
     return {
       provider: normalizeProvider(stored.get("provider")),
       claudeModel: stored.get("claudeModel") ?? SESSION_DEFAULT_SEED.claudeModel,
+      claudeTokenIndex: normalizeDefaultIndex(stored.get("claudeTokenIndex")),
       codexModel: stored.get("codexModel") ?? SESSION_DEFAULT_SEED.codexModel,
       agyModel: stored.get("agyModel") ?? SESSION_DEFAULT_SEED.agyModel,
       thinking: stored.get("thinking") ?? SESSION_DEFAULT_SEED.thinking,
       claudeEffort: stored.get("claudeEffort") ?? SESSION_DEFAULT_SEED.claudeEffort,
       codexReasoning: stored.get("codexReasoning") ?? SESSION_DEFAULT_SEED.codexReasoning,
+      codexHome: stored.get("codexHome") ?? SESSION_DEFAULT_SEED.codexHome,
       agyThinkingLevel: normalizeDefaultAgyThinkingLevel(stored.get("agyThinkingLevel"))
     };
   }
@@ -420,6 +443,8 @@ export class StateStore {
         if (value === undefined) continue;
         const normalized = key === "agyThinkingLevel"
           ? normalizeDefaultAgyThinkingLevel(String(value))
+          : key === "claudeTokenIndex"
+          ? String(normalizeDefaultIndex(String(value)))
           : String(value);
         statement.run(`default.${key}`, normalized);
       }
@@ -517,8 +542,10 @@ export class StateStore {
       model: row.model,
       thinking: row.thinking,
       claudeEffort: row.claude_effort,
+      claudeTokenIndex: row.claude_token_index,
       codexModel: row.codex_model,
       codexReasoning: row.codex_reasoning,
+      codexHome: row.codex_home,
       codexThreadId: row.codex_thread_id,
       agyModel: row.agy_model,
       agyThinkingLevel: row.agy_thinking_level,

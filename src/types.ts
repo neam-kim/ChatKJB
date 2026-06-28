@@ -25,11 +25,13 @@ export interface ProjectConfig {
 export interface SessionDefaults {
   provider: ProviderKind;
   claudeModel: string;
+  claudeTokenIndex: number;
   codexModel: string;
   agyModel: string;
   thinking: string;
   claudeEffort: string;
   codexReasoning: string;
+  codexHome: string | null;
   agyThinkingLevel: string;
 }
 
@@ -94,9 +96,13 @@ export interface SessionRecord {
   model: string | null;
   thinking: string | null;
   claudeEffort: string | null;
+  // Claude 전용 설정. 원문 OAuth 토큰은 저장하지 않고 0-based 설정 번호만 저장한다.
+  claudeTokenIndex?: number | null;
   // Codex 전용 설정. codexModel/codexReasoning은 provider="codex"일 때 사용한다.
   codexModel: string | null;
   codexReasoning: string | null;
+  // 이 Codex 세션이 우선 사용할 CODEX_HOME. null/undefined이면 자동 선택.
+  codexHome?: string | null;
   // Codex 스레드 재개 id(`~/.codex/sessions`). Claude의 sdkSessionId에 대응한다.
   codexThreadId: string | null;
   // agy 전용 설정. provider="agy"일 때 사용한다.

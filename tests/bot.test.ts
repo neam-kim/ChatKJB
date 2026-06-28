@@ -41,20 +41,22 @@ function session(status: SessionRecord["status"]): SessionRecord {
   };
 }
 
-function botSetup() {
+function botSetup(extra?: { claudeCodeOauthTokens?: string[]; codexAccountHomes?: string[] }) {
   const directory = mkdtempSync(join(tmpdir(), "telegram-claude-bot-"));
   const store = new StateStore(join(directory, "state.sqlite"));
   const project = { name: "test", cwd: directory, defaultMode: "default" as const };
   store.syncProjects([project]);
   store.createSession(session("done"));
+  const codexAccountHomes = extra?.codexAccountHomes ?? [join(directory, "codex-home")];
+  const claudeCodeOauthTokens = extra?.claudeCodeOauthTokens ?? ["test-oauth-token"];
   const config = {
     telegramBotToken: "123456789:test-token",
     allowedUserId: 7,
     allowedUserIds: [7],
     chatId: -1001,
-    claudeCodeOauthToken: "test-oauth-token",
-    claudeCodeOauthTokens: ["test-oauth-token"],
-    codexAccountHomes: [join(directory, "codex-home")],
+    claudeCodeOauthToken: claudeCodeOauthTokens[0] ?? "test-oauth-token",
+    claudeCodeOauthTokens,
+    codexAccountHomes,
     modelCatalog: FALLBACK_MODEL_CATALOG,
     databasePath: join(directory, "state.sqlite"),
     projectsPath: join(directory, "projects.json"),
@@ -227,6 +229,18 @@ describe("session status formatting", () => {
     const tuned = { ...session("running"), provider: "codex" as const, codexReasoning: "low" };
     expect(formatSessionStatus(tuned, true)).toContain("제공자: Codex");
     expect(formatSessionStatus(tuned, true)).toContain("reasoning 낮음 (Low)");
+  });
+
+  it("shows the selected Codex account number when codexHome is known", () => {
+    const codexHomes = ["/tmp/codex-a", "/tmp/codex-b"];
+    const tuned = {
+      ...session("running"),
+      provider: "codex" as const,
+      codexHome: codexHomes[1]!
+    };
+
+    expect(formatSessionStatus(tuned, true, FALLBACK_MODEL_CATALOG, codexHomes))
+      .toContain("Codex 계정: #2");
   });
 
   it("shows the default Claude 작업량 and reflects an override", () => {
@@ -407,6 +421,36 @@ describe("/new defaults fast path", () => {
     expect(created?.provider).toBe("codex");
     expect(created?.codexModel).toBe("gpt-5.5");
     expect(created?.codexReasoning).toBe("high");
+    expect(created?.codexHome).toBeDefined();
+  });
+
+  it("cycles the Codex token from the sixth defaults panel slot", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-codex-homes-"));
+    rmSync(directory, { recursive: true, force: true });
+    const codexHomes = [join(directory, "codex-a"), join(directory, "codex-b")];
+    const { bot, store, calls } = botSetup({ codexAccountHomes: codexHomes });
+    store.updateSessionDefaults({ provider: "codex", codexHome: codexHomes[0]! });
+
+    await bot.handleUpdate(textMessage("🔑 토큰: #1"));
+
+    expect(store.getSessionDefaults().codexHome).toBe(codexHomes[1]);
+    const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
+    expect(reply?.text).toContain("새 Codex 세션 기본 토큰: #2");
+    expect(JSON.stringify(reply?.reply_markup)).toContain("🔑 토큰: #2");
+  });
+
+  it("cycles the Claude token from the sixth defaults panel slot", async () => {
+    const { bot, store, calls } = botSetup({
+      claudeCodeOauthTokens: ["test-oauth-token-a", "test-oauth-token-b"]
+    });
+    store.updateSessionDefaults({ provider: "claude", claudeTokenIndex: 0 });
+
+    await bot.handleUpdate(textMessage("🔑 토큰: #1"));
+
+    expect(store.getSessionDefaults().claudeTokenIndex).toBe(1);
+    const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
+    expect(reply?.text).toContain("새 Claude 세션 기본 토큰: #2");
+    expect(JSON.stringify(reply?.reply_markup)).toContain("🔑 토큰: #2");
   });
 
   it("applies agy model and thinking defaults to a new session", async () => {

@@ -2,12 +2,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ProviderKind } from "./types.js";
+import { filesystemPath } from "./filesystem-path.js";
 
 // LLM-Wiki 저장소 루트. 환경변수 WIKI_VAULT로 위치를 바꾼 경우도 따른다.
 export function wikiVaultPath(env: NodeJS.ProcessEnv = process.env): string {
-  return (
+  return filesystemPath(
     env.WIKI_VAULT ||
-    "/Users/neam/Library/CloudStorage/SynologyDrive-neam/AI/LLM-Wiki"
+    "smb://JB_Kim._smb._tcp.local/homes/mac_neam96/AI/LLM-Wiki"
   );
 }
 

@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { FALLBACK_MODEL_CATALOG } from "./model-catalog.js";
+import { filesystemPath } from "./filesystem-path.js";
 import type { ProjectConfig } from "./types.js";
 
 export const CLAUDE_OAUTH_TOKEN_PATTERN = /^sk-ant-oat01-[A-Za-z0-9_-]+$/;
@@ -82,7 +83,7 @@ function normalizeProject(project: z.infer<typeof projectSchema>): ProjectConfig
   return {
     name: project.name,
     ...(project.aliases ? { aliases: project.aliases } : {}),
-    cwd: project.cwd,
+    cwd: filesystemPath(project.cwd),
     defaultMode: project.defaultMode
   };
 }
@@ -179,18 +180,36 @@ function validateEnvironmentFile(): void {
 }
 
 function validateProjectDirectory(path: string): string {
-  accessSync(path, constants.R_OK | constants.W_OK);
-  const canonical = realpathSync(path);
+  const fsPath = filesystemPath(path);
+  accessSync(fsPath, constants.R_OK | constants.W_OK);
+  const canonical = realpathSync(fsPath);
   if (!statSync(canonical).isDirectory()) {
     throw new Error(`Project path is not a directory: ${path}`);
   }
   return canonical;
 }
 
-function validateUniqueProjects(projects: ProjectConfig[]): void {
+// 경로에 접근할 수 없는 프로젝트(예: 이름이 바뀐 NAS 폴더)는 치명적 오류로 처리하지 않고
+// 건너뛴다. 단 한 개의 unreachable 경로가 전체 config 로드를 중단시켜 데몬이 KeepAlive로
+// 무한 재시작하던 문제(2026-06-28)를 막기 위함이다. 해석에 성공한 프로젝트들에 대해서는
+// 기존의 이름/별칭 중복, 경로 중복 검사를 그대로 유지하고, 유효한 프로젝트가 하나도 남지
+// 않으면 그때만 throw 한다. unreachable 항목은 projects.json에서 삭제하지 않으므로 NAS가
+// 다시 마운트되고 데몬이 재시작되면 자동으로 복구된다.
+function validateUniqueProjects(projects: ProjectConfig[]): ProjectConfig[] {
   const identifiers = new Map<string, string>();
   const paths = new Set<string>();
+  const reachable: ProjectConfig[] = [];
   for (const project of projects) {
+    let canonical: string;
+    try {
+      canonical = validateProjectDirectory(project.cwd);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `프로젝트 "${project.name}" 경로에 접근할 수 없어 건너뜁니다: ${project.cwd} (${reason})`
+      );
+      continue;
+    }
     for (const identifier of [project.name, ...(project.aliases ?? [])]) {
       const key = identifier.toLocaleLowerCase("en-US");
       const existing = identifiers.get(key);
@@ -199,12 +218,18 @@ function validateUniqueProjects(projects: ProjectConfig[]): void {
       }
       identifiers.set(key, project.name);
     }
-    const canonical = validateProjectDirectory(project.cwd);
     if (paths.has(canonical)) {
       throw new Error(`Duplicate project path: ${project.cwd}`);
     }
     paths.add(canonical);
+    reachable.push(project);
   }
+  if (reachable.length === 0) {
+    throw new Error(
+      "접근 가능한 프로젝트가 하나도 없습니다. 최소 한 개의 유효한 프로젝트 경로가 필요합니다."
+    );
+  }
+  return reachable;
 }
 
 export function resolveProject(
@@ -244,8 +269,8 @@ export async function loadProjects(path: string): Promise<ProjectConfig[]> {
   const { readFile } = await import("node:fs/promises");
   const raw = JSON.parse(await readFile(absolutePath(path), "utf8")) as unknown;
   const projects = z.array(projectSchema).min(1).parse(raw).map(normalizeProject);
-  validateUniqueProjects(projects);
-  return projects;
+  // unreachable 경로는 건너뛰고 해석에 성공한 프로젝트만 런타임에 사용한다.
+  return validateUniqueProjects(projects);
 }
 
 async function persistProjects(

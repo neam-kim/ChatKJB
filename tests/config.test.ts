@@ -156,6 +156,55 @@ describe("project configuration", () => {
     await expect(loadProjects(projectsPath)).rejects.toThrow("Duplicate project name or alias");
   });
 
+  it("skips an unreachable project path and keeps the reachable ones", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
+    directories.push(directory);
+    const good = join(directory, "good");
+    mkdirSync(good);
+    const projectsPath = join(directory, "projects.json");
+    writeFileSync(projectsPath, JSON.stringify([
+      { name: "good", cwd: good, defaultMode: "default" },
+      { name: "bad", cwd: join(directory, "missing"), defaultMode: "default" }
+    ]));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { loadProjects } = await import("../src/config.js");
+    const projects = await loadProjects(projectsPath);
+    expect(projects).toHaveLength(1);
+    expect(projects[0]!.name).toBe("good");
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("throws when no project path is reachable", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
+    directories.push(directory);
+    const projectsPath = join(directory, "projects.json");
+    writeFileSync(projectsPath, JSON.stringify([
+      { name: "first", cwd: join(directory, "missing1"), defaultMode: "default" },
+      { name: "second", cwd: join(directory, "missing2"), defaultMode: "default" }
+    ]));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { loadProjects } = await import("../src/config.js");
+    await expect(loadProjects(projectsPath)).rejects.toThrow(
+      "접근 가능한 프로젝트가 하나도 없습니다"
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("still rejects duplicate paths among resolvable projects", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
+    directories.push(directory);
+    const shared = join(directory, "shared");
+    mkdirSync(shared);
+    const projectsPath = join(directory, "projects.json");
+    writeFileSync(projectsPath, JSON.stringify([
+      { name: "first", cwd: shared, defaultMode: "default" },
+      { name: "second", cwd: shared, defaultMode: "default" }
+    ]));
+    const { loadProjects } = await import("../src/config.js");
+    await expect(loadProjects(projectsPath)).rejects.toThrow("Duplicate project path");
+  });
+
   it("adds an absolute directory using its folder name", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
     directories.push(directory);
