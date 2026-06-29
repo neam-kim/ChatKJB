@@ -172,6 +172,27 @@ export function buildSharedSkillCatalog(skillRoots: string[]): SkillEntry[] {
   return [...selected.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
+function registryCommand(command: unknown): unknown {
+  if (command === "node") return process.execPath;
+  if (command === "npx") {
+    const npx = join(dirname(process.execPath), "npx");
+    return existsSync(npx) ? npx : command;
+  }
+  return command;
+}
+
+function registryEnv(command: unknown, env: unknown): Record<string, string> {
+  const result =
+    env && typeof env === "object" && !Array.isArray(env)
+      ? { ...(env as Record<string, string>) }
+      : {};
+  if (command === "npx") {
+    const nodeBin = dirname(process.execPath);
+    result.PATH = result.PATH ? `${nodeBin}:${result.PATH}` : `${nodeBin}:/usr/bin:/bin`;
+  }
+  return result;
+}
+
 function registryServer(server: McpServerConfig): Record<string, unknown> {
   const value = server as Record<string, unknown>;
   if (value.type === "http" || value.type === "sse") {
@@ -183,9 +204,9 @@ function registryServer(server: McpServerConfig): Record<string, unknown> {
   }
   return {
     type: "stdio",
-    command: value.command,
+    command: registryCommand(value.command),
     args: value.args ?? [],
-    env: value.env ?? {}
+    env: registryEnv(value.command, value.env)
   };
 }
 

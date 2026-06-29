@@ -1190,6 +1190,25 @@ function findAndParse(session) {
   return null;
 }
 
+function hasProviderSourceIdentifier(session) {
+  if (session.provider === "claude") return Boolean(session.sdk_session_id);
+  if (session.provider === "codex") return Boolean(session.codex_thread_id);
+  if (session.provider === "agy") return Boolean(session.agy_conversation_id);
+  return true;
+}
+
+function hasRecoveredTranscriptDump(session, previous, existingSessions = {}) {
+  if (existingSessions[session.id]) return true;
+  if (typeof previous !== "object" || previous === null) return false;
+  return Array.isArray(previous.emittedChunkHashes) && previous.emittedChunkHashes.length > 0;
+}
+
+function ignoredMissingSourceReason(session, previous, existingSessions = {}) {
+  if (!hasProviderSourceIdentifier(session)) return "no-source-identifier";
+  if (hasRecoveredTranscriptDump(session, previous, existingSessions)) return "already-dumped";
+  return null;
+}
+
 // ── main ────────────────────────────────────────────────────────────────────
 async function main() {
   const state = loadWatermark();
@@ -1210,6 +1229,7 @@ async function main() {
   let desktopWritten = 0;
   let skipped = 0;
   let missing = 0;
+  let ignoredMissing = 0;
   let deferred = 0;
   let duplicateChunks = 0;
 
@@ -1232,7 +1252,13 @@ async function main() {
     }
     const parsed = findAndParse(s);
     if (!parsed) {
-      missing++;
+      const reason = ignoredMissingSourceReason(s, previous, existing.sessions);
+      if (reason) {
+        ignoredMissing++;
+        skipped++;
+      } else {
+        missing++;
+      }
       continue;
     }
     if (!parsed.turns.length) {
@@ -1318,7 +1344,7 @@ async function main() {
   const summaryLine =
     `done — written=${written} (desktop=${desktopWritten}) skipped=${skipped} ` +
     `deferred=${deferred} duplicate-chunks=${duplicateChunks} ` +
-    `source-missing=${missing} total=${allSessions.length}` +
+    `source-missing=${missing} ignored-missing=${ignoredMissing} total=${allSessions.length}` +
     (DRY_RUN ? " [DRY RUN]" : "");
   log(summaryLine);
 
@@ -1333,7 +1359,7 @@ async function main() {
     `${flag} transcript-dump ${stamp}\n` +
       `· 새 소스: ${written}건 (데스크톱 ${desktopWritten})\n` +
       `· 건너뜀: ${skipped} · 보류: ${deferred} · 중복청크: ${duplicateChunks}\n` +
-      `· 소스누락: ${missing} · 총 세션: ${allSessions.length}` +
+      `· 소스누락: ${missing} · 예외누락: ${ignoredMissing} · 총 세션: ${allSessions.length}` +
       (desktopSessions.length
         ? `\n· 데스크톱 후보: ${desktopSessions.length}건`
         : "")
@@ -1356,6 +1382,9 @@ export {
   collectMergedResultEntries,
   collectResultFiles,
   fingerprintTurns,
+  hasProviderSourceIdentifier,
+  hasRecoveredTranscriptDump,
+  ignoredMissingSourceReason,
   normalizeFingerprintText,
   parseResultEntries,
   readFrontmatter,

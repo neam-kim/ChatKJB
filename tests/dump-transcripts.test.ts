@@ -10,6 +10,9 @@ import {
   collectMergedResultEntries,
   collectResultFiles,
   fingerprintTurns,
+  hasProviderSourceIdentifier,
+  hasRecoveredTranscriptDump,
+  ignoredMissingSourceReason,
   normalizeFingerprintText,
   parseResultEntries,
   scanExistingTranscriptSources,
@@ -104,6 +107,56 @@ describe("transcript dump deduplication", () => {
       "hash-a": "session-123",
       "hash-b": "session-123",
     });
+  });
+
+  it("distinguishes permanent sourceless records from real missing source files", () => {
+    const codexWithoutThread = {
+      id: "session-without-thread",
+      provider: "codex",
+      codex_thread_id: null,
+    };
+    const agyWithoutConversation = {
+      id: "session-without-conversation",
+      provider: "agy",
+      agy_conversation_id: null,
+    };
+    const codexWithMissingFile = {
+      id: "session-with-missing-file",
+      provider: "codex",
+      codex_thread_id: "019ef7fa-e0a6-7a51-9189-8b656aa0aa5f",
+    };
+
+    expect(hasProviderSourceIdentifier(codexWithoutThread)).toBe(false);
+    expect(hasProviderSourceIdentifier(agyWithoutConversation)).toBe(false);
+    expect(hasProviderSourceIdentifier(codexWithMissingFile)).toBe(true);
+    expect(ignoredMissingSourceReason(codexWithoutThread, undefined, {})).toBe(
+      "no-source-identifier"
+    );
+    expect(ignoredMissingSourceReason(agyWithoutConversation, undefined, {})).toBe(
+      "no-source-identifier"
+    );
+    expect(ignoredMissingSourceReason(codexWithMissingFile, undefined, {})).toBeNull();
+  });
+
+  it("ignores a missing provider file when the transcript was already dumped", () => {
+    const session = {
+      id: "archived-session",
+      provider: "claude",
+      sdk_session_id: "sdk-session",
+    };
+    const previous = {
+      updatedAt: 123,
+      emittedChunkHashes: ["hash-a"],
+      nextPart: 2,
+    };
+
+    expect(hasRecoveredTranscriptDump(session, previous, {})).toBe(true);
+    expect(ignoredMissingSourceReason(session, previous, {})).toBe("already-dumped");
+    expect(
+      ignoredMissingSourceReason(session, undefined, {
+        "archived-session": { maxTurnEnd: 4, maxPart: 1 },
+      })
+    ).toBe("already-dumped");
   });
 });
 

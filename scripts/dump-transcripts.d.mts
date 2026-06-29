@@ -43,3 +43,16 @@ export function scanExistingTranscriptSources(directories?: string[]): {
   sessions: Record<string, { maxTurnEnd: number; maxPart: number }>;
   emittedChunkHashes: Record<string, string>;
 };
+export function hasProviderSourceIdentifier(
+  session: Record<string, unknown>
+): boolean;
+export function hasRecoveredTranscriptDump(
+  session: Record<string, unknown>,
+  previous: unknown,
+  existingSessions?: Record<string, unknown>
+): boolean;
+export function ignoredMissingSourceReason(
+  session: Record<string, unknown>,
+  previous: unknown,
+  existingSessions?: Record<string, unknown>
+): "no-source-identifier" | "already-dumped" | null;
