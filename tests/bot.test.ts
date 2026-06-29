@@ -251,6 +251,11 @@ describe("reserve command parsing", () => {
       dueAt: new Date(2026, 5, 30, 9, 0, 0, 0).getTime(),
       prompt: "README 점검"
     });
+    expect(parseReserveCommand("ChatKJB 내일 오전 9시에 README 점검", now)).toMatchObject({
+      projectIdentifier: "ChatKJB",
+      dueAt: new Date(2026, 5, 30, 9, 0, 0, 0).getTime(),
+      prompt: "README 점검"
+    });
     expect(parseReserveCommand("ChatKJB 30분 뒤 테스트 실행", now)).toMatchObject({
       projectIdentifier: "ChatKJB",
       dueAt: new Date(2026, 5, 29, 22, 40, 0, 0).getTime(),
@@ -567,6 +572,84 @@ describe("/new defaults fast path", () => {
 });
 
 describe("/reserve command", () => {
+  it("shows project choices when reserve is called without arguments", async () => {
+    const { bot, calls } = botSetup();
+
+    await bot.handleUpdate(reserveCommand("/reserve"));
+
+    const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
+    expect(reply?.text).toBe("예약할 프로젝트를 선택하세요.");
+    expect(JSON.stringify(reply?.reply_markup)).toContain("resp:0");
+  });
+
+  it("opens a reservation topic after a project is picked", async () => {
+    const { bot, calls } = botSetup();
+
+    await bot.handleUpdate(reserveCommand("/reserve"));
+    await bot.handleUpdate(callbackUpdate("resp:0", 2));
+
+    expect(calls.some((call) => call.method === "createForumTopic")).toBe(true);
+    const topicMessage = calls
+      .filter((call) => call.method === "sendMessage")
+      .map((call) => call.payload)
+      .find((payload) => payload.message_thread_id === 7777);
+    expect(topicMessage?.text).toContain("test 예약");
+    expect(topicMessage?.text).toContain("이 토픽에 예약할 시간과 작업을 입력하세요");
+  });
+
+  it("stores a topic-backed reservation from a message in the reservation topic", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 29, 22, 10, 0, 0));
+    try {
+      const { bot, store, calls } = botSetup();
+
+      await bot.handleUpdate(reserveCommand("/reserve"));
+      await bot.handleUpdate(callbackUpdate("resp:0", 2));
+      await bot.handleUpdate(textMessage("내일 오전 9시에 README 점검", 3, 7777));
+
+      const task = store.listPendingReservedTasks()[0];
+      expect(task).toMatchObject({
+        projectName: "test",
+        prompt: "README 점검",
+        dueAt: new Date(2026, 5, 30, 9, 0, 0, 0).getTime(),
+        topicId: 7777,
+        status: "pending"
+      });
+      expect(calls.filter((call) => call.method === "sendMessage").at(-1)?.payload.text)
+        .toContain("예약했습니다.");
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reuses a reservation topic when the scheduled task starts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 29, 22, 10, 0, 0));
+    try {
+      const { bot, store, sessions, calls } = botSetup();
+      vi.spyOn(sessions as unknown as { execute: () => Promise<void> }, "execute")
+        .mockResolvedValue();
+
+      await bot.handleUpdate(reserveCommand("/reserve"));
+      await bot.handleUpdate(callbackUpdate("resp:0", 2));
+      await bot.handleUpdate(textMessage("30분 뒤 테스트 실행", 3, 7777));
+      const taskId = store.listPendingReservedTasks()[0]!.id;
+
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+
+      const task = store.getReservedTask(taskId);
+      expect(task?.status).toBe("done");
+      expect(task?.topicId).toBe(7777);
+      const created = store.listSessions(10).find((item) => item.id === task?.sessionId);
+      expect(created?.topicId).toBe(7777);
+      expect(calls.some((call) => call.method === "editForumTopic")).toBe(true);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("stores a pending reserved task using the current defaults", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 5, 29, 22, 10, 0, 0));

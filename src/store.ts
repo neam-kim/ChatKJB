@@ -501,6 +501,7 @@ export class StateStore {
     projectName: string;
     prompt: string;
     dueAt: number;
+    topicId?: number | null;
     startOptions?: ReservedTaskStartOptions;
   }): ReservedTaskRecord {
     const now = Date.now();
@@ -512,7 +513,7 @@ export class StateStore {
       dueAt: input.dueAt,
       status: "pending",
       errorMessage: null,
-      topicId: null,
+      topicId: input.topicId ?? null,
       sessionId: null,
       startOptions: input.startOptions ?? {},
       createdAt: now,

@@ -81,6 +81,13 @@ interface PendingStart {
   leanMode?: boolean | undefined;
 }
 
+interface PendingReserve {
+  project: ProjectConfig;
+  topicId: number;
+  startOptions: ReservedTaskStartOptions;
+  defaultsSummaryText: string;
+}
+
 function pendingStartKey(userId: number, topicId?: number): string {
   return `${userId}:${topicId ?? "general"}`;
 }
@@ -182,7 +189,7 @@ function parseReserveTime(input: string, now = new Date()): { dueAt: number; pro
     return date ? { dueAt: date.getTime(), prompt: match[6]!.trim() } : null;
   }
 
-  match = /^(오늘|내일)\s+(오전|오후)?\s*(\d{1,2})(?:시)?(?:\s*(\d{1,2})분|:(\d{2}))?\s+(.+)$/.exec(text);
+  match = /^(오늘|내일)\s+(오전|오후)?\s*(\d{1,2})(?:시(?:에)?)?(?:\s*(\d{1,2})분|:(\d{2}))?\s+(.+)$/.exec(text);
   if (match) {
     const hour = parseKoreanHour(match[2], match[3]!);
     const minute = Number.parseInt(match[4] ?? match[5] ?? "0", 10);
@@ -193,7 +200,7 @@ function parseReserveTime(input: string, now = new Date()): { dueAt: number; pro
     return due ? { dueAt: due.getTime(), prompt: match[6]!.trim() } : null;
   }
 
-  match = /^(오전|오후)?\s*(\d{1,2})(?:시)?(?:\s*(\d{1,2})분|:(\d{2}))?\s+(.+)$/.exec(text);
+  match = /^(오전|오후)?\s*(\d{1,2})(?:시(?:에)?)?(?:\s*(\d{1,2})분|:(\d{2}))?\s+(.+)$/.exec(text);
   if (match) {
     const hour = parseKoreanHour(match[1], match[2]!);
     const minute = Number.parseInt(match[3] ?? match[4] ?? "0", 10);
@@ -491,6 +498,14 @@ function projectKeyboard(projects: ProjectConfig[]): InlineKeyboard {
   return keyboard;
 }
 
+function reserveProjectKeyboard(projects: ProjectConfig[]): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [index, project] of projects.entries()) {
+    keyboard.text(project.name, `resp:${index}`).row();
+  }
+  return keyboard;
+}
+
 export function modelKeyboard(catalog: ModelCatalog = FALLBACK_MODEL_CATALOG): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const [index, option] of catalog.claudeModels.entries()) {
@@ -653,6 +668,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       : {})
   });
   const pendingStarts = new Map<string, PendingStart>();
+  const pendingReserves = new Map<string, PendingReserve>();
   const pendingProjectPaths = new Set<string>();
   const defaultPanelKeyboard = (defaults: SessionDefaults) =>
     defaultsKeyboard(
@@ -682,10 +698,16 @@ export function createBot(config: AppConfig, store: StateStore) {
   const startSessionFromOptions = async (
     project: ProjectConfig,
     prompt: string,
-    options: Partial<PendingStart>
+    options: Partial<PendingStart>,
+    topicId?: number | null
   ): Promise<SessionRecord> => {
     const title = topicTitle(project.name, prompt);
-    const newTopicId = await transport.createTopic(config.chatId, title);
+    const newTopicId = topicId ?? await transport.createTopic(config.chatId, title);
+    if (topicId) {
+      await transport.renameTopic(config.chatId, topicId, title).catch((error) => {
+        console.error("Telegram reserved topic rename failed:", safeErrorMessage(error));
+      });
+    }
     const session = sessions.createSession(
       project,
       config.chatId,
@@ -730,7 +752,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     try {
       const project = resolveProject(config.projects, task.projectName);
       if (!project) throw new Error(`예약 프로젝트를 찾을 수 없습니다: ${task.projectName}`);
-      const session = await startSessionFromOptions(project, task.prompt, task.startOptions);
+      const session = await startSessionFromOptions(project, task.prompt, task.startOptions, task.topicId);
       store.updateReservedTask(task.id, {
         status: "done",
         topicId: session.topicId,
@@ -766,6 +788,32 @@ export function createBot(config: AppConfig, store: StateStore) {
         reply_markup: defaultPanelKeyboard(defaults)
       }
     );
+  };
+
+  const openPendingReserveTopic = async (
+    project: ProjectConfig,
+    defaults: SessionDefaults
+  ): Promise<number> => {
+    const topicId = await transport.createTopic(config.chatId, `예약 - ${project.name}`);
+    const defaultsSummaryText = defaultsSummary(defaults, config.modelCatalog);
+    pendingReserves.set(
+      pendingStartKey(config.allowedUserId, topicId),
+      {
+        project,
+        topicId,
+        startOptions: cleanReservedTaskStartOptions(pendingFieldsForDefaults(defaults)),
+        defaultsSummaryText
+      }
+    );
+    await bot.api.sendMessage(
+      config.chatId,
+      `${project.name} 예약 · ${defaultsSummaryText}\n이 토픽에 예약할 시간과 작업을 입력하세요.\n예: 내일 오전 9시 README 점검해줘`,
+      {
+        message_thread_id: topicId,
+        reply_markup: defaultPanelKeyboard(defaults)
+      }
+    );
+    return topicId;
   };
 
   const scheduleReservedTask = (task: ReservedTaskRecord): void => {
@@ -983,8 +1031,19 @@ export function createBot(config: AppConfig, store: StateStore) {
   });
 
   bot.command("reserve", async (ctx) => {
-    const parsed = parseReserveCommand(ctx.match, new Date());
+    const input = ctx.match.trim();
+    if (!input) {
+      await ctx.reply("예약할 프로젝트를 선택하세요.", { reply_markup: reserveProjectKeyboard(config.projects) });
+      return;
+    }
+    const parsed = parseReserveCommand(input, new Date());
     if (!parsed) {
+      const project = resolveProject(config.projects, input);
+      if (project) {
+        await openPendingReserveTopic(project, store.getSessionDefaults());
+        await ctx.reply(`${project.name} 예약 토픽을 열었습니다.`);
+        return;
+      }
       await ctx.reply(
         "사용법: /reserve <프로젝트> <시간> <작업>\n"
         + "예: /reserve ChatKJB 내일 오전 9시 README 점검해줘\n"
@@ -1974,6 +2033,20 @@ export function createBot(config: AppConfig, store: StateStore) {
     await ctx.reply(`${project.name} 작업 토픽을 열었습니다.`);
   });
 
+  bot.callbackQuery(/^resp:/, async (ctx) => {
+    const projectIndex = Number.parseInt(ctx.callbackQuery.data.slice("resp:".length), 10);
+    const project = Number.isInteger(projectIndex)
+      ? config.projects[projectIndex]
+      : undefined;
+    if (!project) {
+      await ctx.answerCallbackQuery({ text: "프로젝트를 찾을 수 없습니다." });
+      return;
+    }
+    await openPendingReserveTopic(project, store.getSessionDefaults());
+    await ctx.answerCallbackQuery({ text: `${project.name} 예약` });
+    await ctx.reply(`${project.name} 예약 토픽을 열었습니다.`);
+  });
+
   bot.callbackQuery(/^stop:/, async (ctx) => {
     const sessionId = ctx.callbackQuery.data.slice("stop:".length);
     const stopped = sessions.stop(sessionId);
@@ -2651,6 +2724,40 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     if (ctx.message.text.startsWith("/")) return;
+    const pendingReserve = pendingReserves.get(pendingKey);
+    if (pendingReserve) {
+      const parsed = parseReserveTime(ctx.message.text, new Date());
+      if (!parsed) {
+        await ctx.reply(
+          "예약 시간을 해석하지 못했습니다.\n"
+          + "예: 내일 오전 9시 README 점검해줘\n"
+          + "예: 30분 뒤 테스트 실행\n"
+          + "예: 2026-06-30 09:00 README 점검해줘"
+        );
+        return;
+      }
+      if (parsed.dueAt <= Date.now() + 5_000) {
+        await ctx.reply("예약 시각은 현재보다 5초 이상 뒤여야 합니다.");
+        return;
+      }
+      pendingReserves.delete(pendingKey);
+      const task = store.createReservedTask({
+        chatId: config.chatId,
+        projectName: pendingReserve.project.name,
+        prompt: parsed.prompt,
+        dueAt: parsed.dueAt,
+        topicId: pendingReserve.topicId,
+        startOptions: pendingReserve.startOptions
+      });
+      scheduleReservedTask(task);
+      await ctx.reply(
+        `예약했습니다.\n`
+        + `${pendingReserve.project.name} · ${formatTimestamp(task.dueAt)}\n`
+        + `${pendingReserve.defaultsSummaryText}\n`
+        + task.prompt
+      );
+      return;
+    }
     const existing = topicId
       ? store.getSessionByTopic(config.chatId, topicId)
       : undefined;
