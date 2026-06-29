@@ -1,241 +1,243 @@
 # ChatKJB
 
-ChatKJB는 텔레그램으로 내 Mac의 AI 작업자에게 일을 맡기고, 진행 상황과 결과를 휴대폰에서 확인하는 개인용 작업 오케스트레이터입니다.
+ChatKJB는 Telegram에서 내 Mac의 AI 작업자를 부르는 개인용 작업 오케스트레이터입니다.
 
-코딩을 잘 모르는 사람도 텔레그램에 평소 말하듯 요청하면, ChatKJB가 미리 등록된 프로젝트 폴더 안에서 Claude, Codex, agy 중 알맞은 AI를 실행합니다. 필요하면 파일을 읽고 고치며, 위험한 작업은 텔레그램 버튼으로 먼저 허락을 받습니다.
+Telegram 그룹에 평소 말하듯 요청하면 ChatKJB가 등록된 프로젝트 폴더에서 Claude, Codex, agy 중 알맞은 실행기를 열고 작업을 진행합니다. 파일을 읽고 수정하며, 테스트를 돌리고, 긴 작업의 진행 상황과 승인 요청을 Telegram topic으로 돌려줍니다.
 
-이 문서는 세 부분으로 나뉩니다.
+이 README는 처음 보는 사람도 따라 할 수 있도록 네 부분으로 나뉩니다.
 
-| 구분 | 읽는 사람 | 내용 |
+| 구분 | 대상 | 내용 |
 | --- | --- | --- |
-| 1부 | 봇을 사용하는 사람 | ChatKJB가 무엇인지, 텔레그램에서 어떻게 쓰는지 |
-| 2부 | 직접 운영하는 사람 | Mac에 설치하고, 인증하고, 자동 실행하는 방법 |
-| 3부 | 개발자 | 코드 구조, 테스트, 기능 추가 위치 |
+| 1부 | 사용자 | Telegram에서 실제로 어떻게 쓰는지 |
+| 2부 | 운영자 | Mac에 설치하고 자동 실행하는 법 |
+| 3부 | 개발자 | 구조, 테스트, 기능 추가 위치 |
+| 4부 | 문제 해결 | 자주 막히는 지점과 확인 명령 |
 
-비개발자는 보통 1부만 읽으면 됩니다.
+비개발자는 보통 1부만 읽으면 됩니다. 직접 설치하는 분은 2부까지 읽으십시오.
 
 ---
 
-# 1부. 사용 안내
+# 1부. Telegram에서 사용하기
 
-## ChatKJB가 해 주는 일
+## ChatKJB가 하는 일
 
-ChatKJB는 텔레그램 그룹 안에서 다음 일을 대신 연결해 줍니다.
+ChatKJB는 다음 흐름으로 동작합니다.
 
-- 사용자가 텔레그램에 요청을 보냅니다.
-- ChatKJB가 어떤 프로젝트 폴더에서 일할지 고릅니다.
-- Claude, Codex, agy 중 선택한 AI가 그 폴더의 파일을 읽고 작업합니다.
-- 진행 상황, 승인 요청, 완료 결과가 텔레그램 주제(topic)에 올라옵니다.
-- 필요하면 다른 AI로 바꿔도 이전 맥락을 요약해 이어 갑니다.
+1. 사용자가 Telegram supergroup에서 `/new`를 보냅니다.
+2. ChatKJB가 작업할 프로젝트를 고르게 합니다.
+3. 선택한 프로젝트마다 새 Telegram topic을 만들고 세션을 시작합니다.
+4. Claude, Codex, agy 중 현재 설정된 제공자가 실제 작업을 수행합니다.
+5. 진행 상황, 질문, 승인 버튼, 완료 결과가 같은 topic에 올라옵니다.
+6. 같은 topic에 다시 메시지를 보내면 이전 맥락을 이어서 작업합니다.
 
-즉, 텔레그램이 "내 Mac에서 돌아가는 AI 작업실 리모컨"이 됩니다.
+즉, Telegram이 “내 Mac 안의 AI 작업실 리모컨”이 됩니다.
 
-## 무엇을 맡길 수 있나요?
-
-대표적인 사용 예시는 다음과 같습니다.
+## 맡길 수 있는 일
 
 | 하고 싶은 일 | 예시 요청 |
 | --- | --- |
-| 문서 정리 | `이 README를 처음 보는 사람도 이해하게 고쳐줘` |
-| 코드 수정 | `로그인이 실패할 때 원인을 찾아 고쳐줘` |
-| 테스트 실행 | `수정한 뒤 테스트와 타입체크까지 확인해줘` |
-| 긴 대화 요약 | `이 세션에서 결정된 내용만 정리해줘` |
-| 자료 검토 | `이 PDF를 읽고 핵심 주장과 근거를 표로 정리해줘` |
-| 여러 AI 의견 비교 | `/synth 이 설계의 위험 요소를 분석해줘` |
-| 과거 지식 검색 | `/query 예전에 정한 메모리 정책이 뭐였지?` |
+| 코드 수정 | `로그인이 실패하는 원인을 찾아 고치고 테스트까지 돌려줘` |
+| 문서 작성 | `README를 초보자용으로 다시 써줘` |
+| 테스트와 빌드 | `수정 후 npm run typecheck, npm test, npm run build 확인해줘` |
+| 파일 분석 | `방금 올린 PDF를 읽고 핵심 주장과 근거를 표로 정리해줘` |
+| 긴 작업 자동 진행 | `/goal 모든 테스트가 통과하고 README가 최신 기능을 반영한다` |
+| 제공자 추천 | `/route 이 작업은 Claude, Codex, agy 중 누가 좋을까?` |
+| 여러 AI 검토 | `/synth 이 설계의 위험 요소를 비교 검토해줘` |
+| 과거 기록 검색 | `/query 이전에 정한 메모리 정책이 뭐였지?` |
 
-AI가 하는 일은 프로젝트 폴더 안의 파일 작업, 셸 명령 실행, 문서 읽기, 요약, 검토, 테스트 실행 등입니다. 텔레그램에 파일을 보내면 그 파일도 작업에 포함할 수 있습니다.
+AI는 등록된 프로젝트 폴더를 기준으로 파일 읽기, 파일 수정, 셸 명령 실행, 테스트 실행, 문서 요약, 코드 리뷰를 수행할 수 있습니다.
 
-## 기본 개념
+## 기본 용어
 
-| 용어 | 쉬운 뜻 |
+| 용어 | 뜻 |
 | --- | --- |
-| 프로젝트 | AI가 작업할 폴더입니다. 예: 이 저장소, 논문 폴더, 업무 문서 폴더 |
-| 주제(topic) | 텔레그램 그룹 안의 대화방 탭입니다. ChatKJB는 보통 작업 하나를 주제 하나로 나눕니다. |
-| 세션 | 한 주제 안에서 이어지는 작업 대화입니다. 앞에서 말한 내용을 기억합니다. |
-| 제공자 | 실제 일을 하는 AI입니다. 현재 Claude, Codex, agy를 지원합니다. |
-| 모델 | 제공자 안에서 고르는 두뇌 종류입니다. 예: Claude Opus, Codex GPT, Gemini |
-| 권한 모드 | AI가 파일 수정이나 명령 실행을 얼마나 자유롭게 할 수 있는지 정하는 설정입니다. |
-| 한도 | 구독 계정의 사용량 제한입니다. ChatKJB는 사용량과 회복 시각을 보여 주고, 가능한 경우 다른 계정으로 자동 전환합니다. |
+| 프로젝트 | AI가 작업할 로컬 폴더입니다. 예: 이 저장소, 논문 폴더, 업무 폴더 |
+| topic | Telegram forum supergroup 안의 주제 탭입니다. 작업 하나가 보통 topic 하나입니다. |
+| 세션 | 한 topic 안에서 이어지는 작업 대화입니다. 이전 지시와 결과를 기억합니다. |
+| 제공자 | 실제 일을 수행하는 AI 실행기입니다. 현재 Claude, Codex, agy를 지원합니다. |
+| 모델 | 제공자 안에서 고르는 모델입니다. `/model`, `/thinking`, `/power`로 조정합니다. |
+| 권한 모드 | 파일 수정과 명령 실행을 얼마나 자동으로 허용할지 정하는 설정입니다. |
+| 목표 | `/goal`로 설정하는 자동 진행 조건입니다. 조건이 충족될 때까지 후속 턴을 예약합니다. |
 
-## 처음 쓰는 방법
+## 첫 작업 시작
 
-봇이 이미 설치되어 있다고 가정하면, 텔레그램에서는 다음 순서로 쓰면 됩니다.
+Telegram에서 다음 순서로 진행합니다.
 
-1. 텔레그램 그룹에서 `/new`를 보냅니다.
-2. 버튼으로 작업할 프로젝트를 고릅니다.
-3. 아래쪽 기본값 패널에서 제공자와 모델을 확인합니다. 잘 모르겠으면 그대로 둡니다.
-4. 하고 싶은 일을 한 문장으로 보냅니다.
-5. ChatKJB가 새 주제를 만들고 작업을 시작합니다.
-6. AI가 중간 진행 상황을 올립니다.
-7. 승인 버튼이 나오면 내용을 보고 허용하거나 거부합니다.
-8. 완료 메시지를 받은 뒤 같은 주제에 다시 메시지를 보내면 이어서 작업합니다.
+1. ChatKJB가 들어 있는 Telegram supergroup을 엽니다.
+2. `/new`를 보냅니다.
+3. 버튼으로 프로젝트를 고릅니다.
+4. 기본 제공자와 모델을 확인합니다. 잘 모르겠으면 그대로 둡니다.
+5. 하고 싶은 일을 한 문장 이상으로 적습니다.
+6. 새 topic이 만들어지면 그 topic 안에서 진행 상황을 봅니다.
+7. 승인 버튼이 뜨면 내용을 확인하고 허용 또는 거부합니다.
+8. 완료 후 같은 topic에 추가 요청을 보내면 이어서 작업합니다.
 
-예시는 다음과 같습니다.
+예시:
 
 ```text
 /new
 ```
 
-프로젝트 선택 뒤:
+프로젝트 선택 후:
 
 ```text
-이 프로젝트 README를 비개발자도 이해할 수 있게 다시 써줘.
-수정 후 타입체크와 테스트까지 확인해줘.
+이 저장소 README를 처음 보는 사람도 설치와 사용을 따라 할 수 있게 고쳐줘.
+현재 구현된 명령과 스크립트를 모두 반영하고, 끝나면 타입체크와 테스트를 확인해줘.
 ```
 
 ## 자주 쓰는 명령어
 
-명령어는 텔레그램에서 `/`로 시작하는 한 줄입니다. 텔레그램 입력창에 `/`만 쳐도 메뉴가 뜹니다.
+Telegram 명령어는 `/`로 시작합니다.
 
-| 상황 | 명령 |
+| 명령 | 용도 |
 | --- | --- |
-| 새 작업 시작 | `/new` |
-| 등록된 프로젝트 보기 | `/projects` |
-| 현재 상태 보기 | `/status` |
-| 사용량과 한도 보기 | `/usage` |
-| 작업 중단 | `/stop` |
-| 현재 대화 맥락 초기화 | `/reset` |
-| 실행 중 방향 수정 | `/steer 표로 정리해줘` |
-| 현재 작업이 끝난 뒤 할 일 예약 | `/next 끝나면 테스트도 돌려줘` |
-| 목표를 만족할 때까지 자동 진행 | `/goal 모든 테스트가 통과할 때까지` |
-| 목표 해제 | `/goal clear` |
-| 제공자 또는 모델 변경 | `/model` |
-| 권한 모드 변경 | `/mode` |
-| 최소 구현 원칙 켜기/끄기 | `/lean on`, `/lean off` |
-| 현재 작업 복제 | `/fork` |
-| 긴 대화 압축 | `/compact` |
-| 오래 기억할 사실 저장 | `/memory` |
-| 변경 diff 확인 | `/diff` |
-| 파일 받기 | `/upload output/report.pdf` |
-| 세션과 텔레그램 주제 삭제 | `/delete` |
-| 환경 진단 | `/doctor` |
+| `/new` | 새 작업과 새 topic을 시작합니다. |
+| `/projects` | 등록된 프로젝트 목록을 봅니다. |
+| `/sessions` | 최근 세션 목록을 봅니다. |
+| `/status` | 봇과 현재 작업 상태를 확인합니다. |
+| `/usage` | Claude/Codex 사용량과 한도 상태를 봅니다. |
+| `/doctor` | 실행 환경을 진단합니다. |
+| `/stop` | 현재 topic의 실행 중 작업을 중단합니다. |
+| `/reset` | 세션의 대화 맥락만 초기화합니다. |
+| `/delete` | Telegram topic과 로컬 세션을 삭제합니다. |
 
-## 조금 더 강한 명령어
+## 작업을 조종하는 명령어
 
-| 명령 | 언제 쓰나요? | 주의 |
+| 명령 | 용도 |
+| --- | --- |
+| `/steer <지시>` | 실행 중인 작업에 즉시 방향 수정을 보냅니다. |
+| `/next <지시>` | 현재 작업이 끝난 뒤 실행할 후속 작업을 예약합니다. |
+| `/goal <조건>` | 조건이 충족될 때까지 자동으로 후속 턴을 진행합니다. |
+| `/goal clear` | 자동 목표를 해제합니다. |
+| `/fork` | 현재 세션을 복제해 다른 방향으로 이어 갑니다. |
+| `/compact` | 긴 세션 맥락을 압축합니다. |
+| `/memory <내용>` | 오래 기억할 사실을 전역 메모리에 기록하도록 요청합니다. |
+| `/diff` | 현재 프로젝트의 git diff 요약을 봅니다. |
+| `/upload <경로>` | 프로젝트 안의 결과 파일을 Telegram으로 받습니다. |
+
+`/goal`은 `check:` 줄을 함께 쓸 수 있습니다. `check:` 명령이 실패하면 목표가 아직 미달성인 것으로 판단합니다.
+
+```text
+/goal README가 최신 기능을 모두 설명하고 검증 명령이 통과한다
+check: npm run typecheck
+check: npm test
+```
+
+## 제공자와 모델을 바꾸는 명령어
+
+| 명령 | 용도 |
+| --- | --- |
+| `/model` | 제공자와 모델을 확인하거나 변경합니다. |
+| `/thinking` | Claude의 extended thinking 설정을 확인하거나 변경합니다. |
+| `/power` | 현재 AI 작업량 또는 추론 강도를 확인하거나 변경합니다. |
+| `/effort` | `/power`와 같은 계열의 추론 강도 조정 명령입니다. |
+| `/mode` | 권한 모드를 확인하거나 변경합니다. |
+| `/lean on` | 최소 구현 원칙을 켭니다. |
+| `/lean off` | 최소 구현 원칙을 끕니다. |
+| `/tokenid <번호>` | 새 Codex 세션에 사용할 Codex 계정 번호를 지정합니다. |
+
+권한 모드는 다음 값을 사용합니다.
+
+| 모드 | 의미 |
+| --- | --- |
+| `auto` | 기본값입니다. 일반 작업은 진행하고 위험 작업은 확인합니다. |
+| `default` | 더 보수적으로 승인 요청을 합니다. |
+| `acceptEdits` | 파일 편집은 비교적 쉽게 허용합니다. |
+| `plan` | 읽기와 계획 중심으로 제한합니다. |
+| `dontAsk` | 가장 자동화된 모드입니다. 신뢰하는 작업에만 쓰십시오. |
+
+## 추천, 종합, 검색 명령어
+
+| 명령 | 용도 | 주의 |
 | --- | --- | --- |
-| `/route 작업 설명` | Claude, Codex, agy 중 어느 AI가 알맞은지 추천받고 싶을 때 | 추천만 합니다. 자동 배정은 하지 않습니다. |
-| `/synth 작업 설명` | 세 AI에게 동시에 읽기 전용 검토를 시키고, 가장 좋은 답을 골라 통합하고 싶을 때 | 토큰과 시간이 많이 듭니다. 파일 수정용이 아닙니다. |
-| `/query 질문` | LLM-Wiki에 쌓인 과거 대화와 결정 사항을 검색하고 싶을 때 | 현재 세션이 유휴 상태일 때 쓰는 것이 좋습니다. |
+| `/route <작업>` | Claude, Codex, agy 중 적합한 제공자를 추천합니다. | 추천만 하며 자동 실행하지 않습니다. |
+| `/synth <작업>` | 여러 제공자에게 읽기 전용 답변을 받아 비교하고 통합합니다. | 시간과 토큰을 많이 씁니다. |
+| `/query <질문>` | LLM-Wiki에 쌓인 과거 기록을 검색해 답합니다. | 현재 세션이 유휴 상태일 때 쓰는 것이 좋습니다. |
 
 예시:
 
 ```text
-/route 이 PDF에서 CRISPR screen 관련 후보 유전자를 정리해줘
+/route 이 PDF에서 CRISPR screen 후보 유전자를 정리해줘
 ```
 
 ```text
-/synth 이 아키텍처에서 실패할 가능성이 큰 지점을 찾아줘
+/synth 현재 아키텍처에서 실패 가능성이 큰 지점을 찾아줘
 ```
 
 ```text
-/query ChatKJB에서 Claude 토큰 한도 전환은 어떻게 동작해?
+/query ChatKJB에서 Codex 계정 전환은 어떻게 동작해?
 ```
 
-## 파일을 보내고 받는 방법
+## 프로젝트 추가와 삭제
 
-ChatKJB는 텔레그램에 올린 파일을 Mac의 수신함 폴더에 저장한 뒤, 그 경로를 AI에게 알려 줍니다.
-
-지원하는 입력은 사진, 문서, 오디오, 음성, 동영상, GIF, 스티커입니다. PDF는 텍스트 추출과 그림 추출 도구도 사용할 수 있습니다.
-
-파일을 보내는 방법:
-
-1. 작업 주제 안에 파일을 그냥 올립니다.
-2. 필요하면 캡션에 지시를 적습니다.
-3. ChatKJB가 저장 경로를 알려 주고 AI에게 전달합니다.
-
-결과 파일을 받는 방법:
+운영자가 미리 `projects.json`에 등록하지 않았더라도 Telegram에서 프로젝트를 추가할 수 있습니다.
 
 ```text
-/upload output/result.pdf
+/addp /Users/me/work/my-project
+```
+
+삭제:
+
+```text
+/deltp my-project
+```
+
+`/deltp`는 ChatKJB 프로젝트 목록에서만 제거합니다. 실제 폴더를 지우지 않습니다. 마지막 남은 프로젝트는 삭제할 수 없습니다.
+
+## 파일 보내고 받기
+
+작업 topic에 파일을 올리면 ChatKJB가 파일을 Mac의 인박스 폴더에 저장하고 해당 경로를 AI에게 알려 줍니다.
+
+지원 입력:
+
+- 문서
+- 사진
+- 오디오와 음성
+- 동영상
+- GIF
+- 스티커
+
+PDF는 별도 PDF 도구를 통해 텍스트 추출과 그림 추출에 사용할 수 있습니다.
+
+결과 파일 받기:
+
+```text
+/upload output/report.pdf
 ```
 
 상대 경로는 현재 프로젝트 폴더 기준입니다. 절대 경로도 사용할 수 있습니다.
 
-## 승인과 안전장치
+## 안전장치
 
-ChatKJB는 혼자 마음대로 모든 일을 하지 않도록 설계되어 있습니다.
+ChatKJB는 개인 작업 자동화를 위한 도구이므로 다음 안전장치를 둡니다.
 
-- 허용된 텔레그램 사용자와 그룹에서 온 메시지만 처리합니다.
+- `.env`에 등록된 Telegram 사용자와 그룹의 메시지만 처리합니다.
 - 프로젝트 목록에 등록된 폴더를 중심으로 작업합니다.
-- 위험하거나 불확실한 도구 실행은 텔레그램 버튼으로 승인받습니다.
+- 위험하거나 불확실한 작업은 Telegram 버튼으로 승인을 받습니다.
 - 토큰, API 키, 비밀번호처럼 보이는 값은 로그와 메시지에서 마스킹합니다.
-- `.env`, SQLite 데이터베이스, 실제 프로젝트 경로가 담긴 `projects.json`은 Git에 올리지 않습니다.
-
-권한 모드는 `/mode`에서 바꿀 수 있습니다.
-
-| 모드 | 의미 |
-| --- | --- |
-| `auto` | 기본값입니다. 일반적인 작업은 자동 판단하고, 위험한 작업은 승인 요청합니다. |
-| `default` | 더 보수적으로 묻습니다. |
-| `acceptEdits` | 파일 편집은 더 쉽게 허용하고, 그 외 작업은 확인합니다. |
-| `plan` | 읽기와 계획 중심입니다. 실제 변경은 제한합니다. |
-| `dontAsk` | 가장 자동화된 모드입니다. 신뢰하는 작업에만 쓰는 것이 좋습니다. |
-
-## 제공자 선택
-
-ChatKJB는 세 종류의 AI 실행기를 묶어 씁니다.
-
-| 제공자 | 강점 | 필요한 인증 |
-| --- | --- | --- |
-| Claude | 계획, 복잡한 코드 이해, 장문 추론, 도구 승인 흐름 | Claude 구독 OAuth 토큰 |
-| Codex | 코드 수정, 테스트 기반 작업, OpenAI Codex SDK 흐름 | ChatGPT 로그인 기반 Codex 계정 |
-| agy | Gemini 기반 장문 분석과 Antigravity SDK 세션 | Gemini API 키 |
-
-새 작업 전에는 아래쪽 패널에서 기본 제공자를 고를 수 있습니다. 작업 중 제공자를 바꾸려면 `/model`을 쓰면 됩니다. 제공자를 바꿀 때는 이전 대화 전체를 그대로 복사하지 않고, 핵심 목표와 변경 내용을 요약해 다음 AI에게 넘깁니다.
-
-## 자동 목표 진행
-
-`/goal`은 한 번에 끝나지 않는 작업을 자동으로 이어 가게 하는 명령입니다.
-
-예시:
-
-```text
-/goal README가 비개발자용으로 정리되고, npm test와 npm run typecheck가 통과한다
-check: npm test
-check: npm run typecheck
-```
-
-동작 방식:
-
-- 한 턴이 끝나면 목표가 달성됐는지 확인합니다.
-- `check:` 줄이 있으면 그 명령을 먼저 실행해 객관적으로 판정합니다.
-- 아직 부족하면 같은 목표를 향해 다음 턴을 자동으로 예약합니다.
-- 최대 턴 수가 있어 무한 반복을 막습니다.
-- `/goal clear` 또는 `/stop`으로 멈출 수 있습니다.
-
-## 사용량과 한도
-
-`/usage`는 Claude와 Codex 계정의 사용 상태를 보여 줍니다. Claude OAuth 토큰이나 Codex 계정 홈을 여러 개 등록해 두면, 한 계정이 한도에 걸렸을 때 다른 계정으로 전환할 수 있습니다.
-
-한도가 모두 찬 경우에는 가능한 회복 시각까지 기다렸다가 자동 재개하는 상태로 들어갈 수 있습니다. 급한 작업이라면 `/status`와 `/usage`를 함께 확인하십시오.
-
-## 대화 기록과 장기 기억
-
-ChatKJB는 대화가 끝난 뒤 LLM-Wiki로 transcript와 `.result.md` 결과 로그를 보낼 수 있습니다. 이렇게 쌓인 기록은 나중에 `/query`로 다시 찾아볼 수 있습니다.
-
-`/memory`는 현재 세션에서 오래 기억할 만한 사실만 선별해 전역 메모리에 저장합니다. 임시 상태, 추측, 비밀, 단순 작업 로그는 저장 대상이 아닙니다.
+- `.env`, `projects.json`, `data/` 같은 민감한 런타임 파일은 Git에 올리지 않습니다.
+- 한 작업 topic 안에서 실행 상태를 추적하고 `/stop`, `/delete`, `/reset`으로 제어할 수 있습니다.
 
 ---
 
 # 2부. 설치와 운영
 
-여기부터는 ChatKJB를 직접 Mac에서 띄우는 사람을 위한 내용입니다.
+여기부터는 ChatKJB를 직접 Mac에서 실행하는 사람을 위한 내용입니다.
 
 ## 필요한 것
 
 - macOS
 - Node.js 22 이상
 - Telegram 봇 토큰
-- Telegram forum supergroup
-- 사용할 AI 제공자 인증
-  - Claude: `claude setup-token`으로 만든 OAuth 토큰
-  - Codex: `codex login`으로 ChatGPT 로그인한 `CODEX_HOME`
-  - agy: Gemini API 키
-- 작업할 프로젝트 폴더
+- Topics 기능이 켜진 Telegram forum supergroup
+- Claude OAuth 토큰
+- Codex ChatGPT 로그인
+- Gemini API 키
+- AI가 작업할 프로젝트 폴더
 
-## 저장소 받기
+이 저장소의 `package.json` 이름은 내부 호환성 때문에 아직 `telegram-claude-orchestrator`입니다. GitHub 저장소명 `ChatKJB`, npm 패키지명 `telegram-claude-orchestrator`, launchd 라벨 `com.neam.telegram-claude-orchestrator`는 같은 시스템을 가리킵니다.
+
+## 1단계. 저장소 받기
 
 ```bash
 git clone https://github.com/neam-kim/ChatKJB
@@ -243,62 +245,117 @@ cd ChatKJB
 npm install
 ```
 
-이 저장소의 `package.json` 이름은 아직 내부 런타임 호환성을 위해 `telegram-claude-orchestrator`입니다. GitHub 저장소명 `ChatKJB`와 launchd 라벨 `com.neam.telegram-claude-orchestrator`는 같은 시스템을 가리킵니다.
-
-## Telegram 준비
-
-1. BotFather에서 새 봇을 만들고 토큰을 받습니다.
-2. 본인용 Telegram supergroup을 만들고 Topics 기능을 켭니다.
-3. 봇을 그룹 관리자로 추가합니다.
-4. 봇에 `Manage Topics`, `Delete Messages` 권한을 줍니다.
-5. 본인 Telegram user ID와 그룹 chat ID를 확인합니다.
-
-ChatKJB는 `.env`의 허용 user ID와 chat ID가 모두 맞는 업데이트만 처리합니다.
-
-## 환경 파일 만들기
+Node 버전 확인:
 
 ```bash
-test -f .env || cp .env.example .env
+node -v
+```
+
+`v22` 이상이어야 합니다. Node 버전이 낮으면 `better-sqlite3` 같은 네이티브 모듈에서 문제가 날 수 있습니다.
+
+## 2단계. Telegram 준비
+
+1. Telegram에서 `@BotFather`를 엽니다.
+2. `/newbot`으로 봇을 만들고 토큰을 받습니다.
+3. 개인용 Telegram supergroup을 만듭니다.
+4. 그룹 설정에서 Topics 기능을 켭니다.
+5. 봇을 그룹에 추가하고 관리자로 지정합니다.
+6. 봇에 `Manage Topics`, `Delete Messages` 권한을 줍니다.
+7. 본인의 Telegram user ID와 그룹 chat ID를 확인합니다.
+
+ChatKJB는 허용된 사용자 ID와 허용된 chat ID가 모두 맞는 메시지만 처리합니다.
+
+## 3단계. `.env` 만들기
+
+예제 파일을 복사합니다.
+
+```bash
+cp .env.example .env
 chmod 600 .env
 ```
 
-필수 값 예시:
+권한 `0600`은 필수입니다. 권한이 다르면 실행 시 설정 로딩이 실패합니다.
+
+필수 값:
 
 ```dotenv
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_USER_ID=...
-TELEGRAM_CHAT_ID=-100...
-CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-GEMINI_API_KEY=...
+TELEGRAM_BOT_TOKEN=123456:replace-me
+TELEGRAM_ALLOWED_USER_ID=123456789
+TELEGRAM_CHAT_ID=-1001234567890
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-replace-me
+GEMINI_API_KEY=replace-with-google-ai-studio-key
 ```
 
-두 Telegram 계정에서 같은 그룹을 쓰려면 쉼표로 추가 허용 ID를 등록합니다.
+여러 Telegram 사용자를 허용하려면 쉼표로 등록합니다.
 
 ```dotenv
 TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 ```
 
-Claude OAuth 토큰은 다음 명령으로 설정할 수 있습니다.
+`TELEGRAM_ALLOWED_USER_ID` 하나만 써도 되고, `TELEGRAM_ALLOWED_USER_IDS`만 써도 됩니다. 둘 다 쓰면 합쳐서 중복 제거합니다.
+
+## 4단계. AI 제공자 인증
+
+### Claude
+
+Claude OAuth 토큰은 다음 스크립트로 설정할 수 있습니다.
 
 ```bash
 npm run auth:setup
 ```
 
-Codex는 각 계정 홈에서 한 번 로그인합니다.
+추가 Claude 계정 토큰은 `.env`에 넣을 수 있습니다.
+
+```dotenv
+CLAUDE_CODE_OAUTH_TOKEN_2=sk-ant-oat01-replace-me
+CLAUDE_CODE_OAUTH_TOKEN_3=sk-ant-oat01-replace-me
+```
+
+기본 토큰이 한도에 도달하거나 rate limit이 발생하면 다음 세션부터 다른 토큰으로 전환할 수 있습니다.
+
+### Codex
+
+Codex는 ChatGPT 로그인 기반 `CODEX_HOME`을 사용합니다.
+
+단일 계정:
+
+```bash
+codex login
+```
+
+여러 계정:
 
 ```bash
 CODEX_HOME=/Users/me/.codex codex login
+CODEX_HOME=/Users/me/.codex-acct-b codex login
 ```
 
-여러 Codex 계정을 쓰려면 `.env`에 쉼표로 등록합니다.
+`.env`에 계정 홈을 쉼표로 등록합니다.
 
 ```dotenv
 CODEX_ACCOUNT_HOMES=/Users/me/.codex,/Users/me/.codex-acct-b
 ```
 
-## 프로젝트 등록
+각 홈에는 `auth.json`이 있어야 하며, `auth_mode`가 `chatgpt`인 로그인만 허용됩니다.
 
-`projects.json`은 실제 작업 폴더 목록입니다. Git에는 올리지 않습니다.
+### agy
+
+agy는 Gemini API 키와 Antigravity SDK 브리지를 사용합니다.
+
+```dotenv
+GEMINI_API_KEY=replace-with-google-ai-studio-key
+```
+
+agy 실행 파일이나 Python 환경을 직접 지정해야 하면 다음 값을 사용합니다.
+
+```dotenv
+AGY_EXECUTABLE=/Users/me/.local/bin/agy
+AGY_SDK_PYTHON=/Users/me/.local/share/telegram-claude-orchestrator/agy-sdk/bin/python
+```
+
+## 5단계. 프로젝트 등록
+
+`projects.json`은 AI가 작업할 폴더 목록입니다. 실제 경로가 들어가므로 Git에 올리지 않습니다.
 
 ```bash
 cp projects.example.json projects.json
@@ -310,17 +367,26 @@ cp projects.example.json projects.json
 [
   {
     "name": "ChatKJB",
-    "cwd": "/Users/neam/Library/CloudStorage/SynologyDrive-neam/AI/ChatKJB",
+    "cwd": "/Users/me/work/ChatKJB",
     "defaultMode": "auto"
   }
 ]
 ```
 
-텔레그램에서도 `/addp /절대/경로`로 프로젝트를 추가하고 `/deltp 이름`으로 제거할 수 있습니다. 등록 삭제는 목록에서만 제거하며 실제 폴더는 지우지 않습니다.
+지원 필드:
 
-## 실행
+| 필드 | 설명 |
+| --- | --- |
+| `name` | Telegram에서 보이는 프로젝트 이름입니다. |
+| `aliases` | 선택 항목입니다. 같은 프로젝트를 다른 이름으로 찾을 수 있게 합니다. |
+| `cwd` | 실제 작업 폴더입니다. 절대 경로를 권장합니다. SMB URL은 런타임에서 파일 경로로 해석됩니다. |
+| `defaultMode` | 새 세션 기본 권한 모드입니다. `auto`, `default`, `acceptEdits`, `plan`, `dontAsk` 중 하나입니다. |
 
-개발 실행:
+ChatKJB는 시작 시 접근할 수 없는 프로젝트를 건너뜁니다. NAS나 외장 디스크가 다시 연결된 뒤 재시작하면 다시 사용할 수 있습니다.
+
+## 6단계. 실행
+
+개발 모드:
 
 ```bash
 npm run dev
@@ -333,9 +399,11 @@ npm run build
 npm start
 ```
 
-## Mac 자동 시작
+정상 실행되면 Telegram에서 `/start`, `/doctor`, `/new`를 보내 확인합니다.
 
-launchd LaunchAgent를 설치합니다.
+## 7단계. Mac 자동 시작
+
+LaunchAgent 설치:
 
 ```bash
 npm run launchd:install
@@ -347,13 +415,11 @@ npm run launchd:install
 npm run launchd:restart
 ```
 
-중지:
+상태 확인:
 
 ```bash
-launchctl bootout gui/$(id -u)/com.neam.telegram-claude-orchestrator
+launchctl print gui/$(id -u)/com.neam.telegram-claude-orchestrator
 ```
-
-주의: `bootout`은 등록 해제와 중지를 함께 하므로, 단순 재시작에는 `npm run launchd:restart`를 쓰십시오.
 
 로그:
 
@@ -362,9 +428,39 @@ data/stdout.log
 data/stderr.log
 ```
 
-## LLM-Wiki transcript 수집
+단순 재시작은 `npm run launchd:restart`를 쓰십시오. `launchctl bootout`은 등록 해제까지 함께 수행합니다.
 
-완료된 세션과 `.result.md` 결과 로그를 LLM-Wiki inbox로 모을 수 있습니다.
+## 주요 환경 변수
+
+| 변수 | 필수 | 기본값 | 설명 |
+| --- | --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | 예 | 없음 | BotFather에서 받은 봇 토큰입니다. |
+| `TELEGRAM_ALLOWED_USER_ID` | 조건부 | 없음 | 허용할 단일 Telegram 사용자 ID입니다. |
+| `TELEGRAM_ALLOWED_USER_IDS` | 조건부 | 없음 | 허용할 여러 사용자 ID CSV입니다. |
+| `TELEGRAM_CHAT_ID` | 예 | 없음 | ChatKJB가 동작할 Telegram group chat ID입니다. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | 예 | 없음 | Claude Code OAuth 토큰입니다. |
+| `CLAUDE_CODE_OAUTH_TOKEN_2`, `_3` | 아니오 | 없음 | Claude 추가 계정 토큰입니다. |
+| `GEMINI_API_KEY` | 예 | 없음 | agy/Gemini용 API 키입니다. |
+| `CODEX_ACCOUNT_HOMES` | 아니오 | `CODEX_HOME` 또는 `~/.codex` | Codex 계정 홈 CSV입니다. |
+| `DATABASE_PATH` | 아니오 | `./data/state.sqlite` | SQLite 상태 DB 위치입니다. |
+| `PROJECTS_PATH` | 아니오 | `./projects.json` | 프로젝트 목록 파일입니다. |
+| `FILE_INBOX_DIR` | 아니오 | `~/.claude/channels/telegram/inbox` | Telegram 첨부 파일 저장 위치입니다. |
+| `CLAUDE_MEMORY_DIR` | 아니오 | `~/.claude/memory` | Claude 장기 메모리 위치입니다. |
+| `APPROVAL_TIMEOUT_MINUTES` | 아니오 | `30` | 승인 버튼 대기 시간입니다. |
+| `STATUS_DEBOUNCE_MS` | 아니오 | `2500` | 진행 상태 메시지 debounce 시간입니다. |
+| `MCP_TOOL_TIMEOUT_SECONDS` | 아니오 | `60` | 일반 MCP 도구 타임아웃입니다. |
+| `MCP_MAX_ATTEMPTS` | 아니오 | `3` | MCP 도구 재시도 횟수입니다. |
+| `CODEX_MCP_TIMEOUT_MINUTES` | 아니오 | `30` | Codex 장기 MCP 타임아웃입니다. |
+| `CODEX_MCP_HEARTBEAT_SECONDS` | 아니오 | `60` | Codex MCP heartbeat 알림 주기입니다. |
+| `LONG_RUNNING_MCP_SERVERS` | 아니오 | `codex,obsidian` | 장기 실행으로 취급할 MCP 서버 이름입니다. |
+| `TURN_IDLE_TIMEOUT_MINUTES` | 아니오 | `35` | 스트림이 완전히 멈춘 턴을 중단하는 워치독입니다. |
+| `CLAUDE_CODE_EXECUTABLE` | 아니오 | PATH의 `claude` | Claude 실행 파일 경로입니다. |
+| `AGY_EXECUTABLE` | 아니오 | `~/.local/bin/agy` 또는 PATH | agy 실행 파일 경로입니다. |
+| `AGY_SDK_PYTHON` | 아니오 | 사용자 전용 agy SDK Python | agy SDK 브리지 Python입니다. |
+
+## Transcript와 결과 로그 수집
+
+완료된 세션 transcript와 `.result.md` 결과 로그를 LLM-Wiki inbox로 모을 수 있습니다.
 
 수동 실행:
 
@@ -380,25 +476,42 @@ npm run transcripts:install-agent
 
 특징:
 
+- 완료, 오류, 중단, 검증 실패 상태의 세션을 수집합니다.
 - 같은 세션을 반복 덤프해도 새로 늘어난 대화 묶음만 기록합니다.
-- Unicode와 공백을 정규화한 지문으로 중복을 막습니다.
-- 완료, 오류, 중단, 검증 실패 상태의 세션만 처리합니다.
-- 사용자 홈과 SynologyDrive 아래의 `.result.md`를 찾아 하나의 결과 로그 파일로 병합할 수 있습니다.
+- Unicode와 공백을 정규화한 지문으로 중복을 줄입니다.
+- 사용자 홈과 SynologyDrive 아래의 `.result.md`를 찾아 결과 로그로 병합할 수 있습니다.
 
 ## PDF 도구
 
-`scripts/pdf-tools-mcp.py`는 이미 설치된 PyMuPDF(`fitz`)만 사용해 PDF 도구를 제공합니다.
+`scripts/pdf-tools-mcp.py`는 PyMuPDF(`fitz`)를 사용해 PDF 작업을 돕는 MCP 도구입니다.
 
-도구:
+| 도구 | 역할 |
+| --- | --- |
+| `pdftotext` | PDF 텍스트를 `.txt` 파일로 저장하고 경로를 반환합니다. |
+| `pdf_extract_figures` | PDF 이미지 또는 페이지 렌더링 결과를 PNG로 저장하고 경로를 반환합니다. |
 
-- `pdftotext`: PDF 텍스트를 `.txt` 파일로 저장하고 경로를 반환합니다.
-- `pdf_extract_figures`: PDF 안의 이미지 또는 페이지 렌더링 결과를 PNG로 저장하고 경로를 반환합니다.
+대용량 PDF 본문을 Telegram 메시지로 길게 보내지 않고 파일 경로로 넘기기 위한 도구입니다.
 
-대용량 PDF 본문을 텔레그램 메시지로 길게 밀어 넣지 않고 파일 경로로 넘기기 위한 도구입니다.
+## price-feed MCP
+
+`price-feed-mcp/`는 별도 하위 패키지입니다. 미국 주식 근실시간 시세를 반환하는 독립 MCP 서버이며, 코드상 Toss Securities, Yahoo, Google 순서의 provider 흐름을 갖습니다.
+
+```bash
+cd price-feed-mcp
+npm install
+npm run build
+npm test
+```
+
+실행:
+
+```bash
+npm start
+```
 
 ## 공통 자원 계층
 
-ChatKJB는 Claude, Codex, agy가 같은 지침과 도구 구성을 보도록 공통 자원 계층을 만듭니다.
+ChatKJB는 Claude, Codex, agy가 같은 지침과 리소스를 볼 수 있도록 공통 자원 계층을 동기화합니다.
 
 주요 파일:
 
@@ -416,20 +529,6 @@ ChatKJB는 Claude, Codex, agy가 같은 지침과 도구 구성을 보도록 공
 - 설치된 스킬과 플러그인 스킬을 하나의 카탈로그로 합칩니다.
 - Claude와 Codex의 MCP 커넥터 설정을 병합해 agy에도 전달합니다.
 
-## 운영 점검
-
-자주 쓰는 점검 명령:
-
-```bash
-npm run typecheck
-npm test
-npm run build
-npm run launchd:restart
-launchctl print gui/$(id -u)/com.neam.telegram-claude-orchestrator
-```
-
-이 저장소는 Node 22 런타임을 기준으로 검증되었습니다. 다른 Node 버전에서 `better-sqlite3` ABI 오류가 나면 Node 22 경로로 실행해야 합니다.
-
 ---
 
 # 3부. 개발자 안내
@@ -446,24 +545,26 @@ launchctl print gui/$(id -u)/com.neam.telegram-claude-orchestrator
 - zod
 - vitest
 
-## 주요 디렉터리
+## 주요 디렉터리와 파일
 
 | 경로 | 역할 |
 | --- | --- |
-| `src/` | 봇 본체와 세션 실행 로직 |
-| `scripts/` | 인증, launchd, transcript dump, PDF MCP, agy 브리지 |
-| `tests/` | vitest 테스트 |
-| `launchd/` | LaunchAgent 템플릿 |
-| `data/` | 런타임 DB와 로그. Git 제외 |
-| `dist/` | 빌드 산출물. Git 제외 |
+| `src/` | 봇 본체와 세션 실행 로직입니다. |
+| `scripts/` | 인증, launchd, transcript dump, PDF MCP, agy 브리지 스크립트입니다. |
+| `tests/` | vitest 테스트입니다. |
+| `price-feed-mcp/` | 독립 시세 MCP 서버 하위 패키지입니다. |
+| `data/` | SQLite DB와 로그가 저장되는 런타임 폴더입니다. Git 제외 대상입니다. |
+| `dist/` | TypeScript 빌드 산출물입니다. |
+| `.env.example` | 환경 변수 예제입니다. |
+| `projects.example.json` | 프로젝트 목록 예제입니다. |
 
-## 핵심 파일
+핵심 소스:
 
 | 파일 | 역할 |
 | --- | --- |
-| `src/index.ts` | 앱 진입점, 설정 로딩, 명령 메뉴 등록, 봇 시작 |
-| `src/config.ts` | `.env`, `projects.json`, 실행 경로 설정 |
-| `src/bot.ts` | Telegram 명령, 버튼, 미디어 입력 처리 |
+| `src/index.ts` | 앱 진입점, 설정 로딩, 공통 자원 동기화, Telegram 명령 메뉴 등록, 봇 시작 |
+| `src/config.ts` | `.env`, `projects.json`, 경로, 계정 홈, 환경 검증 |
+| `src/bot.ts` | Telegram 명령, 버튼, 파일 입력, topic 처리 |
 | `src/session-manager.ts` | 세션 실행, 제공자 전환, 목표 자동 진행, 한도 전환 |
 | `src/store.ts` | SQLite 스키마와 CRUD |
 | `src/model-catalog.ts` | 제공자별 모델 목록과 fallback |
@@ -472,29 +573,51 @@ launchctl print gui/$(id -u)/com.neam.telegram-claude-orchestrator
 | `src/codex-account-pool.ts` | Codex 계정 홈 회전 |
 | `src/connectors.ts` | MCP 커넥터 병합과 동기화 |
 | `src/resource-sync.ts` | 공통 지침, 메모리, 스킬, 커넥터 자원 생성 |
-| `src/usage.ts` | 사용량 표시 포매팅 |
+| `src/router.ts` | `/route` 제공자 추천 |
+| `src/judge.ts` | `/synth` 판정과 통합 보조 |
+| `src/goal-checks.ts` | `/goal`의 `check:` 파싱과 위험도 추정 |
+| `src/orchestration/local-tiers.ts` | 로컬 Ollama tier 호출과 timeout |
+| `src/orchestration/frontier-review.ts` | frontier review 오케스트레이션 |
+| `src/stream-renderer.ts` | 세션 스트림을 Telegram 메시지로 렌더링 |
 | `src/redaction.ts` | 비밀정보 마스킹 |
-| `src/orchestration/local-tiers.ts` | 로컬 Ollama 티어 호출, 타임아웃, 동적 `num_ctx` |
-| `src/goal-checks.ts` | `/goal`의 결정론적 `check:` 게이트와 위험도 추정 |
+| `src/filesystem-path.ts` | 로컬 경로와 SMB URL 해석 |
 
 ## 요청 처리 흐름
 
-1. `index.ts`가 봇과 저장소, 모델 카탈로그, 공통 자원을 초기화합니다.
-2. `bot.ts`가 Telegram 업데이트를 받고 허용된 사용자와 그룹인지 확인합니다.
-3. `/new`는 프로젝트를 고르고 새 topic과 세션을 만듭니다.
-4. 일반 메시지는 해당 topic의 세션으로 이어집니다.
-5. `session-manager.ts`가 세션 제공자에 따라 Claude, Codex, agy를 실행합니다.
-6. 스트리밍 출력과 승인 요청은 Telegram topic에 전송됩니다.
-7. 완료 후 상태와 사용량, 결과 요약이 저장됩니다.
+1. `src/index.ts`가 설정, 저장소, 모델 카탈로그, 공통 자원을 초기화합니다.
+2. `src/bot.ts`가 Telegram 업데이트를 받고 허용된 사용자와 그룹인지 확인합니다.
+3. `/new`가 프로젝트 선택 UI를 띄우고 새 topic과 세션을 만듭니다.
+4. 일반 메시지는 해당 topic의 세션으로 전달됩니다.
+5. `src/session-manager.ts`가 provider 설정에 따라 Claude, Codex, agy를 실행합니다.
+6. 스트리밍 출력, 승인 요청, 오류, 완료 결과가 Telegram topic에 전송됩니다.
+7. 세션 상태와 사용량, 요약이 SQLite DB에 저장됩니다.
+8. 필요하면 transcript dump가 완료 세션을 LLM-Wiki inbox로 보냅니다.
 
-## 새 명령을 추가하는 위치
+## npm 스크립트
+
+| 명령 | 역할 |
+| --- | --- |
+| `npm run auth:setup` | Claude OAuth 토큰 설정 스크립트를 실행합니다. |
+| `npm run dev` | `tsx watch src/index.ts`로 개발 실행합니다. |
+| `npm run build` | `dist/`를 지우고 TypeScript 빌드를 수행합니다. |
+| `npm start` | `node dist/index.js`로 빌드 산출물을 실행합니다. |
+| `npm run launchd:install` | LaunchAgent를 설치합니다. |
+| `npm run launchd:restart` | LaunchAgent를 재시작합니다. |
+| `npm run transcripts:dump` | transcript와 결과 로그를 수동 수집합니다. |
+| `npm run transcripts:install-agent` | transcript dump LaunchAgent를 설치합니다. |
+| `npm run typecheck` | TypeScript 타입체크를 실행합니다. |
+| `npm test` | 전체 vitest 테스트를 실행합니다. |
+| `npm run test:agy-live` | 실제 agy 네트워크 live 테스트를 실행합니다. |
+
+`prism`, `prism:status`, `prism:block-status` 스크립트는 `scripts/prismctl`이 있는 환경에서만 동작합니다. 일반 설치와 검증에는 필요하지 않습니다.
+
+## 새 Telegram 명령 추가
 
 1. `src/bot.ts`에 `bot.command("name", ...)` 핸들러를 추가합니다.
-2. Telegram 공개 메뉴에 보여야 하면 `src/index.ts`의 `setMyCommands`에도 추가합니다.
-3. 세션 상태가 필요하면 `src/types.ts`와 `src/store.ts` 마이그레이션을 수정합니다.
-4. 실행 옵션에 영향을 주면 `src/session-manager.ts`에서 세 제공자 경로를 확인합니다.
-5. 상태 표시가 필요하면 `formatSessionStatus`에 추가합니다.
-6. README 명령표와 테스트를 갱신합니다.
+2. 공개 메뉴에 보여야 하면 `src/index.ts`의 `setMyCommands`에도 추가합니다.
+3. 세션 상태 저장이 필요하면 `src/types.ts`와 `src/store.ts` 마이그레이션을 수정합니다.
+4. 제공자 실행 옵션에 영향을 주면 `src/session-manager.ts`의 Claude/Codex/agy 경로를 확인합니다.
+5. 사용자에게 보이는 명령이면 README 명령표와 테스트를 갱신합니다.
 
 ## 검증
 
@@ -512,40 +635,162 @@ npm run build
 npm test -- tests/orchestration-local-tiers.test.ts
 ```
 
-agy live 테스트는 실제 인증과 네트워크가 필요하므로 별도 스크립트로 분리되어 있습니다.
+agy live 테스트:
 
 ```bash
 npm run test:agy-live
 ```
 
-## 커밋 전 확인할 것
+agy live 테스트는 실제 인증과 네트워크가 필요합니다. `.env.example`의 `AGY_LIVE_TEST=1` 안내를 확인한 뒤 실행하십시오.
 
-- `.env`, `projects.json`, `data/`가 Git에 들어가지 않았는지 확인합니다.
-- 토큰이나 API 키가 README, 테스트 fixture, 로그에 포함되지 않았는지 확인합니다.
-- 사용자에게 보이는 명령을 바꿨다면 README와 `setMyCommands`를 함께 갱신합니다.
-- 런타임 라벨 `com.neam.telegram-claude-orchestrator`를 바꾸는 작업은 launchd, 로그, 메모리, 기존 DB 경로까지 함께 점검해야 합니다.
+## 커밋 전 확인
+
+- `.env`, `projects.json`, `data/`, 로그 파일이 Git에 들어가지 않았는지 확인합니다.
+- README, 테스트 fixture, 로그에 토큰이나 API 키가 들어가지 않았는지 확인합니다.
+- Telegram 공개 명령을 바꿨다면 `src/index.ts`의 `setMyCommands`, `src/bot.ts`, README를 함께 갱신합니다.
+- 설정 키를 바꿨다면 `.env.example`, `src/config.ts`, README를 함께 갱신합니다.
+- launchd 라벨 `com.neam.telegram-claude-orchestrator`를 바꾸는 작업은 기존 DB, 로그, LaunchAgent, 문서까지 함께 점검합니다.
+
+---
+
+# 4부. 문제 해결
+
+## 빠른 상태 확인
+
+```bash
+npm run typecheck
+npm test
+npm run build
+npm run launchd:restart
+launchctl print gui/$(id -u)/com.neam.telegram-claude-orchestrator
+```
+
+Telegram에서는 다음을 보냅니다.
+
+```text
+/doctor
+/status
+/usage
+```
+
+## `.env` 권한 오류
+
+증상:
+
+- 시작 직후 설정 로딩 실패
+- `.env permissions must be 0600` 오류
+
+해결:
+
+```bash
+chmod 600 .env
+```
+
+## Node 버전 문제
+
+증상:
+
+- `better-sqlite3` ABI 오류
+- 빌드 또는 실행 시 네이티브 모듈 오류
+
+해결:
+
+```bash
+node -v
+npm install
+npm run build
+```
+
+Node 22 이상에서 다시 설치하십시오.
+
+## Telegram 응답이 없을 때
+
+확인 순서:
+
+1. `.env`의 `TELEGRAM_BOT_TOKEN`이 맞는지 확인합니다.
+2. `TELEGRAM_CHAT_ID`가 실제 supergroup ID인지 확인합니다.
+3. `TELEGRAM_ALLOWED_USER_ID` 또는 `TELEGRAM_ALLOWED_USER_IDS`에 본인 ID가 있는지 확인합니다.
+4. 봇이 그룹 관리자이고 topic 관리 권한이 있는지 확인합니다.
+5. `data/stderr.log`와 `data/stdout.log`를 확인합니다.
+
+## 프로젝트가 보이지 않을 때
+
+확인 순서:
+
+1. `projects.json` 경로가 `.env`의 `PROJECTS_PATH`와 맞는지 봅니다.
+2. 각 `cwd`가 실제 존재하는 디렉터리인지 확인합니다.
+3. ChatKJB 프로세스가 해당 폴더를 읽고 쓸 수 있는지 확인합니다.
+4. NAS나 외장 디스크 경로라면 마운트 상태를 확인합니다.
+5. Telegram에서 `/projects`를 보냅니다.
+
+## Claude/Codex 한도 문제
+
+확인:
+
+```text
+/usage
+```
+
+대응:
+
+- Claude는 `CLAUDE_CODE_OAUTH_TOKEN_2`, `CLAUDE_CODE_OAUTH_TOKEN_3`에 추가 토큰을 등록할 수 있습니다.
+- Codex는 `CODEX_ACCOUNT_HOMES`에 여러 `CODEX_HOME`을 등록할 수 있습니다.
+- 한도에 도달한 계정은 회복 시각까지 대기하거나 다음 계정으로 전환합니다.
+
+## Codex 로그인 문제
+
+각 계정 홈에서 로그인합니다.
+
+```bash
+CODEX_HOME=/Users/me/.codex codex login
+```
+
+`CODEX_ACCOUNT_HOMES`에 등록한 각 디렉터리에는 `auth.json`이 있어야 하고, ChatGPT 로그인(`auth_mode=chatgpt`)이어야 합니다.
+
+## agy 문제
+
+확인:
+
+```bash
+npm run test:agy-live
+```
+
+`GEMINI_API_KEY`, `AGY_EXECUTABLE`, `AGY_SDK_PYTHON` 값을 확인하십시오. live 테스트는 실제 네트워크와 인증을 사용합니다.
+
+## 실행 중 작업이 멈춘 것 같을 때
+
+- `/status`로 현재 세션 상태를 봅니다.
+- `/stop`으로 실행을 중단할 수 있습니다.
+- `TURN_IDLE_TIMEOUT_MINUTES`는 스트림이 완전히 멈춘 턴을 자동 중단하는 최후의 안전장치입니다.
+- 장기 MCP 작업은 `LONG_RUNNING_MCP_SERVERS`, `CODEX_MCP_TIMEOUT_MINUTES`, `CODEX_MCP_HEARTBEAT_SECONDS` 설정을 확인합니다.
 
 ---
 
 # 현재 제한
 
 - 단일 Telegram supergroup을 기준으로 동작합니다.
-- Telegram Bot API 제한상 큰 파일 수신에는 제한이 있습니다.
-- 사용자가 앱에서 직접 삭제한 topic은 Telegram이 삭제 이벤트를 보내지 않으므로, 로컬 세션까지 지우려면 `/delete`를 사용해야 합니다.
+- Telegram Bot API 제한 때문에 큰 파일 수신과 전송에는 제한이 있습니다.
+- 사용자가 Telegram 앱에서 topic을 직접 삭제하면 Bot API가 삭제 이벤트를 주지 않으므로, 로컬 세션까지 지우려면 `/delete`를 사용해야 합니다.
 - 프로젝트별 작업 큐는 충돌 방지를 위해 한 번에 하나씩 실행합니다.
-- Codex는 계정 전환 시 기존 Codex 스레드를 그대로 이어받지 못할 수 있어 요약 기반으로 새 스레드를 시작합니다.
+- Codex는 계정 전환 시 기존 Codex thread를 그대로 이어받지 못할 수 있어 요약 기반으로 새 thread를 시작합니다.
 - agy는 Gemini API 키와 SDK 상태에 의존합니다.
 
 ---
 
 # 빠른 참조
 
+처음 설치:
+
 ```bash
 npm install
-npm run auth:setup
+cp .env.example .env
+chmod 600 .env
+cp projects.example.json projects.json
 npm run build
 npm start
 ```
+
+검증:
 
 ```bash
 npm run typecheck
@@ -553,17 +798,21 @@ npm test
 npm run build
 ```
 
+자동 실행:
+
 ```bash
 npm run launchd:install
 npm run launchd:restart
 ```
 
-Telegram에서:
+Telegram:
 
 ```text
 /new
+/projects
 /status
 /usage
+/doctor
 /goal clear
 /stop
 ```
