@@ -77,7 +77,7 @@ describe("LLM-Wiki 경로", () => {
 
   it("WIKI_VAULT가 없으면 기본 경로로 폴백한다", () => {
     expect(wikiVaultPath({} as NodeJS.ProcessEnv)).toBe(
-      "/Volumes/homes/mac_neam96/AI/LLM-Wiki"
+      "/Users/neam/Library/CloudStorage/SynologyDrive-neam/AI/LLM-Wiki"
     );
   });
 

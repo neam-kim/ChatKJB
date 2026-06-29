@@ -1,4 +1,5 @@
 import { InputFile, type Api, type InlineKeyboard } from "grammy";
+import { redactSensitiveText } from "./redaction.js";
 import type { MessageTransport } from "./types.js";
 
 function sleep(ms: number): Promise<void> {
@@ -28,9 +29,10 @@ export function safeErrorMessage(error: unknown, secrets: string[] = []): string
   for (const secret of secrets) {
     if (secret) message = message.replaceAll(secret, "[REDACTED]");
   }
-  return message
+  message = message
     .replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot[REDACTED]")
     .replace(/sk-ant-oat01-[A-Za-z0-9_-]+/g, "sk-ant-oat01-[REDACTED]");
+  return redactSensitiveText(message);
 }
 
 export class TelegramTransport implements MessageTransport {

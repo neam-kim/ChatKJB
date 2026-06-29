@@ -8,7 +8,7 @@ import { filesystemPath } from "./filesystem-path.js";
 export function wikiVaultPath(env: NodeJS.ProcessEnv = process.env): string {
   return filesystemPath(
     env.WIKI_VAULT ||
-    "smb://JB_Kim._smb._tcp.local/homes/mac_neam96/AI/LLM-Wiki"
+    "/Users/neam/Library/CloudStorage/SynologyDrive-neam/AI/LLM-Wiki"
   );
 }
 

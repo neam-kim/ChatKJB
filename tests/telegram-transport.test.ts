@@ -15,4 +15,11 @@ describe("Telegram transport logging", () => {
     expect(message).not.toContain(oauthToken);
     expect(message).toContain("[REDACTED]");
   });
+
+  it("uses the shared redactor for generic API key errors", () => {
+    const message = safeErrorMessage(new Error("GEMINI_API_KEY=gemini-secret-value-1234567890"));
+
+    expect(message).not.toContain("gemini-secret-value");
+    expect(message).toContain("GEMINI_API_KEY=[REDACTED]");
+  });
 });

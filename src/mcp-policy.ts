@@ -53,6 +53,12 @@ function remoteServer(value: unknown): McpHttpServerConfig | McpSSEServerConfig 
   if ((server.type !== "http" && server.type !== "sse") || typeof server.url !== "string") {
     return null;
   }
+  try {
+    const url = new URL(server.url);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
   const headers = server.headers === undefined ? undefined : stringRecord(server.headers);
   if (server.headers !== undefined && !headers) return null;
   return {

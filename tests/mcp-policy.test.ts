@@ -29,6 +29,10 @@ describe("MCP policy", () => {
           type: "http",
           url: "https://example.test/mcp",
           headers: { Authorization: "Bearer test" }
+        },
+        local_file: {
+          type: "http",
+          url: "file:///etc/passwd"
         }
       }
     }));
@@ -51,6 +55,7 @@ describe("MCP policy", () => {
       url: "https://example.test/mcp",
       timeout: 60_000
     });
+    expect(servers.local_file).toBeUndefined();
   });
 
   it("recognizes retryable MCP transport failures", () => {

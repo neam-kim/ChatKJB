@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import {
   type ConfigurableMcpServer,
@@ -277,6 +277,15 @@ function findPluginMcpFiles(root: string, output: string[]): void {
   }
 }
 
+function resolvePluginScopedPath(root: string, value: string): string | null {
+  if (!value.startsWith(".")) return value;
+  const scopedRoot = resolve(root);
+  const resolved = resolve(scopedRoot, value);
+  const offset = relative(scopedRoot, resolved);
+  if (offset === "" || offset.startsWith("..") || isAbsolute(offset)) return null;
+  return resolved;
+}
+
 export function loadPluginMcpServers(
   cacheRoot = join(homedir(), ".codex", "plugins", "cache")
 ): Record<string, ConfigurableMcpServer> {
@@ -293,14 +302,21 @@ export function loadPluginMcpServers(
     const root = dirname(file);
     for (const [name, raw] of Object.entries(payload.mcpServers ?? {})) {
       const normalized = { ...raw };
-      if (typeof normalized.command === "string" && normalized.command.startsWith(".")) {
-        normalized.command = resolve(root, normalized.command);
+      let invalidPath = false;
+      if (typeof normalized.command === "string") {
+        const command = resolvePluginScopedPath(root, normalized.command);
+        if (command === null) invalidPath = true;
+        else normalized.command = command;
       }
       if (Array.isArray(normalized.args)) {
-        normalized.args = normalized.args.map((arg) =>
-          typeof arg === "string" && arg.startsWith(".") ? resolve(root, arg) : arg
-        );
+        normalized.args = normalized.args.map((arg) => {
+          if (typeof arg !== "string") return arg;
+          const resolved = resolvePluginScopedPath(root, arg);
+          if (resolved === null) invalidPath = true;
+          return resolved ?? arg;
+        });
       }
+      if (invalidPath) continue;
       const server = parseMcpServerEntry(normalized);
       if (server) result[name] = server;
     }

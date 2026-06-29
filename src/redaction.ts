@@ -5,7 +5,7 @@ const secretPatterns: RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
   /\b\d{6,12}:[A-Za-z0-9_-]{20,}\b/g,
   /\bBearer\s+[A-Za-z0-9._~+/-]+=*\b/gi,
-  /\b((?:OPENAI|ANTHROPIC|CODEX|CLAUDE|TELEGRAM)?_?(?:API_?KEY|AUTH_?TOKEN|ACCESS_?TOKEN|BOT_?TOKEN|PASSWORD|SECRET))\s*[:=]\s*([^\s"'`,;]+)/gi
+  /\b((?:(?:OPENAI|ANTHROPIC|CODEX|CLAUDE|TELEGRAM|GEMINI|GOOGLE)_)?(?:API_?KEY|AUTH_?TOKEN|ACCESS_?TOKEN|BOT_?TOKEN|PASSWORD|SECRET))\s*[:=]\s*([^\s"'`,;]+)/gi
 ];
 
 export function redactSensitiveText(value: string): string {

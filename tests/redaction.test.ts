@@ -9,6 +9,7 @@ describe("persistent evidence redaction", () => {
     const text = [
       `CLAUDE_CODE_OAUTH_TOKEN=${oauthToken}`,
       `OPENAI_API_KEY=${apiKey}`,
+      "GEMINI_API_KEY=gemini-secret-value-1234567890",
       "Authorization: Bearer abc.def-ghi",
       `bot=${telegramToken}`
     ].join("\n");
@@ -16,9 +17,10 @@ describe("persistent evidence redaction", () => {
     const redacted = redactSensitiveText(text);
     expect(redacted).not.toContain("secret_value");
     expect(redacted).not.toContain(apiKey);
+    expect(redacted).not.toContain("gemini-secret-value");
     expect(redacted).not.toContain("abc.def-ghi");
     expect(redacted).not.toContain(telegramToken);
-    expect(redacted.match(/\[REDACTED\]/g)?.length).toBe(4);
+    expect(redacted.match(/\[REDACTED\]/g)?.length).toBe(5);
   });
 
   it("redacts nested evidence values without changing non-string fields", () => {

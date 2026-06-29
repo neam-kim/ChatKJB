@@ -310,7 +310,7 @@ cp projects.example.json projects.json
 [
   {
     "name": "ChatKJB",
-    "cwd": "smb://JB_Kim._smb._tcp.local/homes/mac_neam96/AI/ChatKJB",
+    "cwd": "/Users/neam/Library/CloudStorage/SynologyDrive-neam/AI/ChatKJB",
     "defaultMode": "auto"
   }
 ]

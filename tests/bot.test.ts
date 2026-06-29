@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createBot, formatSessionStatus, modelKeyboard } from "../src/bot.js";
+import { createBot, formatSessionStatus, modelKeyboard, resolveSessionUploadPath } from "../src/bot.js";
 import type { AppConfig } from "../src/config.js";
 import { FALLBACK_MODEL_CATALOG } from "../src/model-catalog.js";
 import { StateStore } from "../src/store.js";
@@ -46,7 +46,7 @@ function botSetup(extra?: { claudeCodeOauthTokens?: string[]; codexAccountHomes?
   const store = new StateStore(join(directory, "state.sqlite"));
   const project = { name: "test", cwd: directory, defaultMode: "default" as const };
   store.syncProjects([project]);
-  store.createSession(session("done"));
+  store.createSession({ ...session("done"), cwd: directory });
   const codexAccountHomes = extra?.codexAccountHomes ?? [join(directory, "codex-home")];
   const claudeCodeOauthTokens = extra?.claudeCodeOauthTokens ?? ["test-oauth-token"];
   const config = {
@@ -513,6 +513,34 @@ describe("/new defaults fast path", () => {
     const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
     expect(reply?.text).toContain("실행할 작업을 입력하세요");
     expect(reply?.reply_markup).toBeDefined();
+  });
+});
+
+describe("/upload path policy", () => {
+  it("resolves relative files from the session project", async () => {
+    const { store } = botSetup();
+    const session = store.getSession("session")!;
+    writeFileSync(join(session.cwd, "report.txt"), "ok");
+
+    await expect(resolveSessionUploadPath(session.cwd, "report.txt"))
+      .resolves.toBe(realpathSync(join(session.cwd, "report.txt")));
+  });
+
+  it("rejects absolute paths and traversal outside the session project", async () => {
+    const { store } = botSetup();
+    const session = store.getSession("session")!;
+    const outside = mkdtempSync(join(tmpdir(), "telegram-claude-outside-"));
+    writeFileSync(join(outside, "secret.txt"), "secret");
+    const escapingPath = relative(session.cwd, join(outside, "secret.txt"));
+
+    try {
+      await expect(resolveSessionUploadPath(session.cwd, join(outside, "secret.txt")))
+        .rejects.toThrow("절대경로");
+      await expect(resolveSessionUploadPath(session.cwd, escapingPath))
+        .rejects.toThrow("프로젝트 밖");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
 

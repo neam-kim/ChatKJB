@@ -36,7 +36,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const WIKI_VAULT =
   process.env.WIKI_VAULT ||
-  "smb://JB_Kim._smb._tcp.local/homes/mac_neam96/AI/LLM-Wiki";
+  "/Users/neam/Library/CloudStorage/SynologyDrive-neam/AI/LLM-Wiki";
 const INBOX_DIR = join(WIKI_VAULT, "10-inbox");
 const RAW_DIR = join(WIKI_VAULT, "20-raw");
 const RESULTS_FILE = join(INBOX_DIR, "global-project-results.md");

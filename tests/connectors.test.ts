@@ -151,6 +151,27 @@ describe("loadPluginMcpServers", () => {
       join(plugin, "mcp", "server.cjs")
     );
   });
+
+  it("skips plugin MCP definitions whose relative paths escape the plugin root", () => {
+    const dir = tempDir();
+    const plugin = join(dir, "plugin");
+    mkdirSync(plugin, { recursive: true });
+    writeFileSync(
+      join(plugin, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          badCommand: { command: "../outside.cjs" },
+          badArg: { command: "node", args: ["../outside.cjs"] },
+          good: { command: "node", args: ["--stdio"] }
+        }
+      })
+    );
+
+    const servers = loadPluginMcpServers(dir);
+    expect(servers.badCommand).toBeUndefined();
+    expect(servers.badArg).toBeUndefined();
+    expect((servers.good as { command: string }).command).toBe("node");
+  });
 });
 
 describe("loadClaudeConnectors", () => {

@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
 import { Agent as HttpsAgent, get as httpsGet } from "node:https";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { Bot, InlineKeyboard, Keyboard } from "grammy";
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
@@ -142,6 +142,24 @@ function selectedClaudeTokenIndex(
   if (claudeTokenCount <= 0) return -1;
   if (typeof claudeTokenIndex !== "number" || !Number.isInteger(claudeTokenIndex)) return 0;
   return claudeTokenIndex >= 0 && claudeTokenIndex < claudeTokenCount ? claudeTokenIndex : 0;
+}
+
+export async function resolveSessionUploadPath(cwd: string, inputPath: string): Promise<string> {
+  if (isAbsolute(inputPath)) {
+    throw new Error("절대경로 업로드는 허용하지 않습니다. 세션 프로젝트 기준 상대경로를 입력하세요.");
+  }
+  const root = await realpath(cwd);
+  const requested = resolve(root, inputPath);
+  const actual = await realpath(requested);
+  const offset = relative(root, actual);
+  if (offset.startsWith("..") || isAbsolute(offset)) {
+    throw new Error("세션 프로젝트 밖의 파일은 업로드할 수 없습니다.");
+  }
+  const info = await stat(actual);
+  if (!info.isFile()) {
+    throw new Error("일반 파일만 업로드할 수 있습니다.");
+  }
+  return actual;
 }
 
 export function formatSessionStatus(
@@ -2231,8 +2249,8 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("보낼 파일 경로를 입력하세요.\n예: /upload output/result.pdf");
       return;
     }
-    const filePath = isAbsolute(inputPath) ? inputPath : join(session.cwd, inputPath);
     try {
+      const filePath = await resolveSessionUploadPath(session.cwd, inputPath);
       await transport.sendFile(config.chatId, topicId, filePath);
     } catch (error) {
       await ctx.reply(`파일 전송 실패: ${safeErrorMessage(error)}`);
