@@ -192,9 +192,9 @@ function validateProjectDirectory(path: string): string {
 // 경로에 접근할 수 없는 프로젝트(예: 이름이 바뀐 NAS 폴더)는 치명적 오류로 처리하지 않고
 // 건너뛴다. 단 한 개의 unreachable 경로가 전체 config 로드를 중단시켜 데몬이 KeepAlive로
 // 무한 재시작하던 문제(2026-06-28)를 막기 위함이다. 해석에 성공한 프로젝트들에 대해서는
-// 기존의 이름/별칭 중복, 경로 중복 검사를 그대로 유지하고, 유효한 프로젝트가 하나도 남지
-// 않으면 그때만 throw 한다. unreachable 항목은 projects.json에서 삭제하지 않으므로 NAS가
-// 다시 마운트되고 데몬이 재시작되면 자동으로 복구된다.
+// 기존의 이름/별칭 중복, 경로 중복 검사를 그대로 유지한다. unreachable 항목은
+// projects.json에서 삭제하지 않으므로 NAS가 다시 마운트되고 데몬이 재시작되면 자동으로
+// 복구된다. 등록 프로젝트를 쓰지 않는 폴더 선택 흐름을 위해 빈 목록도 허용한다.
 function validateUniqueProjects(projects: ProjectConfig[]): ProjectConfig[] {
   const identifiers = new Map<string, string>();
   const paths = new Set<string>();
@@ -223,11 +223,6 @@ function validateUniqueProjects(projects: ProjectConfig[]): ProjectConfig[] {
     }
     paths.add(canonical);
     reachable.push(project);
-  }
-  if (reachable.length === 0) {
-    throw new Error(
-      "접근 가능한 프로젝트가 하나도 없습니다. 최소 한 개의 유효한 프로젝트 경로가 필요합니다."
-    );
   }
   return reachable;
 }
@@ -267,8 +262,17 @@ function uniqueProjectName(path: string, projects: ProjectConfig[]): string {
 
 export async function loadProjects(path: string): Promise<ProjectConfig[]> {
   const { readFile } = await import("node:fs/promises");
-  const raw = JSON.parse(await readFile(absolutePath(path), "utf8")) as unknown;
-  const projects = z.array(projectSchema).min(1).parse(raw).map(normalizeProject);
+  let contents: string;
+  try {
+    contents = await readFile(absolutePath(path), "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  const raw = JSON.parse(contents) as unknown;
+  const projects = z.array(projectSchema).parse(raw).map(normalizeProject);
   // unreachable 경로는 건너뛰고 해석에 성공한 프로젝트만 런타임에 사용한다.
   return validateUniqueProjects(projects);
 }
@@ -354,9 +358,6 @@ export async function removeProject(
   const project = resolveProject(projects, identifier);
   if (!project) {
     throw new Error("등록된 프로젝트를 찾을 수 없습니다.");
-  }
-  if (projects.length <= 1) {
-    throw new Error("마지막 프로젝트는 삭제할 수 없습니다. 최소 한 개는 남아 있어야 합니다.");
   }
   const updated = projects.filter((item) => item.name !== project.name);
   await persistProjects(projectsPath, updated);

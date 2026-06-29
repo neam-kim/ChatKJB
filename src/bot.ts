@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { Agent as HttpsAgent, get as httpsGet } from "node:https";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { Bot, InlineKeyboard, Keyboard } from "grammy";
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
@@ -61,6 +61,8 @@ import {
 } from "./usage.js";
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_SYNOLOGY_DRIVE_ROOT = "/Users/neam/Library/CloudStorage/SynologyDrive-neam";
+const MAX_FOLDER_BROWSER_ENTRIES = 40;
 
 interface PendingStart {
   project: ProjectConfig;
@@ -88,6 +90,11 @@ interface PendingReserve {
   defaultsSummaryText: string;
 }
 
+interface FolderBrowserState {
+  currentPath: string;
+  directories: string[];
+}
+
 function pendingStartKey(userId: number, topicId?: number): string {
   return `${userId}:${topicId ?? "general"}`;
 }
@@ -99,6 +106,44 @@ function topicTitle(project: string, prompt: string): string {
 
 function topicLink(chatId: number, topicId: number): string {
   return `https://t.me/c/${String(chatId).replace(/^-100/, "")}/${topicId}`;
+}
+
+function isPathInside(root: string, path: string): boolean {
+  const pathRelativeToRoot = relative(root, path);
+  return pathRelativeToRoot === ""
+    || (!!pathRelativeToRoot && !pathRelativeToRoot.startsWith("..") && !isAbsolute(pathRelativeToRoot));
+}
+
+function projectNameFromSelectedPath(path: string): string {
+  return basename(path)
+    .replace(/[^\p{L}\p{N} _.-]/gu, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^[ ._-]+|[ ._-]+$/g, "")
+    .slice(0, 32) || "project";
+}
+
+function folderBrowserRoot(): string {
+  return process.env.CHATKJB_FOLDER_BROWSER_ROOT?.trim() || DEFAULT_SYNOLOGY_DRIVE_ROOT;
+}
+
+function folderBrowserText(path: string): string {
+  const root = folderBrowserRoot();
+  const relativePath = relative(root, path);
+  const displayPath = relativePath ? join("SynologyDrive-neam", relativePath) : "SynologyDrive-neam";
+  return `폴더를 선택하세요.\n${displayPath}`;
+}
+
+function folderBrowserKeyboard(
+  state: FolderBrowserState,
+  atRoot: boolean
+): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  keyboard.text("이 폴더 선택", "newfs:s").row();
+  for (const [index, name] of state.directories.entries()) {
+    keyboard.text(name, `newfs:o:${index}`).row();
+  }
+  if (!atRoot) keyboard.text("뒤로", "newfs:b").row();
+  return keyboard;
 }
 
 function parseTokenId(input: string): number | null {
@@ -670,6 +715,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   const pendingStarts = new Map<string, PendingStart>();
   const pendingReserves = new Map<string, PendingReserve>();
   const pendingProjectPaths = new Set<string>();
+  const folderBrowsers = new Map<string, FolderBrowserState>();
   const defaultPanelKeyboard = (defaults: SessionDefaults) =>
     defaultsKeyboard(
       defaults,
@@ -774,6 +820,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     defaults: SessionDefaults,
     options: Partial<PendingStart>
   ): Promise<void> => {
+    store.syncProjects([project]);
     const title = topicTitle(project.name, "새 작업");
     const topicId = await transport.createTopic(config.chatId, title);
     pendingStarts.set(
@@ -789,6 +836,41 @@ export function createBot(config: AppConfig, store: StateStore) {
       }
     );
   };
+
+  const readFolderBrowserState = async (path: string): Promise<FolderBrowserState> => {
+    const root = await realpath(folderBrowserRoot());
+    const current = await realpath(path);
+    if (!isPathInside(root, current)) {
+      throw new Error("Synology Drive 루트 밖의 폴더는 선택할 수 없습니다.");
+    }
+    const entries = await readdir(current, { withFileTypes: true });
+    const directories = entries
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b, "ko-KR"))
+      .slice(0, MAX_FOLDER_BROWSER_ENTRIES);
+    return { currentPath: current, directories };
+  };
+
+  const showFolderBrowser = async (
+    key: string,
+    path: string,
+    send: (text: string, keyboard: InlineKeyboard) => Promise<unknown>
+  ): Promise<void> => {
+    const root = await realpath(folderBrowserRoot());
+    const state = await readFolderBrowserState(path);
+    folderBrowsers.set(key, state);
+    await send(
+      folderBrowserText(state.currentPath),
+      folderBrowserKeyboard(state, state.currentPath === root)
+    );
+  };
+
+  const projectFromSelectedFolder = (path: string): ProjectConfig => ({
+    name: projectNameFromSelectedPath(path),
+    cwd: path,
+    defaultMode: "auto"
+  });
 
   const openPendingReserveTopic = async (
     project: ProjectConfig,
@@ -1027,7 +1109,14 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply(`${project.name} 작업 토픽을 열었습니다.`);
       return;
     }
-    await ctx.reply("프로젝트를 선택하세요.", { reply_markup: projectKeyboard(config.projects) });
+    const key = pendingStartKey(config.allowedUserId, ctx.message?.message_thread_id);
+    try {
+      await showFolderBrowser(key, folderBrowserRoot(), (text, keyboard) =>
+        ctx.reply(text, { reply_markup: keyboard })
+      );
+    } catch (error) {
+      await ctx.reply(`Synology Drive 폴더를 읽지 못했습니다.\n${safeErrorMessage(error)}`);
+    }
   });
 
   bot.command("reserve", async (ctx) => {
@@ -1122,6 +1211,10 @@ export function createBot(config: AppConfig, store: StateStore) {
   });
 
   bot.command("projects", async (ctx) => {
+    if (config.projects.length === 0) {
+      await ctx.reply("등록된 프로젝트가 없습니다.");
+      return;
+    }
     const text = config.projects.map((project) => [
       project.name,
       ...(project.aliases?.length ? [`별칭: ${project.aliases.join(", ")}`] : []),
@@ -2031,6 +2124,56 @@ export function createBot(config: AppConfig, store: StateStore) {
     await openPendingStartTopic(project, defaults, pendingFieldsForDefaults(defaults));
     await ctx.answerCallbackQuery({ text: `${project.name} 선택` });
     await ctx.reply(`${project.name} 작업 토픽을 열었습니다.`);
+  });
+
+  bot.callbackQuery(/^newfs:/, async (ctx) => {
+    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
+    const state = folderBrowsers.get(key);
+    if (!state) {
+      await ctx.answerCallbackQuery({ text: "폴더 선택 상태가 만료되었습니다.", show_alert: true });
+      return;
+    }
+    const action = ctx.callbackQuery.data.slice("newfs:".length);
+    if (action === "s") {
+      const defaults = store.getSessionDefaults();
+      const project = projectFromSelectedFolder(state.currentPath);
+      await openPendingStartTopic(project, defaults, pendingFieldsForDefaults(defaults));
+      folderBrowsers.delete(key);
+      await ctx.answerCallbackQuery({ text: `${project.name} 선택` });
+      await ctx.editMessageText(`${project.name} 작업 토픽을 열었습니다.\n${project.cwd}`);
+      return;
+    }
+    if (action === "b") {
+      try {
+        await showFolderBrowser(key, resolve(state.currentPath, ".."), (text, keyboard) =>
+          ctx.editMessageText(text, { reply_markup: keyboard })
+        );
+        await ctx.answerCallbackQuery({ text: "뒤로" });
+      } catch (error) {
+        await ctx.answerCallbackQuery({ text: "상위 폴더를 읽지 못했습니다.", show_alert: true });
+        await ctx.reply(`상위 폴더를 읽지 못했습니다.\n${safeErrorMessage(error)}`);
+      }
+      return;
+    }
+    if (action.startsWith("o:")) {
+      const index = Number.parseInt(action.slice("o:".length), 10);
+      const directory = Number.isInteger(index) ? state.directories[index] : undefined;
+      if (!directory) {
+        await ctx.answerCallbackQuery({ text: "폴더를 찾을 수 없습니다.", show_alert: true });
+        return;
+      }
+      try {
+        await showFolderBrowser(key, join(state.currentPath, directory), (text, keyboard) =>
+          ctx.editMessageText(text, { reply_markup: keyboard })
+        );
+        await ctx.answerCallbackQuery({ text: directory });
+      } catch (error) {
+        await ctx.answerCallbackQuery({ text: "폴더를 읽지 못했습니다.", show_alert: true });
+        await ctx.reply(`폴더를 읽지 못했습니다.\n${safeErrorMessage(error)}`);
+      }
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "지원하지 않는 폴더 동작입니다.", show_alert: true });
   });
 
   bot.callbackQuery(/^resp:/, async (ctx) => {

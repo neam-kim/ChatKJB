@@ -175,7 +175,7 @@ describe("project configuration", () => {
     warnSpy.mockRestore();
   });
 
-  it("throws when no project path is reachable", async () => {
+  it("allows no reachable registered projects", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
     directories.push(directory);
     const projectsPath = join(directory, "projects.json");
@@ -185,10 +185,17 @@ describe("project configuration", () => {
     ]));
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { loadProjects } = await import("../src/config.js");
-    await expect(loadProjects(projectsPath)).rejects.toThrow(
-      "접근 가능한 프로젝트가 하나도 없습니다"
-    );
+    await expect(loadProjects(projectsPath)).resolves.toEqual([]);
+    expect(warnSpy).toHaveBeenCalledTimes(2);
     warnSpy.mockRestore();
+  });
+
+  it("allows a missing projects file", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
+    directories.push(directory);
+    const { loadProjects } = await import("../src/config.js");
+
+    await expect(loadProjects(join(directory, "projects.json"))).resolves.toEqual([]);
   });
 
   it("still rejects duplicate paths among resolvable projects", async () => {
@@ -281,7 +288,7 @@ describe("project configuration", () => {
     expect(remaining[0]!.name).toBe("second");
   });
 
-  it("rejects removing an unknown or the last project", async () => {
+  it("rejects removing an unknown project", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
     directories.push(directory);
     const only = join(directory, "only");
@@ -294,9 +301,22 @@ describe("project configuration", () => {
     await expect(removeProject(projectsPath, projects, "missing")).rejects.toThrow(
       "찾을 수 없습니다"
     );
-    await expect(removeProject(projectsPath, projects, "only")).rejects.toThrow(
-      "마지막 프로젝트"
-    );
+  });
+
+  it("allows removing the last registered project", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
+    directories.push(directory);
+    const only = join(directory, "only");
+    mkdirSync(only);
+    const projectsPath = join(directory, "projects.json");
+    const projects = [{ name: "only", cwd: only, defaultMode: "default" as const }];
+    writeFileSync(projectsPath, JSON.stringify(projects));
+    const { removeProject } = await import("../src/config.js");
+
+    const removed = await removeProject(projectsPath, projects, "only");
+
+    expect(removed.name).toBe("only");
+    expect(JSON.parse(readFileSync(projectsPath, "utf8"))).toEqual([]);
   });
 
   it("rejects relative and duplicate project paths", async () => {

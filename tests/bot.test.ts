@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +15,7 @@ import { StateStore } from "../src/store.js";
 import type { SessionRecord } from "../src/types.js";
 
 const cleanup: Array<{ store: StateStore; directory: string }> = [];
+const originalFolderBrowserRoot = process.env.CHATKJB_FOLDER_BROWSER_ROOT;
 
 function session(status: SessionRecord["status"]): SessionRecord {
   return {
@@ -114,7 +115,7 @@ function botSetup(extra?: { claudeCodeOauthTokens?: string[]; codexAccountHomes?
     return { ok: true, result } as never;
   });
   cleanup.push({ store, directory });
-  return { ...instance, store, calls };
+  return { ...instance, config, store, calls };
 }
 
 function modelCommand(text: string, updateId = 1) {
@@ -237,6 +238,11 @@ function effortCommand(text: string, updateId = 1) {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (originalFolderBrowserRoot === undefined) {
+    delete process.env.CHATKJB_FOLDER_BROWSER_ROOT;
+  } else {
+    process.env.CHATKJB_FOLDER_BROWSER_ROOT = originalFolderBrowserRoot;
+  }
   for (const item of cleanup.splice(0)) {
     item.store.close();
     rmSync(item.directory, { recursive: true, force: true });
@@ -436,6 +442,35 @@ describe("/thinking command", () => {
 });
 
 describe("/new defaults fast path", () => {
+  it("browses Synology folders and starts a session without writing projects.json", async () => {
+    const root = mkdtempSync(join(tmpdir(), "telegram-folder-browser-"));
+    const projectDir = join(root, "Alpha Project");
+    mkdirSync(projectDir);
+    process.env.CHATKJB_FOLDER_BROWSER_ROOT = root;
+    const { bot, config, store, sessions, calls } = botSetup();
+    vi.spyOn(sessions as unknown as { execute: () => Promise<void> }, "execute")
+      .mockResolvedValue();
+
+    await bot.handleUpdate(newCommand());
+
+    const browserMessage = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
+    expect(browserMessage?.text).toContain("폴더를 선택하세요");
+    expect(JSON.stringify(browserMessage?.reply_markup)).toContain("Alpha Project");
+    expect(JSON.stringify(browserMessage?.reply_markup)).toContain("newfs:o:0");
+
+    await bot.handleUpdate(callbackUpdate("newfs:o:0", 2));
+    await bot.handleUpdate(callbackUpdate("newfs:s", 3));
+    await bot.handleUpdate(textMessage("선택 폴더에서 작업", 4, 7777));
+
+    const created = store
+      .listSessions(10)
+      .find((item) => item.topicId === 7777);
+    expect(created?.projectName).toBe("Alpha Project");
+    expect(created?.cwd).toBe(realpathSync(projectDir));
+    expect(existsSync(config.projectsPath)).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("creates a session from the current new-session defaults", async () => {
     const { bot, store, sessions } = botSetup();
     // 세션 생성은 즉시 백그라운드 실행을 큐에 넣는다. 테스트에서는 실제 Claude 실행이
