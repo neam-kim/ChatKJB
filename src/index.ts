@@ -65,6 +65,7 @@ async function main(): Promise<void> {
   process.on("uncaughtException", (error) => notifyFault("uncaughtException", error));
 
   await bot.api.setMyCommands([
+    { command: "start", description: "도움말과 기본값 패널 표시" },
     { command: "new", description: "새 작업 시작 (Claude/Codex/agy)" },
     { command: "reserve", description: "지정 시각에 새 작업 시작" },
     { command: "cancel", description: "대기 중인 예약 작업 선택 취소" },
