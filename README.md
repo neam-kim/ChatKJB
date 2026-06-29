@@ -92,6 +92,8 @@ Telegram 명령어는 `/`로 시작합니다.
 | 명령 | 용도 |
 | --- | --- |
 | `/new` | 새 작업과 새 topic을 시작합니다. |
+| `/reserve <프로젝트> <시간> <작업>` | 지정 시각에 새 작업과 새 topic을 시작합니다. |
+| `/cancel` | 대기 중인 예약 작업을 목록에서 선택해 취소합니다. |
 | `/projects` | 등록된 프로젝트 목록을 봅니다. |
 | `/sessions` | 최근 세션 목록을 봅니다. |
 | `/status` | 봇과 현재 작업 상태를 확인합니다. |
@@ -809,6 +811,8 @@ Telegram:
 
 ```text
 /new
+/reserve ChatKJB 내일 오전 9시 README 점검해줘
+/cancel
 /projects
 /status
 /usage

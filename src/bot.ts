@@ -45,7 +45,14 @@ import {
 import { StateStore } from "./store.js";
 import { agentStrengthsPath, loadStrengthHints, routeProvider, wikiVaultPath } from "./router.js";
 import { safeErrorMessage, TelegramTransport } from "./telegram-transport.js";
-import type { ProjectConfig, ProviderKind, SessionDefaults, SessionRecord } from "./types.js";
+import type {
+  ProjectConfig,
+  ProviderKind,
+  ReservedTaskRecord,
+  ReservedTaskStartOptions,
+  SessionDefaults,
+  SessionRecord
+} from "./types.js";
 import {
   formatAgyUsage,
   formatCodexAccountUsage,
@@ -112,6 +119,111 @@ function formatDuration(milliseconds: number): string {
     : minutes > 0
       ? `${minutes}분 ${remainder}초`
       : `${remainder}초`;
+}
+
+const MAX_RESERVE_TIMEOUT_MS = 2_147_000_000;
+
+interface ParsedReserveCommand {
+  projectIdentifier: string;
+  dueAt: number;
+  prompt: string;
+}
+
+function makeLocalDate(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number
+): Date | null {
+  const date = new Date(year, month - 1, day, hour, minute, 0, 0);
+  if (
+    date.getFullYear() !== year
+    || date.getMonth() !== month - 1
+    || date.getDate() !== day
+    || date.getHours() !== hour
+    || date.getMinutes() !== minute
+  ) {
+    return null;
+  }
+  return date;
+}
+
+function parseKoreanHour(period: string | undefined, rawHour: string): number | null {
+  const hour = Number.parseInt(rawHour, 10);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  if (!period) return hour;
+  if (hour < 1 || hour > 12) return null;
+  if (period === "오전") return hour === 12 ? 0 : hour;
+  if (period === "오후") return hour === 12 ? 12 : hour + 12;
+  return null;
+}
+
+function parseReserveTime(input: string, now = new Date()): { dueAt: number; prompt: string } | null {
+  const text = input.trim().replace(/\s+/g, " ");
+  let match = /^(\d+)\s*(분|시간)\s*(?:뒤|후)\s+(.+)$/.exec(text);
+  if (match) {
+    const amount = Number.parseInt(match[1]!, 10);
+    if (!Number.isInteger(amount) || amount <= 0) return null;
+    const unitMs = match[2] === "시간" ? 3_600_000 : 60_000;
+    return { dueAt: now.getTime() + amount * unitMs, prompt: match[3]!.trim() };
+  }
+
+  match = /^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})\s+(.+)$/.exec(text);
+  if (match) {
+    const date = makeLocalDate(
+      Number.parseInt(match[1]!, 10),
+      Number.parseInt(match[2]!, 10),
+      Number.parseInt(match[3]!, 10),
+      Number.parseInt(match[4]!, 10),
+      Number.parseInt(match[5]!, 10)
+    );
+    return date ? { dueAt: date.getTime(), prompt: match[6]!.trim() } : null;
+  }
+
+  match = /^(오늘|내일)\s+(오전|오후)?\s*(\d{1,2})(?:시)?(?:\s*(\d{1,2})분|:(\d{2}))?\s+(.+)$/.exec(text);
+  if (match) {
+    const hour = parseKoreanHour(match[2], match[3]!);
+    const minute = Number.parseInt(match[4] ?? match[5] ?? "0", 10);
+    if (hour === null || !Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+    const date = new Date(now);
+    if (match[1] === "내일") date.setDate(date.getDate() + 1);
+    const due = makeLocalDate(date.getFullYear(), date.getMonth() + 1, date.getDate(), hour, minute);
+    return due ? { dueAt: due.getTime(), prompt: match[6]!.trim() } : null;
+  }
+
+  match = /^(오전|오후)?\s*(\d{1,2})(?:시)?(?:\s*(\d{1,2})분|:(\d{2}))?\s+(.+)$/.exec(text);
+  if (match) {
+    const hour = parseKoreanHour(match[1], match[2]!);
+    const minute = Number.parseInt(match[3] ?? match[4] ?? "0", 10);
+    if (hour === null || !Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+    const due = makeLocalDate(now.getFullYear(), now.getMonth() + 1, now.getDate(), hour, minute);
+    if (!due) return null;
+    if (due.getTime() <= now.getTime()) due.setDate(due.getDate() + 1);
+    return { dueAt: due.getTime(), prompt: match[5]!.trim() };
+  }
+
+  return null;
+}
+
+function cleanReservedTaskStartOptions(fields: Partial<PendingStart>): ReservedTaskStartOptions {
+  const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
+  return Object.fromEntries(entries) as ReservedTaskStartOptions;
+}
+
+function formatReservedTaskLine(task: ReservedTaskRecord): string {
+  const prompt = task.prompt.replace(/\s+/g, " ").trim().slice(0, 80);
+  return `${task.projectName} · ${formatTimestamp(task.dueAt)}\n${prompt}`;
+}
+
+export function parseReserveCommand(input: string, now = new Date()): ParsedReserveCommand | null {
+  const trimmed = input.trim();
+  const firstSpace = trimmed.search(/\s/);
+  if (firstSpace <= 0) return null;
+  const projectIdentifier = trimmed.slice(0, firstSpace);
+  const parsed = parseReserveTime(trimmed.slice(firstSpace + 1), now);
+  if (!parsed || !parsed.prompt) return null;
+  return { projectIdentifier, ...parsed };
 }
 
 function codexAccountLabel(
@@ -564,6 +676,115 @@ export function createBot(config: AppConfig, store: StateStore) {
       codexHome: index >= 0 ? config.codexAccountHomes[index] ?? null : null
     };
   };
+  const reserveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const startSessionFromOptions = async (
+    project: ProjectConfig,
+    prompt: string,
+    options: Partial<PendingStart>
+  ): Promise<SessionRecord> => {
+    const title = topicTitle(project.name, prompt);
+    const newTopicId = await transport.createTopic(config.chatId, title);
+    const session = sessions.createSession(
+      project,
+      config.chatId,
+      newTopicId,
+      title,
+      prompt,
+      options.resumeSessionId,
+      options.forkSession ?? false,
+      options.model ?? null,
+      options.thinking ?? null,
+      options.claudeEffort ?? null,
+      options.leanMode ?? true,
+      options.provider ?? "claude",
+      options.codexModel ?? null,
+      options.codexReasoning ?? null,
+      options.agyThinkingLevel ?? null,
+      options.agyModel ?? null,
+      options.handoffSummary ?? null,
+      options.codexHome ?? null,
+      options.claudeTokenIndex ?? null
+    );
+    const codexAccount = session.provider === "codex"
+      ? codexAccountLabel(session.codexHome, config.codexAccountHomes)
+      : null;
+    const claudeTokenIndex = selectedClaudeTokenIndex(session.claudeTokenIndex, config.claudeCodeOauthTokens.length);
+    const claudeToken = session.provider === "claude" && config.claudeCodeOauthTokens.length > 1 && claudeTokenIndex >= 0
+      ? `Claude 토큰: #${claudeTokenIndex + 1}`
+      : null;
+    await transport.sendText(
+      config.chatId,
+      session.topicId,
+      `세션을 시작했습니다.${codexAccount ? `\n${codexAccount}` : ""}${claudeToken ? `\n${claudeToken}` : ""}\n${topicLink(config.chatId, session.topicId)}`
+    );
+    return session;
+  };
+
+  const runReservedTask = async (taskId: string): Promise<void> => {
+    reserveTimers.delete(taskId);
+    const task = store.getReservedTask(taskId);
+    if (!task || task.status !== "pending") return;
+    store.updateReservedTask(task.id, { status: "running", errorMessage: null });
+    try {
+      const project = resolveProject(config.projects, task.projectName);
+      if (!project) throw new Error(`예약 프로젝트를 찾을 수 없습니다: ${task.projectName}`);
+      const session = await startSessionFromOptions(project, task.prompt, task.startOptions);
+      store.updateReservedTask(task.id, {
+        status: "done",
+        topicId: session.topicId,
+        sessionId: session.id,
+        errorMessage: null
+      });
+    } catch (error) {
+      const message = safeErrorMessage(error);
+      store.updateReservedTask(task.id, { status: "error", errorMessage: message });
+      await bot.api.sendMessage(
+        config.chatId,
+        `예약 작업 실행 실패\n${task.projectName}\n${formatTimestamp(task.dueAt)}\n${message}`
+      ).catch(() => undefined);
+    }
+  };
+
+  const scheduleReservedTask = (task: ReservedTaskRecord): void => {
+    if (task.status !== "pending") return;
+    const existing = reserveTimers.get(task.id);
+    if (existing) clearTimeout(existing);
+    const delay = Math.max(0, task.dueAt - Date.now());
+    const timeout = setTimeout(() => {
+      if (task.dueAt > Date.now()) {
+        const latest = store.getReservedTask(task.id);
+        if (latest) scheduleReservedTask(latest);
+        return;
+      }
+      void runReservedTask(task.id);
+    }, Math.min(delay, MAX_RESERVE_TIMEOUT_MS));
+    reserveTimers.set(task.id, timeout);
+  };
+
+  const cancelReservedTimer = (taskId: string): void => {
+    const timer = reserveTimers.get(taskId);
+    if (!timer) return;
+    clearTimeout(timer);
+    reserveTimers.delete(taskId);
+  };
+
+  const reservedTaskCancelKeyboard = (): InlineKeyboard | null => {
+    const tasks = store.listPendingReservedTasks();
+    if (tasks.length === 0) return null;
+    const keyboard = new InlineKeyboard();
+    for (const task of tasks) {
+      keyboard.text(
+        `${task.projectName} · ${formatTimestamp(task.dueAt)}`,
+        `rescancel:${task.id}`
+      ).row();
+    }
+    return keyboard;
+  };
+
+  for (const task of store.listPendingReservedTasks()) {
+    scheduleReservedTask(task);
+  }
 
   const registerProject = async (path: string): Promise<ProjectConfig> => {
     const project = await addProject(config.projectsPath, config.projects, cleanPathInput(path));
@@ -718,7 +939,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   bot.command("start", async (ctx) => {
     const defaults = store.getSessionDefaults();
     await ctx.reply(
-      "Claude/Codex/agy 세션 오케스트레이터\n\n/new 새 작업\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /reset, /fork, /compact, /memory, /mode, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론·작업량·토큰)을 클릭만으로 바꿀 수 있습니다.",
+      "Claude/Codex/agy 세션 오케스트레이터\n\n/new 새 작업\n/reserve 예약 작업\n/cancel 예약 취소\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /reset, /fork, /compact, /memory, /mode, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론·작업량·토큰)을 클릭만으로 바꿀 수 있습니다.",
       { reply_markup: defaultPanelKeyboard(defaults) }
     );
   });
@@ -743,6 +964,65 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     await ctx.reply("프로젝트를 선택하세요.", { reply_markup: projectKeyboard(config.projects) });
+  });
+
+  bot.command("reserve", async (ctx) => {
+    const parsed = parseReserveCommand(ctx.match, new Date());
+    if (!parsed) {
+      await ctx.reply(
+        "사용법: /reserve <프로젝트> <시간> <작업>\n"
+        + "예: /reserve ChatKJB 내일 오전 9시 README 점검해줘\n"
+        + "예: /reserve ChatKJB 30분 뒤 테스트 돌려줘\n"
+        + "예: /reserve ChatKJB 2026-06-30 09:00 README 점검해줘"
+      );
+      return;
+    }
+    const project = resolveProject(config.projects, parsed.projectIdentifier);
+    if (!project) {
+      await ctx.reply("프로젝트 이름 또는 별칭을 찾을 수 없습니다. /projects 로 확인하세요.");
+      return;
+    }
+    if (parsed.dueAt <= Date.now() + 5_000) {
+      await ctx.reply("예약 시각은 현재보다 5초 이상 뒤여야 합니다.");
+      return;
+    }
+    const defaults = store.getSessionDefaults();
+    const task = store.createReservedTask({
+      chatId: config.chatId,
+      projectName: project.name,
+      prompt: parsed.prompt,
+      dueAt: parsed.dueAt,
+      startOptions: cleanReservedTaskStartOptions(pendingFieldsForDefaults(defaults))
+    });
+    scheduleReservedTask(task);
+    await ctx.reply(
+      `예약했습니다.\n`
+      + `${project.name} · ${formatTimestamp(task.dueAt)}\n`
+      + `${defaultsSummary(defaults, config.modelCatalog)}\n`
+      + task.prompt
+    );
+  });
+
+  bot.command("cancel", async (ctx) => {
+    const list = reservedTaskCancelKeyboard();
+    if (!list) {
+      await ctx.reply("대기 중인 예약 작업이 없습니다.");
+      return;
+    }
+    await ctx.reply("취소할 예약 작업을 선택하세요.", { reply_markup: list });
+  });
+
+  bot.callbackQuery(/^rescancel:/, async (ctx) => {
+    const taskId = ctx.callbackQuery.data.slice("rescancel:".length);
+    const task = store.getReservedTask(taskId);
+    if (!task || task.status !== "pending") {
+      await ctx.answerCallbackQuery({ text: "취소할 수 있는 예약이 아닙니다.", show_alert: true });
+      return;
+    }
+    cancelReservedTimer(task.id);
+    store.updateReservedTask(task.id, { status: "canceled", errorMessage: null });
+    await ctx.answerCallbackQuery({ text: "예약을 취소했습니다." });
+    await ctx.reply(`예약을 취소했습니다.\n${formatReservedTaskLine(task)}`);
   });
 
   bot.command("tokenid", async (ctx) => {

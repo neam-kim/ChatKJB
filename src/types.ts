@@ -63,6 +63,37 @@ export interface UsageSnapshot {
   extraUsage?: ExtraUsage;
 }
 
+export type ReservedTaskStatus = "pending" | "running" | "done" | "error" | "canceled";
+
+export interface ReservedTaskStartOptions {
+  provider?: ProviderKind;
+  model?: string;
+  thinking?: string;
+  claudeEffort?: string;
+  claudeTokenIndex?: number | null;
+  codexModel?: string;
+  codexReasoning?: string;
+  codexHome?: string | null;
+  agyThinkingLevel?: string;
+  agyModel?: string;
+  leanMode?: boolean;
+}
+
+export interface ReservedTaskRecord {
+  id: string;
+  chatId: number;
+  projectName: string;
+  prompt: string;
+  dueAt: number;
+  status: ReservedTaskStatus;
+  errorMessage: string | null;
+  topicId: number | null;
+  sessionId: string | null;
+  startOptions: ReservedTaskStartOptions;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface CodexUsageSnapshot {
   capturedAt: number;
   model: string;

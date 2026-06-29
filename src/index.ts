@@ -66,6 +66,8 @@ async function main(): Promise<void> {
 
   await bot.api.setMyCommands([
     { command: "new", description: "새 작업 시작 (Claude/Codex/agy)" },
+    { command: "reserve", description: "지정 시각에 새 작업 시작" },
+    { command: "cancel", description: "대기 중인 예약 작업 선택 취소" },
     { command: "tokenid", description: "새 Codex 세션 시작 전 사용할 계정 번호 지정" },
     { command: "status", description: "오케스트레이터와 현재 작업 상태" },
     { command: "doctor", description: "실행 환경 진단" },

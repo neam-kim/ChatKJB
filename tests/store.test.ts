@@ -155,6 +155,50 @@ describe("StateStore", () => {
     store.close();
   });
 
+  it("persists pending reserved tasks with start options", () => {
+    const store = makeStore();
+    const dueAt = Date.now() + 60_000;
+    const task = store.createReservedTask({
+      chatId: -1001,
+      projectName: "test",
+      prompt: "README 점검",
+      dueAt,
+      startOptions: {
+        provider: "codex",
+        codexModel: "gpt-5-codex",
+        codexReasoning: "medium",
+        codexHome: "/tmp/codex-home"
+      }
+    });
+
+    expect(store.listPendingReservedTasks()).toMatchObject([{
+      id: task.id,
+      projectName: "test",
+      prompt: "README 점검",
+      dueAt,
+      status: "pending",
+      startOptions: {
+        provider: "codex",
+        codexModel: "gpt-5-codex",
+        codexReasoning: "medium",
+        codexHome: "/tmp/codex-home"
+      }
+    }]);
+
+    store.updateReservedTask(task.id, {
+      status: "done",
+      topicId: 123,
+      sessionId: "session-123"
+    });
+    expect(store.getReservedTask(task.id)).toMatchObject({
+      status: "done",
+      topicId: 123,
+      sessionId: "session-123"
+    });
+    expect(store.listPendingReservedTasks()).toEqual([]);
+    store.close();
+  });
+
   it("deletes a session and cascades its pending approvals", () => {
     const store = makeStore();
     const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));

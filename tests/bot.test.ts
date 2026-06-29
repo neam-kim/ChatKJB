@@ -2,7 +2,13 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createBot, formatSessionStatus, modelKeyboard, resolveSessionUploadPath } from "../src/bot.js";
+import {
+  createBot,
+  formatSessionStatus,
+  modelKeyboard,
+  parseReserveCommand,
+  resolveSessionUploadPath
+} from "../src/bot.js";
 import type { AppConfig } from "../src/config.js";
 import { FALLBACK_MODEL_CATALOG } from "../src/model-catalog.js";
 import { StateStore } from "../src/store.js";
@@ -136,6 +142,26 @@ function newCommand(updateId = 1) {
   };
 }
 
+function reserveCommand(text: string, updateId = 1) {
+  return {
+    ...modelCommand(text, updateId),
+    message: {
+      ...modelCommand(text, updateId).message,
+      entities: [{ type: "bot_command" as const, offset: 0, length: 8 }]
+    }
+  };
+}
+
+function cancelCommand(updateId = 1) {
+  return {
+    ...modelCommand("/cancel", updateId),
+    message: {
+      ...modelCommand("/cancel", updateId).message,
+      entities: [{ type: "bot_command" as const, offset: 0, length: 7 }]
+    }
+  };
+}
+
 function callbackUpdate(data: string, updateId = 1) {
   return {
     update_id: updateId,
@@ -215,6 +241,27 @@ afterEach(() => {
     item.store.close();
     rmSync(item.directory, { recursive: true, force: true });
   }
+});
+
+describe("reserve command parsing", () => {
+  it("parses a project, KST time expression, and prompt", () => {
+    const now = new Date(2026, 5, 29, 22, 10, 0, 0);
+    expect(parseReserveCommand("ChatKJB 내일 오전 9시 README 점검", now)).toMatchObject({
+      projectIdentifier: "ChatKJB",
+      dueAt: new Date(2026, 5, 30, 9, 0, 0, 0).getTime(),
+      prompt: "README 점검"
+    });
+    expect(parseReserveCommand("ChatKJB 30분 뒤 테스트 실행", now)).toMatchObject({
+      projectIdentifier: "ChatKJB",
+      dueAt: new Date(2026, 5, 29, 22, 40, 0, 0).getTime(),
+      prompt: "테스트 실행"
+    });
+    expect(parseReserveCommand("ChatKJB 2026-06-30 09:00 README 점검", now)).toMatchObject({
+      projectIdentifier: "ChatKJB",
+      dueAt: new Date(2026, 5, 30, 9, 0, 0, 0).getTime(),
+      prompt: "README 점검"
+    });
+  });
 });
 
 describe("session status formatting", () => {
@@ -513,6 +560,69 @@ describe("/new defaults fast path", () => {
     const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
     expect(reply?.text).toContain("실행할 작업을 입력하세요");
     expect(reply?.reply_markup).toBeDefined();
+  });
+});
+
+describe("/reserve command", () => {
+  it("stores a pending reserved task using the current defaults", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 29, 22, 10, 0, 0));
+    try {
+      const { bot, store, calls } = botSetup();
+      store.updateSessionDefaults({ provider: "codex" });
+
+      await bot.handleUpdate(reserveCommand("/reserve test 내일 오전 9시 README 점검"));
+
+      const task = store.listPendingReservedTasks()[0];
+      expect(task).toMatchObject({
+        projectName: "test",
+        prompt: "README 점검",
+        dueAt: new Date(2026, 5, 30, 9, 0, 0, 0).getTime(),
+        status: "pending",
+        startOptions: {
+          provider: "codex",
+          codexModel: "gpt-5.5",
+          codexReasoning: "high"
+        }
+      });
+      expect(calls.filter((call) => call.method === "sendMessage").at(-1)?.payload.text)
+        .toContain("예약했습니다.");
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("/cancel command", () => {
+  it("shows pending reserved tasks as buttons and cancels the selected task", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 29, 22, 10, 0, 0));
+    try {
+      const { bot, store, calls } = botSetup();
+      const task = store.createReservedTask({
+        chatId: -1001,
+        projectName: "test",
+        prompt: "README 점검",
+        dueAt: new Date(2026, 5, 30, 9, 0, 0, 0).getTime()
+      });
+
+      await bot.handleUpdate(cancelCommand());
+
+      const cancelList = calls.filter((call) => call.method === "sendMessage").at(-1);
+      expect(cancelList?.payload.text).toBe("취소할 예약 작업을 선택하세요.");
+      expect(JSON.stringify(cancelList?.payload.reply_markup)).toContain(`rescancel:${task.id}`);
+
+      await bot.handleUpdate(callbackUpdate(`rescancel:${task.id}`, 2));
+
+      expect(store.getReservedTask(task.id)?.status).toBe("canceled");
+      expect(store.listPendingReservedTasks()).toEqual([]);
+      expect(calls.filter((call) => call.method === "sendMessage").at(-1)?.payload.text)
+        .toContain("예약을 취소했습니다.");
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 });
 

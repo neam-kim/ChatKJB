@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
@@ -15,6 +16,9 @@ import type {
   ApprovalRecord,
   ProjectConfig,
   ProviderKind,
+  ReservedTaskRecord,
+  ReservedTaskStartOptions,
+  ReservedTaskStatus,
   SessionDefaults,
   SessionRecord,
   SessionStatus,
@@ -91,6 +95,21 @@ interface ApprovalRow {
   message_id: number | null;
 }
 
+interface ReservedTaskRow {
+  id: string;
+  chat_id: number;
+  project_name: string;
+  prompt: string;
+  due_at: number;
+  status: ReservedTaskStatus;
+  error_message: string | null;
+  topic_id: number | null;
+  session_id: string | null;
+  start_options_json: string;
+  created_at: number;
+  updated_at: number;
+}
+
 export class StateStore {
   readonly db: Database.Database;
 
@@ -164,6 +183,25 @@ export class StateStore {
         FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS reserved_tasks (
+        id TEXT PRIMARY KEY,
+        chat_id INTEGER NOT NULL,
+        project_name TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        due_at INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        topic_id INTEGER,
+        session_id TEXT,
+        start_options_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(project_name) REFERENCES projects(name)
+      );
+
+      CREATE INDEX IF NOT EXISTS reserved_tasks_due_idx
+        ON reserved_tasks(status, due_at);
+
     `);
     this.db.exec(`
       DROP TABLE IF EXISTS plan_evidence;
@@ -173,6 +211,12 @@ export class StateStore {
     const sessionColumns = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as Array<{ name: string }>;
+    const reservedTaskColumns = this.db
+      .prepare("PRAGMA table_info(reserved_tasks)")
+      .all() as Array<{ name: string }>;
+    if (!reservedTaskColumns.some((column) => column.name === "start_options_json")) {
+      this.db.exec("ALTER TABLE reserved_tasks ADD COLUMN start_options_json TEXT NOT NULL DEFAULT '{}'");
+    }
     if (!sessionColumns.some((column) => column.name === "usage_snapshot")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN usage_snapshot TEXT");
     }
@@ -452,6 +496,92 @@ export class StateStore {
     return this.getSessionDefaults();
   }
 
+  createReservedTask(input: {
+    chatId: number;
+    projectName: string;
+    prompt: string;
+    dueAt: number;
+    startOptions?: ReservedTaskStartOptions;
+  }): ReservedTaskRecord {
+    const now = Date.now();
+    const task: ReservedTaskRecord = {
+      id: randomUUID(),
+      chatId: input.chatId,
+      projectName: input.projectName,
+      prompt: input.prompt,
+      dueAt: input.dueAt,
+      status: "pending",
+      errorMessage: null,
+      topicId: null,
+      sessionId: null,
+      startOptions: input.startOptions ?? {},
+      createdAt: now,
+      updatedAt: now
+    };
+    this.db.prepare(`
+      INSERT INTO reserved_tasks(
+        id, chat_id, project_name, prompt, due_at, status, error_message,
+        topic_id, session_id, start_options_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      task.id,
+      task.chatId,
+      task.projectName,
+      task.prompt,
+      task.dueAt,
+      task.status,
+      task.errorMessage,
+      task.topicId,
+      task.sessionId,
+      JSON.stringify(task.startOptions),
+      task.createdAt,
+      task.updatedAt
+    );
+    return task;
+  }
+
+  getReservedTask(id: string): ReservedTaskRecord | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM reserved_tasks WHERE id = ?")
+      .get(id) as ReservedTaskRow | undefined;
+    return row ? this.mapReservedTask(row) : undefined;
+  }
+
+  listPendingReservedTasks(): ReservedTaskRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM reserved_tasks WHERE status = 'pending' ORDER BY due_at ASC")
+      .all() as ReservedTaskRow[];
+    return rows.map((row) => this.mapReservedTask(row));
+  }
+
+  listRecentReservedTasks(limit = 20): ReservedTaskRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM reserved_tasks ORDER BY due_at DESC LIMIT ?")
+      .all(limit) as ReservedTaskRow[];
+    return rows.map((row) => this.mapReservedTask(row));
+  }
+
+  updateReservedTask(
+    id: string,
+    fields: Partial<Pick<
+      ReservedTaskRecord,
+      "status" | "errorMessage" | "topicId" | "sessionId"
+    >>
+  ): void {
+    const entries: Array<[string, unknown]> = [];
+    if ("status" in fields) entries.push(["status", fields.status]);
+    if ("errorMessage" in fields) entries.push(["error_message", fields.errorMessage ?? null]);
+    if ("topicId" in fields) entries.push(["topic_id", fields.topicId ?? null]);
+    if ("sessionId" in fields) entries.push(["session_id", fields.sessionId ?? null]);
+    if (entries.length === 0) return;
+    entries.push(["updated_at", Date.now()]);
+    const assignments = entries.map(([column]) => `${column} = ?`).join(", ");
+    this.db.prepare(`UPDATE reserved_tasks SET ${assignments} WHERE id = ?`).run(
+      ...entries.map(([, value]) => value),
+      id
+    );
+  }
+
   getAppSetting(key: string): string | null {
     const row = this.db
       .prepare("SELECT value FROM app_settings WHERE key = ?")
@@ -558,6 +688,32 @@ export class StateStore {
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
+  }
+
+  private mapReservedTask(row: ReservedTaskRow): ReservedTaskRecord {
+    return {
+      id: row.id,
+      chatId: row.chat_id,
+      projectName: row.project_name,
+      prompt: row.prompt,
+      dueAt: row.due_at,
+      status: row.status,
+      errorMessage: row.error_message,
+      topicId: row.topic_id,
+      sessionId: row.session_id,
+      startOptions: this.parseReservedTaskStartOptions(row.start_options_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  private parseReservedTaskStartOptions(value: string): ReservedTaskStartOptions {
+    try {
+      const parsed = JSON.parse(value) as ReservedTaskStartOptions;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
   }
 
   private parseUsageSnapshot(value: string | null): UsageSnapshot | null {
