@@ -181,13 +181,13 @@ function callbackUpdate(data: string, updateId = 1) {
   };
 }
 
-function textMessage(text: string, updateId = 1) {
+function textMessage(text: string, updateId = 1, topicId = 42) {
   return {
     update_id: updateId,
     message: {
       message_id: updateId,
       date: 0,
-      message_thread_id: 42,
+      message_thread_id: topicId,
       chat: { id: -1001, type: "supergroup" as const, title: "Test" },
       from: { id: 7, is_bot: false, first_name: "User" },
       text
@@ -441,7 +441,7 @@ describe("/new defaults fast path", () => {
 
     await bot.handleUpdate(newCommand());
     await bot.handleUpdate(callbackUpdate("newp:0", 2));
-    await bot.handleUpdate(textMessage("작업을 실행해줘", 3));
+    await bot.handleUpdate(textMessage("작업을 실행해줘", 3, 7777));
 
     const created = store
       .listSessions(10)
@@ -460,7 +460,7 @@ describe("/new defaults fast path", () => {
 
     await bot.handleUpdate(newCommand());
     await bot.handleUpdate(callbackUpdate("newp:0", 2));
-    await bot.handleUpdate(textMessage("코덱스로 작업", 3));
+    await bot.handleUpdate(textMessage("코덱스로 작업", 3, 7777));
 
     const created = store
       .listSessions(10)
@@ -541,7 +541,7 @@ describe("/new defaults fast path", () => {
 
     await bot.handleUpdate(newCommand());
     await bot.handleUpdate(callbackUpdate("newp:0", 2));
-    await bot.handleUpdate(textMessage("agy로 작업", 3));
+    await bot.handleUpdate(textMessage("agy로 작업", 3, 7777));
 
     const created = store
       .listSessions(10)
@@ -557,7 +557,10 @@ describe("/new defaults fast path", () => {
     await bot.handleUpdate(newCommand());
     await bot.handleUpdate(callbackUpdate("newp:0", 2));
 
-    const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
+    const reply = calls
+      .filter((call) => call.method === "sendMessage")
+      .map((call) => call.payload)
+      .find((payload) => payload.message_thread_id === 7777);
     expect(reply?.text).toContain("실행할 작업을 입력하세요");
     expect(reply?.reply_markup).toBeDefined();
   });

@@ -64,6 +64,7 @@ const execFileAsync = promisify(execFile);
 
 interface PendingStart {
   project: ProjectConfig;
+  pendingTopicId?: number;
   resumeSessionId?: string;
   forkSession?: boolean;
   provider?: ProviderKind | undefined;
@@ -746,6 +747,27 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
   };
 
+  const openPendingStartTopic = async (
+    project: ProjectConfig,
+    defaults: SessionDefaults,
+    options: Partial<PendingStart>
+  ): Promise<void> => {
+    const title = topicTitle(project.name, "새 작업");
+    const topicId = await transport.createTopic(config.chatId, title);
+    pendingStarts.set(
+      pendingStartKey(config.allowedUserId, topicId),
+      { project, ...options, pendingTopicId: topicId }
+    );
+    await bot.api.sendMessage(
+      config.chatId,
+      `${project.name} 프로젝트 · ${defaultsSummary(defaults, config.modelCatalog)}\n이 토픽에 실행할 작업을 입력하세요. (기본값은 아래 패널에서 변경)`,
+      {
+        message_thread_id: topicId,
+        reply_markup: defaultPanelKeyboard(defaults)
+      }
+    );
+  };
+
   const scheduleReservedTask = (task: ReservedTaskRecord): void => {
     if (task.status !== "pending") return;
     const existing = reserveTimers.get(task.id);
@@ -953,14 +975,8 @@ export function createBot(config: AppConfig, store: StateStore) {
         await ctx.reply("프로젝트 이름 또는 별칭을 찾을 수 없습니다.");
         return;
       }
-      pendingStarts.set(
-        pendingStartKey(config.allowedUserId, ctx.message?.message_thread_id),
-        { project, ...pendingFieldsForDefaults(defaults) }
-      );
-      await ctx.reply(
-        `${project.name} 프로젝트 · ${defaultsSummary(defaults, config.modelCatalog)}\n실행할 작업을 입력하세요. (기본값은 아래 패널에서 변경)`,
-        { reply_markup: defaultPanelKeyboard(defaults) }
-      );
+      await openPendingStartTopic(project, defaults, pendingFieldsForDefaults(defaults));
+      await ctx.reply(`${project.name} 작업 토픽을 열었습니다.`);
       return;
     }
     await ctx.reply("프로젝트를 선택하세요.", { reply_markup: projectKeyboard(config.projects) });
@@ -1953,15 +1969,9 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     const defaults = store.getSessionDefaults();
-    pendingStarts.set(
-      pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id),
-      { project, ...pendingFieldsForDefaults(defaults) }
-    );
+    await openPendingStartTopic(project, defaults, pendingFieldsForDefaults(defaults));
     await ctx.answerCallbackQuery({ text: `${project.name} 선택` });
-    await ctx.reply(
-      `${project.name} 프로젝트 · ${defaultsSummary(defaults, config.modelCatalog)}\n실행할 작업을 입력하세요. (기본값은 아래 패널에서 변경)`,
-      { reply_markup: defaultPanelKeyboard(defaults) }
-    );
+    await ctx.reply(`${project.name} 작업 토픽을 열었습니다.`);
   });
 
   bot.callbackQuery(/^stop:/, async (ctx) => {
@@ -2654,7 +2664,12 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (pending) {
       pendingStarts.delete(pendingKey);
       const title = topicTitle(pending.project.name, ctx.message.text);
-      const newTopicId = await transport.createTopic(config.chatId, title);
+      const newTopicId = pending.pendingTopicId ?? await transport.createTopic(config.chatId, title);
+      if (pending.pendingTopicId) {
+        await transport.renameTopic(config.chatId, pending.pendingTopicId, title).catch((error) => {
+          console.error("Telegram pending topic rename failed:", safeErrorMessage(error));
+        });
+      }
       const session = sessions.createSession(
         pending.project,
         config.chatId,
