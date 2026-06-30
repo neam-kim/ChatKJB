@@ -202,8 +202,8 @@ describe("toGeminiMcpConfig", () => {
     expect(config.mcpServers.playwright).toMatchObject({ command: "npx" });
     // SDK 전용 필드(timeout/type)는 stdio에 없다.
     expect(config.mcpServers.playwright).not.toHaveProperty("timeout");
-    // http 서버는 httpUrl로 변환된다.
-    expect(config.mcpServers.remote_http).toEqual({ httpUrl: "https://example.com/mcp" });
+    // Antigravity 원격 MCP는 serverUrl로 변환된다.
+    expect(config.mcpServers.remote_http).toEqual({ serverUrl: "https://example.com/mcp" });
   });
 });
 
@@ -239,6 +239,35 @@ describe("syncAgyMcpConfig", () => {
     const geminiPath = join(dir, "mcp_config.json");
     const result = syncAgyMcpConfig({}, geminiPath);
     expect(result).toEqual({ changed: false, count: 0 });
+  });
+
+  it("removes the stale datascienceWidgets alias when dataAnalyticsWidgets exists", () => {
+    const dir = tempDir();
+    const geminiPath = join(dir, "mcp_config.json");
+    writeFileSync(
+      geminiPath,
+      JSON.stringify({
+        mcpServers: {
+          datascienceWidgets: { command: "old-wrapper" },
+          userserver: { command: "keepme" }
+        }
+      })
+    );
+    const merged = {
+      dataAnalyticsWidgets: { type: "stdio", command: "node" }
+    } as unknown as Record<string, McpServerConfig>;
+
+    syncAgyMcpConfig(merged, geminiPath, "/node", "/wrapper.mjs", "/connectors.json");
+
+    const written = JSON.parse(readFileSync(geminiPath, "utf8")) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(written.mcpServers.datascienceWidgets).toBeUndefined();
+    expect(written.mcpServers.userserver).toEqual({ command: "keepme" });
+    expect(written.mcpServers.dataAnalyticsWidgets).toEqual({
+      command: "/node",
+      args: ["/wrapper.mjs", "/connectors.json", "dataAnalyticsWidgets"]
+    });
   });
 });
 

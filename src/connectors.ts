@@ -374,6 +374,7 @@ interface GeminiServer {
   env?: Record<string, string>;
   url?: string;
   httpUrl?: string;
+  serverUrl?: string;
   headers?: Record<string, string>;
 }
 
@@ -400,13 +401,13 @@ export function toGeminiServer(
   const s = server as Record<string, unknown>;
   if (s.type === "http") {
     return {
-      httpUrl: s.url as string,
+      serverUrl: s.url as string,
       ...(s.headers ? { headers: s.headers as Record<string, string> } : {})
     };
   }
   if (s.type === "sse") {
     return {
-      url: s.url as string,
+      serverUrl: s.url as string,
       ...(s.headers ? { headers: s.headers as Record<string, string> } : {})
     };
   }
@@ -532,7 +533,11 @@ export function syncAgyMcpConfig(
     existing.mcpServers && typeof existing.mcpServers === "object"
       ? (existing.mcpServers as Record<string, unknown>)
       : {};
-  const next = { ...existing, mcpServers: { ...existingServers, ...desired } };
+  const preservedServers = { ...existingServers };
+  if (desired.dataAnalyticsWidgets && !desired.datascienceWidgets) {
+    delete preservedServers.datascienceWidgets;
+  }
+  const next = { ...existing, mcpServers: { ...preservedServers, ...desired } };
 
   const nextText = `${JSON.stringify(next, null, 2)}\n`;
   let prevText = "";
