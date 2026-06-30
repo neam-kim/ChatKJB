@@ -459,6 +459,15 @@ describe("/new defaults fast path", () => {
     expect(JSON.stringify(browserMessage?.reply_markup)).toContain("newfs:o:0");
 
     await bot.handleUpdate(callbackUpdate("newfs:o:0", 2));
+    const childBrowserMessage = calls.filter((call) => call.method === "editMessageText").at(-1)?.payload;
+    const childKeyboard = childBrowserMessage?.reply_markup as
+      | { inline_keyboard?: Array<Array<{ text: string; callback_data: string }>> }
+      | undefined;
+    expect(childKeyboard?.inline_keyboard?.map((row) => row[0]?.text).filter(Boolean)).toEqual([
+      "이 폴더 선택",
+      "뒤로"
+    ]);
+
     await bot.handleUpdate(callbackUpdate("newfs:s", 3));
     await bot.handleUpdate(textMessage("선택 폴더에서 작업", 4, 7777));
 

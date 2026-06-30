@@ -149,10 +149,10 @@ function folderBrowserKeyboard(
   atRoot: boolean
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  keyboard.text("이 폴더 선택", "newfs:s").row();
   for (const [index, name] of state.directories.entries()) {
     keyboard.text(name, `newfs:o:${index}`).row();
   }
+  keyboard.text("이 폴더 선택", "newfs:s").row();
   if (!atRoot) keyboard.text("뒤로", "newfs:b").row();
   return keyboard;
 }
