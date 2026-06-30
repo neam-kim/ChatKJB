@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { Agent as HttpsAgent, get as httpsGet } from "node:https";
 import { homedir } from "node:os";
@@ -833,16 +833,17 @@ export function createBot(config: AppConfig, store: StateStore) {
     defaults: SessionDefaults,
     options: Partial<PendingStart>
   ): Promise<void> => {
-    store.syncProjects([project]);
-    const title = topicTitle(project.name, "새 작업");
+    const storedProject = existingProjectByPath(project.cwd) ?? project;
+    store.syncProjects([storedProject]);
+    const title = topicTitle(storedProject.name, "새 작업");
     const topicId = await transport.createTopic(config.chatId, title);
     pendingStarts.set(
       pendingStartKey(config.allowedUserId, topicId),
-      { project, ...options, pendingTopicId: topicId }
+      { project: storedProject, ...options, pendingTopicId: topicId }
     );
     await bot.api.sendMessage(
       config.chatId,
-      `${project.name} 프로젝트 · ${defaultsSummary(defaults, config.modelCatalog)}\n이 토픽에 실행할 작업을 입력하세요.`,
+      `${storedProject.name} 프로젝트 · ${defaultsSummary(defaults, config.modelCatalog)}\n이 토픽에 실행할 작업을 입력하세요.`,
       {
         message_thread_id: topicId,
         reply_markup: removeReplyKeyboard
@@ -880,12 +881,25 @@ export function createBot(config: AppConfig, store: StateStore) {
     );
   };
 
-  const projectFromSelectedFolder = (path: string): ProjectConfig => {
-    const configured = config.projects.find((project) => project.cwd === path);
-    if (configured) return configured;
+  const canonicalProjectPath = (path: string): string => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  };
 
-    const stored = store.getProjectByCwd(path);
-    if (stored) return stored;
+  const sameProjectPath = (left: string, right: string): boolean =>
+    canonicalProjectPath(left) === canonicalProjectPath(right);
+
+  const existingProjectByPath = (path: string): ProjectConfig | undefined =>
+    store.getProjectByCwd(path)
+    ?? store.listProjects().find((project) => sameProjectPath(project.cwd, path))
+    ?? config.projects.find((project) => sameProjectPath(project.cwd, path));
+
+  const projectFromSelectedFolder = (path: string): ProjectConfig => {
+    const existing = existingProjectByPath(path);
+    if (existing) return existing;
 
     const existingNames = new Set(
       [...config.projects, ...store.listProjects()]
@@ -902,13 +916,14 @@ export function createBot(config: AppConfig, store: StateStore) {
     project: ProjectConfig,
     defaults: SessionDefaults
   ): Promise<number> => {
-    store.syncProjects([project]);
-    const topicId = await transport.createTopic(config.chatId, `예약 - ${project.name}`);
+    const storedProject = existingProjectByPath(project.cwd) ?? project;
+    store.syncProjects([storedProject]);
+    const topicId = await transport.createTopic(config.chatId, `예약 - ${storedProject.name}`);
     const defaultsSummaryText = defaultsSummary(defaults, config.modelCatalog);
     pendingReserves.set(
       pendingStartKey(config.allowedUserId, topicId),
       {
-        project,
+        project: storedProject,
         topicId,
         startOptions: cleanReservedTaskStartOptions(pendingFieldsForDefaults(defaults)),
         defaultsSummaryText
@@ -916,7 +931,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     );
     await bot.api.sendMessage(
       config.chatId,
-      `${project.name} 예약 · ${defaultsSummaryText}\n이 토픽에 예약할 시간과 작업을 입력하세요.\n예: 내일 오전 9시 README 점검해줘`,
+      `${storedProject.name} 예약 · ${defaultsSummaryText}\n이 토픽에 예약할 시간과 작업을 입력하세요.\n예: 내일 오전 9시 README 점검해줘`,
       {
         message_thread_id: topicId,
         reply_markup: removeReplyKeyboard

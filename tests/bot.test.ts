@@ -689,6 +689,29 @@ describe("/reserve command", () => {
     }
   });
 
+  it("reuses an existing stored project when reserve picks the same real folder", async () => {
+    const root = mkdtempSync(join(tmpdir(), "telegram-folder-browser-"));
+    const projectDir = join(root, "Reserve Project");
+    mkdirSync(projectDir);
+    process.env.CHATKJB_FOLDER_BROWSER_ROOT = root;
+    const { bot, store, calls } = botSetup();
+    store.syncProjects([{ name: "Stored Reserve", cwd: `${projectDir}/.`, defaultMode: "auto" }]);
+
+    try {
+      await bot.handleUpdate(reserveCommand("/reserve"));
+      await bot.handleUpdate(callbackUpdate("resfs:o:0", 2));
+      await bot.handleUpdate(callbackUpdate("resfs:s", 3));
+
+      const topicMessage = calls
+        .filter((call) => call.method === "sendMessage")
+        .map((call) => call.payload)
+        .find((payload) => payload.message_thread_id === 7777);
+      expect(topicMessage?.text).toContain("Stored Reserve 예약");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("stores a topic-backed reservation from a message in the reservation topic", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 5, 29, 22, 10, 0, 0));
