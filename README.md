@@ -2,7 +2,7 @@
 
 ChatKJB는 Telegram에서 내 Mac의 AI 작업자를 부르는 개인용 작업 오케스트레이터입니다.
 
-Telegram 그룹에 평소 말하듯 요청하면 ChatKJB가 등록된 프로젝트 폴더에서 Claude, Codex, agy 중 알맞은 실행기를 열고 작업을 진행합니다. 파일을 읽고 수정하며, 테스트를 돌리고, 긴 작업의 진행 상황과 승인 요청을 Telegram topic으로 돌려줍니다.
+Telegram 그룹에 평소 말하듯 요청하면 ChatKJB가 등록된 프로젝트 폴더에서 Claude, Codex, Antigravity 중 알맞은 실행기를 열고 작업을 진행합니다. 파일을 읽고 수정하며, 테스트를 돌리고, 긴 작업의 진행 상황과 승인 요청을 Telegram topic으로 돌려줍니다.
 
 이 README는 처음 보는 사람도 따라 할 수 있도록 네 부분으로 나뉩니다.
 
@@ -26,7 +26,7 @@ ChatKJB는 다음 흐름으로 동작합니다.
 1. 사용자가 Telegram supergroup에서 `/new`를 보냅니다.
 2. ChatKJB가 작업할 프로젝트를 고르게 합니다.
 3. 선택한 프로젝트마다 새 Telegram topic을 만들고 세션을 시작합니다.
-4. Claude, Codex, agy 중 현재 설정된 제공자가 실제 작업을 수행합니다.
+4. Claude, Codex, Antigravity 중 현재 설정된 제공자가 실제 작업을 수행합니다.
 5. 진행 상황, 질문, 승인 버튼, 완료 결과가 같은 topic에 올라옵니다.
 6. 같은 topic에 다시 메시지를 보내면 이전 맥락을 이어서 작업합니다.
 
@@ -41,7 +41,7 @@ ChatKJB는 다음 흐름으로 동작합니다.
 | 테스트와 빌드 | `수정 후 npm run typecheck, npm test, npm run build 확인해줘` |
 | 파일 분석 | `방금 올린 PDF를 읽고 핵심 주장과 근거를 표로 정리해줘` |
 | 긴 작업 자동 진행 | `/goal 모든 테스트가 통과하고 README가 최신 기능을 반영한다` |
-| 제공자 추천 | `/route 이 작업은 Claude, Codex, agy 중 누가 좋을까?` |
+| 제공자 추천 | `/route 이 작업은 Claude, Codex, Antigravity 중 누가 좋을까?` |
 | 여러 AI 검토 | `/synth 이 설계의 위험 요소를 비교 검토해줘` |
 | 과거 기록 검색 | `/query 이전에 정한 메모리 정책이 뭐였지?` |
 
@@ -54,7 +54,7 @@ AI는 등록된 프로젝트 폴더를 기준으로 파일 읽기, 파일 수정
 | 프로젝트 | AI가 작업할 로컬 폴더입니다. 예: 이 저장소, 논문 폴더, 업무 폴더 |
 | topic | Telegram forum supergroup 안의 주제 탭입니다. 작업 하나가 보통 topic 하나입니다. |
 | 세션 | 한 topic 안에서 이어지는 작업 대화입니다. 이전 지시와 결과를 기억합니다. |
-| 제공자 | 실제 일을 수행하는 AI 실행기입니다. 현재 Claude, Codex, agy를 지원합니다. |
+| 제공자 | 실제 일을 수행하는 AI 실행기입니다. 현재 Claude, Codex, Antigravity를 지원합니다. |
 | 모델 | 제공자 안에서 고르는 모델입니다. `/model`, `/thinking`, `/power`로 조정합니다. |
 | 권한 모드 | 파일 수정과 명령 실행을 얼마나 자동으로 허용할지 정하는 설정입니다. |
 | 목표 | `/goal`로 설정하는 자동 진행 조건입니다. 조건이 충족될 때까지 후속 턴을 예약합니다. |
@@ -152,7 +152,7 @@ check: npm test
 
 | 명령 | 용도 | 주의 |
 | --- | --- | --- |
-| `/route <작업>` | Claude, Codex, agy 중 적합한 제공자를 추천합니다. | 추천만 하며 자동 실행하지 않습니다. |
+| `/route <작업>` | Claude, Codex, Antigravity 중 적합한 제공자를 추천합니다. | 추천만 하며 자동 실행하지 않습니다. |
 | `/synth <작업>` | 여러 제공자에게 읽기 전용 답변을 받아 비교하고 통합합니다. | 시간과 토큰을 많이 씁니다. |
 | `/query <질문>` | LLM-Wiki에 쌓인 과거 기록을 검색해 답합니다. | 현재 세션이 유휴 상태일 때 쓰는 것이 좋습니다. |
 
@@ -285,7 +285,8 @@ TELEGRAM_BOT_TOKEN=123456:replace-me
 TELEGRAM_ALLOWED_USER_ID=123456789
 TELEGRAM_CHAT_ID=-1001234567890
 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-replace-me
-GEMINI_API_KEY=replace-with-google-ai-studio-key
+AGY_BACKEND=cli
+AGY_EXECUTABLE=/Users/me/.local/bin/agy
 ```
 
 여러 Telegram 사용자를 허용하려면 쉼표로 등록합니다.
@@ -340,15 +341,31 @@ CODEX_ACCOUNT_HOMES=/Users/me/.codex,/Users/me/.codex-acct-b
 
 각 홈에는 `auth.json`이 있어야 하며, `auth_mode`가 `chatgpt`인 로그인만 허용됩니다.
 
-### agy
+### Antigravity
 
-agy는 Gemini API 키와 Antigravity SDK 브리지를 사용합니다.
+Antigravity는 현재 구독 계정으로 로그인된 CLI 백엔드를 사용합니다. API 키 기반 백엔드는 나중에
+다시 쓸 수 있도록 코드와 설정만 남겨 둡니다.
 
 ```dotenv
+AGY_BACKEND=cli
+AGY_EXECUTABLE=/Users/me/.local/bin/agy
+```
+
+CLI 모드는 `GEMINI_API_KEY` 없이 부팅할 수 있지만, 최초 1회 `agy` CLI에서 구독 계정 OAuth
+로그인을 마쳐야 합니다. `~/.gemini/antigravity-cli/settings.json`에서 Google One AI premium
+quota 사용 설정이 필요한 환경이면 `useG1Credits`도 켜십시오.
+
+API 키 기반 백엔드를 다시 쓰려면 다음처럼 전환합니다.
+
+```dotenv
+AGY_BACKEND=api
 GEMINI_API_KEY=replace-with-google-ai-studio-key
 ```
 
-agy 실행 파일이나 Python 환경을 직접 지정해야 하면 다음 값을 사용합니다.
+CLI 백엔드는 `agy --print`와 CLI 로그의 conversation id를 사용해 대화를 이어 갑니다.
+API 백엔드보다 상태 조회·취소·세부 사용량 수집은 제한적일 수 있습니다.
+
+Antigravity 실행 파일이나 API 백엔드용 Python 환경을 직접 지정해야 하면 다음 값을 사용합니다.
 
 ```dotenv
 AGY_EXECUTABLE=/Users/me/.local/bin/agy
@@ -442,7 +459,8 @@ data/stderr.log
 | `TELEGRAM_CHAT_ID` | 예 | 없음 | ChatKJB가 동작할 Telegram group chat ID입니다. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | 예 | 없음 | Claude Code OAuth 토큰입니다. |
 | `CLAUDE_CODE_OAUTH_TOKEN_2`, `_3` | 아니오 | 없음 | Claude 추가 계정 토큰입니다. |
-| `GEMINI_API_KEY` | 예 | 없음 | agy/Gemini용 API 키입니다. |
+| `AGY_BACKEND` | 아니오 | `api` | Antigravity 백엔드입니다. `cli`는 구독 계정으로 로그인된 Antigravity CLI를 사용합니다. |
+| `GEMINI_API_KEY` | 조건부 | 없음 | `AGY_BACKEND=api`일 때 필요한 Antigravity API 백엔드용 Gemini API 키입니다. |
 | `CODEX_ACCOUNT_HOMES` | 아니오 | `CODEX_HOME` 또는 `~/.codex` | Codex 계정 홈 CSV입니다. |
 | `DATABASE_PATH` | 아니오 | `./data/state.sqlite` | SQLite 상태 DB 위치입니다. |
 | `PROJECTS_PATH` | 아니오 | `./projects.json` | 프로젝트 목록 파일입니다. |
@@ -457,8 +475,8 @@ data/stderr.log
 | `LONG_RUNNING_MCP_SERVERS` | 아니오 | `codex,obsidian` | 장기 실행으로 취급할 MCP 서버 이름입니다. |
 | `TURN_IDLE_TIMEOUT_MINUTES` | 아니오 | `35` | 스트림이 완전히 멈춘 턴을 중단하는 워치독입니다. |
 | `CLAUDE_CODE_EXECUTABLE` | 아니오 | PATH의 `claude` | Claude 실행 파일 경로입니다. |
-| `AGY_EXECUTABLE` | 아니오 | `~/.local/bin/agy` 또는 PATH | agy 실행 파일 경로입니다. |
-| `AGY_SDK_PYTHON` | 아니오 | 사용자 전용 agy SDK Python | agy SDK 브리지 Python입니다. |
+| `AGY_EXECUTABLE` | 아니오 | `~/.local/bin/agy` 또는 PATH | Antigravity CLI 실행 파일 경로입니다. |
+| `AGY_SDK_PYTHON` | 아니오 | 사용자 전용 Antigravity API Python | API 백엔드용 Python입니다. |
 
 ## Transcript와 결과 로그 수집
 
@@ -513,7 +531,7 @@ npm start
 
 ## 공통 자원 계층
 
-ChatKJB는 Claude, Codex, agy가 같은 지침과 리소스를 볼 수 있도록 공통 자원 계층을 동기화합니다.
+ChatKJB는 Claude, Codex, Antigravity가 같은 지침과 리소스를 볼 수 있도록 공통 자원 계층을 동기화합니다.
 
 주요 파일:
 
@@ -529,7 +547,7 @@ ChatKJB는 Claude, Codex, agy가 같은 지침과 리소스를 볼 수 있도록
 - 전역 지침을 세 제공자에 공통 주입합니다.
 - Claude 메모리, Claude 자동 메모리, Codex 자동 메모리를 함께 찾을 수 있게 연결합니다.
 - 설치된 스킬과 플러그인 스킬을 하나의 카탈로그로 합칩니다.
-- Claude와 Codex의 MCP 커넥터 설정을 병합해 agy에도 전달합니다.
+- Claude와 Codex의 MCP 커넥터 설정을 병합해 Antigravity에도 전달합니다.
 
 ---
 
@@ -542,7 +560,7 @@ ChatKJB는 Claude, Codex, agy가 같은 지침과 리소스를 볼 수 있도록
 - grammY
 - Claude Agent SDK
 - OpenAI Codex SDK
-- Python `google-antigravity` SDK 브리지
+- Antigravity CLI/API 백엔드
 - better-sqlite3
 - zod
 - vitest
@@ -590,7 +608,7 @@ ChatKJB는 Claude, Codex, agy가 같은 지침과 리소스를 볼 수 있도록
 2. `src/bot.ts`가 Telegram 업데이트를 받고 허용된 사용자와 그룹인지 확인합니다.
 3. `/new`가 프로젝트 선택 UI를 띄우고 새 topic과 세션을 만듭니다.
 4. 일반 메시지는 해당 topic의 세션으로 전달됩니다.
-5. `src/session-manager.ts`가 provider 설정에 따라 Claude, Codex, agy를 실행합니다.
+5. `src/session-manager.ts`가 provider 설정에 따라 Claude, Codex, Antigravity를 실행합니다.
 6. 스트리밍 출력, 승인 요청, 오류, 완료 결과가 Telegram topic에 전송됩니다.
 7. 세션 상태와 사용량, 요약이 SQLite DB에 저장됩니다.
 8. 필요하면 transcript dump가 완료 세션을 LLM-Wiki inbox로 보냅니다.
@@ -618,7 +636,7 @@ ChatKJB는 Claude, Codex, agy가 같은 지침과 리소스를 볼 수 있도록
 1. `src/bot.ts`에 `bot.command("name", ...)` 핸들러를 추가합니다.
 2. 공개 메뉴에 보여야 하면 `src/index.ts`의 `setMyCommands`에도 추가합니다.
 3. 세션 상태 저장이 필요하면 `src/types.ts`와 `src/store.ts` 마이그레이션을 수정합니다.
-4. 제공자 실행 옵션에 영향을 주면 `src/session-manager.ts`의 Claude/Codex/agy 경로를 확인합니다.
+4. 제공자 실행 옵션에 영향을 주면 `src/session-manager.ts`의 Claude/Codex/Antigravity 경로를 확인합니다.
 5. 사용자에게 보이는 명령이면 README 명령표와 테스트를 갱신합니다.
 
 ## 검증
@@ -749,7 +767,7 @@ CODEX_HOME=/Users/me/.codex codex login
 
 `CODEX_ACCOUNT_HOMES`에 등록한 각 디렉터리에는 `auth.json`이 있어야 하고, ChatGPT 로그인(`auth_mode=chatgpt`)이어야 합니다.
 
-## agy 문제
+## Antigravity 문제
 
 확인:
 
@@ -757,7 +775,9 @@ CODEX_HOME=/Users/me/.codex codex login
 npm run test:agy-live
 ```
 
-`GEMINI_API_KEY`, `AGY_EXECUTABLE`, `AGY_SDK_PYTHON` 값을 확인하십시오. live 테스트는 실제 네트워크와 인증을 사용합니다.
+API 모드는 `GEMINI_API_KEY`, `AGY_SDK_PYTHON` 값을 확인하십시오. CLI 모드는
+`AGY_BACKEND=cli`, `AGY_EXECUTABLE`, Antigravity CLI OAuth 로그인, `useG1Credits` 설정을
+확인하십시오. live 테스트는 실제 네트워크와 인증을 사용합니다.
 
 ## 실행 중 작업이 멈춘 것 같을 때
 
@@ -775,7 +795,7 @@ npm run test:agy-live
 - 사용자가 Telegram 앱에서 topic을 직접 삭제하면 Bot API가 삭제 이벤트를 주지 않으므로, 로컬 세션까지 지우려면 `/delete`를 사용해야 합니다.
 - 프로젝트별 작업 큐는 충돌 방지를 위해 한 번에 하나씩 실행합니다.
 - Codex는 계정 전환 시 기존 Codex thread를 그대로 이어받지 못할 수 있어 요약 기반으로 새 thread를 시작합니다.
-- agy는 Gemini API 키와 SDK 상태에 의존합니다.
+- Antigravity API 백엔드는 Gemini API 키와 별도 런타임 상태에 의존합니다. Antigravity CLI 백엔드는 Antigravity CLI 로그인 상태와 `--print` 동작에 의존합니다.
 
 ---
 

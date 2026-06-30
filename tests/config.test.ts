@@ -24,6 +24,8 @@ afterEach(() => {
 async function setup(token?: string, extra?: {
   token2?: string;
   token3?: string;
+  agyBackend?: "api" | "cli";
+  omitGeminiApiKey?: boolean;
   telegramAllowedUserId?: string | undefined;
   telegramAllowedUserIds?: string;
 }) {
@@ -46,7 +48,8 @@ async function setup(token?: string, extra?: {
     TELEGRAM_CHAT_ID: "-1001",
     PROJECTS_PATH: projectsPath,
     CLAUDE_CODE_OAUTH_TOKEN: token ?? "",
-    GEMINI_API_KEY: "test.gemini-api-key-value-12345678901234567890",
+    ...(extra?.agyBackend ? { AGY_BACKEND: extra.agyBackend } : {}),
+    ...(extra?.omitGeminiApiKey ? {} : { GEMINI_API_KEY: "test.gemini-api-key-value-12345678901234567890" }),
     ...(extra?.token2 !== undefined ? { CLAUDE_CODE_OAUTH_TOKEN_2: extra.token2 } : {}),
     ...(extra?.token3 !== undefined ? { CLAUDE_CODE_OAUTH_TOKEN_3: extra.token3 } : {})
   };
@@ -67,6 +70,22 @@ describe("OAuth configuration", () => {
     expect(config.claudeCodeOauthToken).toBe("sk-ant-oat01-test_token-123");
     expect(config.claudeCodeOauthTokens).toEqual(["sk-ant-oat01-test_token-123"]);
     expect(config.claudeMemoryDir).toMatch(/\.claude\/memory$/);
+  });
+
+  it("allows agy CLI backend without a Gemini API key", async () => {
+    const config = await setup("sk-ant-oat01-test_token-123", {
+      agyBackend: "cli",
+      omitGeminiApiKey: true
+    });
+    expect(config.agyBackend).toBe("cli");
+    expect(config.geminiApiKey).toBeUndefined();
+    expect(config.agyExecutable).toMatch(/agy$/);
+  });
+
+  it("requires a Gemini API key for the default agy API backend", async () => {
+    await expect(setup("sk-ant-oat01-test_token-123", {
+      omitGeminiApiKey: true
+    })).rejects.toThrow("GEMINI_API_KEY가 필요합니다");
   });
 
   it("collects additional account tokens for failover", async () => {

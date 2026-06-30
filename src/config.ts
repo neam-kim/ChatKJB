@@ -31,6 +31,14 @@ const optionalTelegramAllowedUserIds = z.preprocess(
   z.string().optional()
 );
 
+const optionalGeminiApiKey = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.string().trim().min(30).regex(
+    /^[A-Za-z0-9._-]+$/,
+    "GEMINI_API_KEY contains unsupported characters"
+  ).optional()
+);
+
 const environmentSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(10),
   TELEGRAM_ALLOWED_USER_ID: z.coerce.number().int().optional(),
@@ -58,11 +66,9 @@ const environmentSchema = z.object({
   CLAUDE_MEMORY_DIR: z.string().default("~/.claude/memory"),
   FILE_INBOX_DIR: z.string().default("~/.claude/channels/telegram/inbox"),
   CLAUDE_CODE_EXECUTABLE: z.string().optional(),
+  AGY_BACKEND: z.enum(["api", "cli"]).default("api"),
   AGY_EXECUTABLE: z.string().optional(),
-  GEMINI_API_KEY: z.string().trim().min(30).regex(
-    /^[A-Za-z0-9._-]+$/,
-    "GEMINI_API_KEY contains unsupported characters"
-  ),
+  GEMINI_API_KEY: optionalGeminiApiKey,
   AGY_SDK_PYTHON: z.string().optional()
 });
 
@@ -367,6 +373,9 @@ export async function removeProject(
 export async function loadConfig() {
   validateEnvironmentFile();
   const env = environmentSchema.parse(process.env);
+  if (env.AGY_BACKEND === "api" && !env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY가 필요합니다. Antigravity 구독 CLI 모드는 AGY_BACKEND=cli로 설정하십시오.");
+  }
   const allowedUserIds = parseTelegramAllowedUserIds(
     env.TELEGRAM_ALLOWED_USER_ID,
     env.TELEGRAM_ALLOWED_USER_IDS
@@ -428,6 +437,7 @@ export async function loadConfig() {
       env.APPROVAL_TIMEOUT_MINUTES * 60_000 + 300_000
     ),
     claudeCodeExecutable: env.CLAUDE_CODE_EXECUTABLE,
+    agyBackend: env.AGY_BACKEND,
     agyExecutable: resolveAgyExecutable(env.AGY_EXECUTABLE),
     geminiApiKey: env.GEMINI_API_KEY,
     agySdkPython: env.AGY_SDK_PYTHON

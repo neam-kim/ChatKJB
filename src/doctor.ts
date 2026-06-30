@@ -186,9 +186,19 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
           : "✅ Codex 구독 인증: ChatGPT 로그인 확인"
       ];
     }),
-    check("agy SDK", 5000, async () => {
+    check("Antigravity", 5000, async () => {
+      if (deps.config.agyBackend === "cli") {
+        const { stdout } = await execFileAsync(
+          deps.config.agyExecutable,
+          ["--help"],
+          { timeout: 4000, maxBuffer: 64 * 1024 }
+        );
+        return stdout.includes("--print")
+          ? ["✅ Antigravity CLI: 구독 백엔드 실행 파일 확인"]
+          : ["❌ Antigravity CLI: --print 지원 여부 확인 실패"];
+      }
       if (!deps.config.geminiApiKey || deps.config.geminiApiKey.length < 30) {
-        return ["❌ agy SDK: GEMINI_API_KEY 형식 오류"];
+        return ["❌ Antigravity API: GEMINI_API_KEY 형식 오류"];
       }
       const { stdout } = await execFileAsync(
         deps.config.agySdkPython,
@@ -196,8 +206,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
         { timeout: 4000, maxBuffer: 64 * 1024 }
       );
       return stdout.trim() === "ok"
-        ? ["✅ agy SDK: Gemini API 키 설정 · Antigravity SDK 로드 가능"]
-        : ["❌ agy SDK: Antigravity SDK 로드 결과 이상"];
+        ? ["✅ Antigravity API: Gemini API 키 설정 · 런타임 로드 가능"]
+        : ["❌ Antigravity API: 런타임 로드 결과 이상"];
     }),
     check("launchd", 3000, async () => {
       const uid = process.getuid?.();
@@ -259,7 +269,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
         deps.config.telegramBotToken,
         deps.config.geminiApiKey,
         ...deps.config.claudeCodeOauthTokens
-      ]
+      ].filter((value): value is string => typeof value === "string")
     ))
   ]);
 

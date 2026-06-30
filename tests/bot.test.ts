@@ -79,6 +79,7 @@ function botSetup(extra?: { claudeCodeOauthTokens?: string[]; codexAccountHomes?
     longRunningMcpServers: new Set(["codex"]),
     turnIdleTimeoutMs: 120_000,
     claudeCodeExecutable: undefined,
+    agyBackend: "api",
     agyExecutable: "agy",
     geminiApiKey: "test-gemini-api-key-value-1234567890",
     agySdkPython: "/usr/bin/python3"

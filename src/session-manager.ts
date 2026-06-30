@@ -139,6 +139,7 @@ export {
 import {
   buildClaudeEnvironment,
   buildCodexEnvironment,
+  agyPermissionArgs,
   codexSandboxMode,
   codexSharedResourceConfig,
   requireCodexSubscriptionAuth
@@ -154,7 +155,8 @@ import {
   ProgressiveParagraphCollector,
   StreamingTextCollector
 } from "./session-collectors.js";
-import { AgyInteractiveSession, type AgyAttachment, type AgyLiveStatus } from "./agy-interactive.js";
+import { AgyInteractiveSession, type AgyAttachment, type AgyInteractiveTurnResult, type AgyLiveStatus } from "./agy-interactive.js";
+import { AgyCliSession } from "./agy-cli.js";
 import {
   buildJudgePrompt,
   buildSynthesisPrompt,
@@ -188,6 +190,8 @@ const GOAL_ROUNDS_BY_RISK: Record<RiskLevel, number> = {
 // /goal 평가와는 무관하다(Tier 5 판관 = 세션 모델).
 const SYNTH_JUDGE_CLAUDE_MODEL = "claude-opus-4-8";
 const SYNTH_JUDGE_CLAUDE_THINKING = "high";
+
+type AgySessionClient = AgyInteractiveSession | AgyCliSession;
 const SYNTH_JUDGE_CLAUDE_EFFORT = "high";
 // /synth는 Claude·Codex·agy를 동시에 띄운다. 세 SDK의 초기화(모듈 동적 import + 서브프로세스
 // spawn)가 같은 순간에 겹치면 저수준 read 실패(errno 11)·fd 스파이크로 데몬이 내려간 정황이
@@ -330,8 +334,8 @@ export function agyFailureFromLog(log: string): string | null {
   if (lines.length === 0) return null;
   const reset = lines.join("\n").match(/Resets in ([0-9hms]+)/i)?.[1];
   return reset
-    ? `선택한 agy 모델의 개인 할당량이 소진되었습니다. 초기화까지 ${reset} 남았습니다. 다른 모델로 바꾸거나 초기화 후 다시 시도하십시오.`
-    : "선택한 agy 모델의 개인 할당량이 소진되었습니다. 다른 모델로 바꾸거나 할당량 초기화 후 다시 시도하십시오.";
+    ? `선택한 Antigravity 모델의 개인 할당량이 소진되었습니다. 초기화까지 ${reset} 남았습니다. 다른 모델로 바꾸거나 초기화 후 다시 시도하십시오.`
+    : "선택한 Antigravity 모델의 개인 할당량이 소진되었습니다. 다른 모델로 바꾸거나 할당량 초기화 후 다시 시도하십시오.";
 }
 
 interface RunRequest {
@@ -363,9 +367,10 @@ interface SessionManagerOptions {
   codexAccountHomes?: string[];
   claudeCodeExecutable?: string;
   // agy(Antigravity CLI) 바이너리 경로. 데몬 PATH에 ~/.local/bin이 없을 수 있어 명시 경로를 받는다.
-  agyExecutable?: string;
-  geminiApiKey?: string;
-  agySdkPython?: string;
+  agyBackend?: "api" | "cli" | undefined;
+  agyExecutable?: string | undefined;
+  geminiApiKey?: string | undefined;
+  agySdkPython?: string | undefined;
   mcpToolTimeoutMs: number;
   mcpMaxAttempts: number;
   codexMcpTimeoutMs: number;
@@ -541,7 +546,7 @@ export class SessionManager {
   private readonly goalRounds = new Map<string, number>();
   private readonly agyInteractiveSessions = new Map<
     string,
-    { client: AgyInteractiveSession; signature: string }
+    { client: AgySessionClient; signature: string }
   >();
   private readonly tokenPool: TokenPool;
   private readonly oauthTokens: string[];
@@ -1048,7 +1053,7 @@ export class SessionManager {
       return { status: null, error: "세션을 찾을 수 없습니다." };
     }
     if (session.provider !== "agy") {
-      return { status: null, error: "agy 세션이 아닙니다." };
+      return { status: null, error: "Antigravity 세션이 아닙니다." };
     }
     const existing = this.agyInteractiveSessions.get(session.id)?.client;
     if (existing) {
@@ -1967,13 +1972,11 @@ export class SessionManager {
     model: string,
     permissionMode: SessionRecord["permissionMode"] = session.permissionMode,
     thinkingLevel: string | null = session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL
-  ): AgyInteractiveSession {
-    const geminiApiKey = this.options.geminiApiKey ?? process.env["GEMINI_API_KEY"];
-    if (!geminiApiKey) {
-      throw new Error("GEMINI_API_KEY가 설정되지 않았습니다.");
-    }
+  ): AgySessionClient {
+    const backend = this.options.agyBackend ?? "api";
     // thinkingLevel이 변경되면 세션을 재구성한다(새 ModelTarget으로 init).
     const signature = JSON.stringify({
+      backend,
       cwd: session.cwd,
       model,
       permissionMode,
@@ -1982,6 +1985,25 @@ export class SessionManager {
     const existing = this.agyInteractiveSessions.get(session.id);
     if (existing?.signature === signature && existing.client.alive) return existing.client;
     if (existing) this.closeAgyInteractiveSession(session.id);
+
+    if (backend === "cli") {
+      const client = new AgyCliSession({
+        executable: this.options.agyExecutable ?? join(homedir(), ".local", "bin", "agy"),
+        cwd: session.cwd,
+        model,
+        permissionArgs: agyPermissionArgs(permissionMode),
+        conversationId: session.agyConversationId,
+        env: process.env,
+        printTimeoutMs: this.options.codexMcpTimeoutMs
+      });
+      this.agyInteractiveSessions.set(session.id, { client, signature });
+      return client;
+    }
+
+    const geminiApiKey = this.options.geminiApiKey ?? process.env["GEMINI_API_KEY"];
+    if (!geminiApiKey) {
+      throw new Error("GEMINI_API_KEY가 설정되지 않았습니다.");
+    }
 
     const client = new AgyInteractiveSession({
       pythonPath: this.options.agySdkPython ?? join(
@@ -2066,7 +2088,7 @@ export class SessionManager {
         );
       }
       renderer.note(
-        `agy SDK 대화식 실행 (${agyModelLabel(this.options.modelCatalog, agyModel)})`
+        `Antigravity 실행 (${agyModelLabel(this.options.modelCatalog, agyModel)})`
         + ` · 커넥터 ${agyConnectorCount}개 공유`
       );
 
@@ -2090,7 +2112,7 @@ export class SessionManager {
 
         const progress = new ProgressiveParagraphCollector();
         let progressDelivery = Promise.resolve();
-        let result!: Awaited<ReturnType<AgyInteractiveSession["runTurn"]>>;
+        let result!: AgyInteractiveTurnResult;
         try {
           result = await client.runTurn(
             turnPrompt,
@@ -2120,7 +2142,7 @@ export class SessionManager {
 
         const attemptResponse = result.response.trim();
         if (!attemptResponse) {
-          throw new Error("agy SDK가 성공 종료와 함께 빈 응답을 반환했습니다.");
+          throw new Error("Antigravity가 성공 종료와 함께 빈 응답을 반환했습니다.");
         }
         for (const paragraph of progress.finish(attemptResponse)) {
           progressDelivery = progressDelivery.then(() => renderer.text(paragraph));
@@ -2148,10 +2170,10 @@ export class SessionManager {
           agyConversationId: null,
           handoffSummary: lastResponse
         });
-        await renderer.finish("done", "컨텍스트 압축 완료: 다음 턴은 압축 요약으로 새 agy 대화에서 이어집니다.");
+        await renderer.finish("done", "컨텍스트 압축 완료: 다음 턴은 압축 요약으로 새 Antigravity 대화에서 이어집니다.");
       } else {
         this.store.updateSession(session.id, { status: "done" });
-        await renderer.finish("done", lastResponse ? "" : "agy가 텍스트 응답 없이 작업을 마쳤습니다.");
+        await renderer.finish("done", lastResponse ? "" : "Antigravity가 텍스트 응답 없이 작업을 마쳤습니다.");
       }
       await this.safeRename(session, `[DONE] ${session.title}`);
       // 활성 목표가 있으면 충족 여부를 읽기 전용 Haiku로 평가하고, 미충족이면 다음 턴을 자동 예약한다.
@@ -2168,7 +2190,7 @@ export class SessionManager {
       if (timedOut) {
         const minutes = Math.round(this.options.codexMcpTimeoutMs / 60_000);
         this.store.updateSession(session.id, { status: "error" });
-        await renderer.finish("error", `agy 턴이 ${minutes}분 제한을 초과해 중단되었습니다.`);
+        await renderer.finish("error", `Antigravity 턴이 ${minutes}분 제한을 초과해 중단되었습니다.`);
         await this.safeRename(session, `[STALL] ${session.title}`);
       } else if (controller.signal.aborted) {
         this.store.updateSession(session.id, { status: "aborted" });
@@ -2178,7 +2200,7 @@ export class SessionManager {
         const message = safeErrorMessage(error);
         const agyFailure = agyFailureFromLog(message);
         this.store.updateSession(session.id, { status: "error" });
-        await renderer.finish("error", agyFailure ?? `agy SDK 실행 실패: ${message}`);
+        await renderer.finish("error", agyFailure ?? `Antigravity 실행 실패: ${message}`);
         await this.safeRename(session, `[ERROR] ${session.title}`);
       }
     } finally {
@@ -2655,44 +2677,25 @@ export class SessionManager {
       }
       throw lastError ?? new Error("Codex 읽기 전용 단계 실패: 사용 가능한 계정이 없습니다.");
     }
-    // agy: 새 plan(읽기 전용) interactive 세션 한 턴. 종합용 임시 세션이므로 사용자 세션의
+    // Antigravity: 새 plan(읽기 전용) 세션 한 턴. 종합용 임시 세션이므로 사용자 세션의
     // agyConversationId를 건드리지 않도록 conversationId 없이 새로 만들고 끝나면 닫는다.
-    const geminiApiKey = this.options.geminiApiKey ?? process.env["GEMINI_API_KEY"];
-    if (!geminiApiKey) throw new Error("GEMINI_API_KEY가 설정되지 않았습니다.");
-    const client = new AgyInteractiveSession({
-      pythonPath: this.options.agySdkPython ?? join(
-        homedir(),
-        ".local",
-        "share",
-        "telegram-claude-orchestrator",
-        "agy-sdk",
-        "bin",
-        "python"
-      ),
-      bridgePath: resolve(process.cwd(), "scripts", "agy-sdk-bridge.py"),
-      cwd: session.cwd,
-      model: session.agyModel ?? DEFAULT_AGY_MODEL,
-      thinkingLevel: session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL,
+    const tempSession: SessionRecord = {
+      ...session,
+      id: `${session.id}:synth:${randomUUID()}`,
       permissionMode: "plan",
-      conversationId: null,
-      systemInstructions: buildProviderBootstrap(session, this.options.claudeMemoryDir),
-      connectorRegistry: join(homedir(), ".claude", "shared-resources", "connectors.json"),
-      skillsPaths: [
-        join(homedir(), ".claude", "skills"),
-        join(homedir(), ".codex", "skills"),
-        join(homedir(), ".gemini", "config", "skills")
-      ],
-      env: {
-        ...process.env,
-        GEMINI_API_KEY: geminiApiKey,
-        PYTHONUNBUFFERED: "1"
-      }
-    });
+      agyConversationId: null
+    };
+    const client = this.getAgyInteractiveSession(
+      tempSession,
+      session.agyModel ?? DEFAULT_AGY_MODEL,
+      "plan",
+      session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL
+    );
     try {
       const result = await client.runTurn(prompt);
       return result.response.trim();
     } finally {
-      client.interrupt();
+      this.closeAgyInteractiveSession(tempSession.id);
     }
   }
 

@@ -40,7 +40,7 @@ async function main(): Promise<void> {
     console.log(
       `Model catalog → Claude: ${claudeDynamic ? "동적" : "기본값"}, `
       + `Codex: ${codexDynamic ? "동적" : "기본값"}, `
-      + `agy: ${agyDynamic ? "동적" : "기본값"}`
+      + `Antigravity: ${agyDynamic ? "동적" : "기본값"}`
     );
   }
 
@@ -65,7 +65,7 @@ async function main(): Promise<void> {
   process.on("uncaughtException", (error) => notifyFault("uncaughtException", error));
 
   await bot.api.setMyCommands([
-    { command: "new", description: "새 작업 시작 (Claude/Codex/agy)" },
+    { command: "new", description: "새 작업 시작 (Claude/Codex/Antigravity)" },
     { command: "start", description: "도움말과 기본값 패널 표시" },
     { command: "reserve", description: "지정 시각에 새 작업 시작" },
     { command: "cancel", description: "대기 중인 예약 작업 선택 취소" },
@@ -80,7 +80,7 @@ async function main(): Promise<void> {
     { command: "steer", description: "실행 중 작업에 즉시 지시" },
     { command: "next", description: "현재 작업 뒤 후속 작업 예약" },
     { command: "goal", description: "조건 충족까지 자동 진행 — check: 결정론 검증 후 판관이 판정" },
-    { command: "route", description: "작업에 적합한 제공자(Claude/Codex/agy) 추천" },
+    { command: "route", description: "작업에 적합한 제공자(Claude/Codex/Antigravity) 추천" },
     { command: "synth", description: "여러 제공자 답을 비교·심사 후 장점 통합" },
     { command: "query", description: "LLM-Wiki에 질문 (인용 포함 답변)" },
     { command: "stop", description: "현재 토픽 작업 중단" },
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
     { command: "compact", description: "현재 세션 컨텍스트 압축" },
     { command: "memory", description: "현재 세션을 전역 메모리에 기록" },
     { command: "mode", description: "권한 모드 확인 또는 변경" },
-    { command: "model", description: "제공자(Claude/Codex/agy)·모델 확인 또는 변경" },
+    { command: "model", description: "제공자(Claude/Codex/Antigravity)·모델 확인 또는 변경" },
     { command: "thinking", description: "Claude 확장적 사고 on/off 확인 또는 변경" },
     { command: "power", description: "현재 AI 작업량/추론 강도 확인 또는 변경" },
     { command: "lean", description: "최소 구현 원칙 확인 또는 변경" },

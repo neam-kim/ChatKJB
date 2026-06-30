@@ -367,9 +367,9 @@ export function formatSessionStatus(
       ]
     : session.provider === "agy"
     ? [
-        "제공자: agy (Antigravity CLI)",
-        `agy 모델: ${agyModelLabel(catalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`,
-        `agy 추론 강도: ${agyThinkingLabel(session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL)}`,
+        "제공자: Antigravity",
+        `Antigravity 모델: ${agyModelLabel(catalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`,
+        `Antigravity 추론 강도: ${agyThinkingLabel(session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL)}`,
         "MCP: ~/.gemini/config/mcp_config.json"
       ]
     : [
@@ -396,7 +396,7 @@ export function formatSessionStatus(
 // 좌하 제공자, 우하 thinking(Claude) 또는 추론 강도(Codex).
 function providerDisplayLabel(provider: ProviderKind): string {
   if (provider === "codex") return "Codex";
-  if (provider === "agy") return "agy";
+  if (provider === "agy") return "Antigravity";
   return "Claude";
 }
 
@@ -514,7 +514,7 @@ function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): stri
     return `Codex · ${codexModelLabel(catalog, defaults.codexModel)} · reasoning ${codexReasoningLabel(defaults.codexReasoning)}`;
   }
   if (defaults.provider === "agy") {
-    return `agy · ${agyModelLabel(catalog, defaults.agyModel)} · 추론 ${agyThinkingLabel(defaults.agyThinkingLevel)}`;
+    return `Antigravity · ${agyModelLabel(catalog, defaults.agyModel)} · 추론 ${agyThinkingLabel(defaults.agyThinkingLevel)}`;
   }
   return `Claude · ${modelLabel(catalog, defaults.claudeModel)} · thinking ${defaults.thinking === "off" ? "off" : "on"} · 작업량 ${claudeEffortLabel(defaults.claudeEffort)}`;
 }
@@ -636,7 +636,7 @@ function providerKeyboard(current: ProviderKind): InlineKeyboard {
     .text(`${current === "claude" ? "✅ " : ""}Claude`, "mprov:claude")
     .text(`${current === "codex" ? "✅ " : ""}Codex`, "mprov:codex")
     .row()
-    .text(`${current === "agy" ? "✅ " : ""}agy`, "mprov:agy");
+    .text(`${current === "agy" ? "✅ " : ""}Antigravity`, "mprov:agy");
 }
 
 // 기본값 패널: 새 세션 기본 제공자 선택. 콜백 dprov:<provider> (mprov:과 의미 다름 — 요약 인계 없음)
@@ -644,7 +644,7 @@ function defaultsProviderKeyboard(current: ProviderKind): InlineKeyboard {
   const options: Array<[ProviderKind, string]> = [
     ["claude", "Claude"],
     ["codex", "Codex"],
-    ["agy", "agy"]
+    ["agy", "Antigravity"]
   ];
   const keyboard = new InlineKeyboard();
   for (const [index, [kind, label]] of options.entries()) {
@@ -1133,7 +1133,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   bot.command("start", async (ctx) => {
     const defaults = store.getSessionDefaults();
     await ctx.reply(
-      "Claude/Codex/agy 세션 오케스트레이터\n\n/new 새 작업\n/reserve 예약 작업\n/cancel 예약 취소\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /reset, /fork, /compact, /memory, /mode, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론·작업량·토큰)을 클릭만으로 바꿀 수 있습니다.",
+    "Claude/Codex/Antigravity 세션 오케스트레이터\n\n/new 새 작업\n/reserve 예약 작업\n/cancel 예약 취소\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /reset, /fork, /compact, /memory, /mode, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론·작업량·토큰)을 클릭만으로 바꿀 수 있습니다.",
       { reply_markup: defaultPanelKeyboard(defaults) }
     );
   });
@@ -1362,7 +1362,7 @@ export function createBot(config: AppConfig, store: StateStore) {
         const stored = parseStoredAgyUsage(session.agyUsage);
         agyUsageText = stored
           ? `\n\n${formatAgyUsage(stored)}`
-          : "\n\nagy 토큰 사용량: 측정 전 (아직 턴이 실행되지 않았습니다)";
+          : "\n\nAntigravity 토큰 사용량: 측정 전 (아직 턴이 실행되지 않았습니다)";
         const live = await sessions.getAgyLiveStatus(session.id);
         if (live.status) {
           const idleLabel = live.status.isIdle === null
@@ -1373,9 +1373,9 @@ export function createBot(config: AppConfig, store: StateStore) {
           const turnLabel = live.status.turnCount === null
             ? "대화 턴 수 알 수 없음"
             : `대화 턴 ${live.status.turnCount}회`;
-          agyLiveText = `\nagy 라이브: ${idleLabel} · ${turnLabel}`;
+          agyLiveText = `\nAntigravity 라이브: ${idleLabel} · ${turnLabel}`;
         } else {
-          agyLiveText = `\nagy 라이브: 조회 실패 (${live.error ?? "알 수 없는 원인"})`;
+          agyLiveText = `\nAntigravity 라이브: 조회 실패 (${live.error ?? "알 수 없는 원인"})`;
         }
       }
       await ctx.reply(
@@ -1438,10 +1438,13 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (topicSession?.provider === "agy") {
       const stored = parseStoredAgyUsage(topicSession.agyUsage);
       if (stored) {
-        await ctx.reply(formatAgyUsage(stored) + "\n원천: agy SDK 네이티브 (대화 누적)");
+        const source = config.agyBackend === "cli"
+          ? "Antigravity CLI 이전 API 측정값 (CLI 백엔드는 토큰 사용량 미제공)"
+          : "Antigravity API 네이티브 (대화 누적)";
+        await ctx.reply(formatAgyUsage(stored) + `\n원천: ${source}`);
       } else {
         await ctx.reply(
-          "agy 토큰 사용량: 측정 전\n"
+          "Antigravity 토큰 사용량: 측정 전\n"
           + "(이 세션에서 아직 턴이 실행되지 않았습니다. 첫 턴 완료 후 다시 확인하세요.)"
         );
       }
@@ -1702,7 +1705,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (!mode) {
       await ctx.reply(
         `현재 모드: ${session.permissionMode}\n사용 가능: default, acceptEdits, plan, dontAsk, auto\n`
-        + "Claude는 텔레그램 승인 브로커를 사용하고, Codex·agy는 같은 모드를 샌드박스와 실행 지침으로 적용합니다."
+        + "Claude는 텔레그램 승인 브로커를 사용하고, Codex·Antigravity는 같은 모드를 샌드박스와 실행 지침으로 적용합니다."
       );
       return;
     }
@@ -1718,7 +1721,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       const hasConv = !!session.agyConversationId;
       await ctx.reply(
         `권한 모드를 ${mode}(으)로 변경했습니다.\n`
-        + `agy는 다음 메시지부터 같은 대화${hasConv ? `(${session.agyConversationId!.slice(0, 8)}…)` : ""}를 `
+        + `Antigravity는 다음 메시지부터 같은 대화${hasConv ? `(${session.agyConversationId!.slice(0, 8)}…)` : ""}를 `
         + `유지한 채 새 모드로 재구성됩니다.`
       );
       return;
@@ -1740,7 +1743,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       const current = session.provider === "codex"
         ? `현재: Codex · ${codexModelLabel(config.modelCatalog, session.codexModel ?? DEFAULT_CODEX_MODEL)}`
         : session.provider === "agy"
-        ? `현재: agy · ${agyModelLabel(config.modelCatalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`
+        ? `현재: Antigravity · ${agyModelLabel(config.modelCatalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`
         : `현재: Claude · ${modelLabel(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`;
       const modelBoard = session.provider === "codex"
         ? codexModelKeyboard(config.modelCatalog)
@@ -1775,7 +1778,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (session.provider === "agy") {
       const agyModel = resolveAgyModel(config.modelCatalog, input);
       if (!agyModel) {
-        await ctx.reply("지원하지 않는 agy 모델입니다. /model 버튼의 모델을 사용하세요.");
+        await ctx.reply("지원하지 않는 Antigravity 모델입니다. /model 버튼의 모델을 사용하세요.");
         return;
       }
       store.updateSession(session.id, { agyModel });
@@ -1783,7 +1786,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       // 브리지를 재구성하여 새 ModelTarget을 적용한다. 대화 문맥은 유지된다.
       const hasConv = !!session.agyConversationId;
       await ctx.reply(
-        `agy 모델을 ${agyModelLabel(config.modelCatalog, agyModel)}(으)로 변경했습니다.\n`
+        `Antigravity 모델을 ${agyModelLabel(config.modelCatalog, agyModel)}(으)로 변경했습니다.\n`
         + `다음 메시지부터 같은 대화${hasConv ? `(${session.agyConversationId!.slice(0, 8)}…)` : ""}를 `
         + `유지한 채 새 모델로 재구성됩니다.`
       );
@@ -1810,7 +1813,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     if (session.provider !== "claude") {
-      await ctx.reply("/thinking은 Claude 전용입니다. Codex·agy는 /power를 사용하세요.");
+      await ctx.reply("/thinking은 Claude 전용입니다. Codex·Antigravity는 /power를 사용하세요.");
       return;
     }
     const input = ctx.match.trim().toLowerCase();
@@ -1862,7 +1865,7 @@ export function createBot(config: AppConfig, store: StateStore) {
         ? `현재 Claude 작업량: ${claudeEffortLabel(session.claudeEffort ?? DEFAULT_CLAUDE_EFFORT)}`
         : session.provider === "codex"
           ? `현재 Codex 추론 강도: ${codexReasoningLabel(session.codexReasoning ?? DEFAULT_CODEX_REASONING)}`
-          : `현재 agy 추론 강도: ${agyThinkingLabel(session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL)}`;
+          : `현재 Antigravity 추론 강도: ${agyThinkingLabel(session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL)}`;
       await ctx.reply(
         `${currentText}${aliasSuffix}`,
         { reply_markup: powerKeyboardForSession(session, config.modelCatalog) }
@@ -1912,7 +1915,7 @@ export function createBot(config: AppConfig, store: StateStore) {
         return;
       }
       store.updateSession(session.id, { agyThinkingLevel: null });
-      await ctx.reply(`agy 추론 강도를 API 기본(레벨 미지정)으로 초기화했습니다. 다음 실행부터 적용됩니다.${aliasSuffix}`);
+      await ctx.reply(`Antigravity 추론 강도를 기본값(레벨 미지정)으로 초기화했습니다. 다음 실행부터 적용됩니다.${aliasSuffix}`);
       return;
     }
     const resolved = resolveAgyThinkingLevel(input);
@@ -1925,7 +1928,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     store.updateSession(session.id, { agyThinkingLevel: resolved });
-    await ctx.reply(`다음 실행부터 agy 추론 강도를 ${agyThinkingLabel(resolved)}(으)로 사용합니다.${aliasSuffix}`);
+    await ctx.reply(`다음 실행부터 Antigravity 추론 강도를 ${agyThinkingLabel(resolved)}(으)로 사용합니다.${aliasSuffix}`);
   }
 
   bot.command("power", async (ctx) => {
@@ -2018,7 +2021,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (!arg) {
       await ctx.reply(
         "작업 설명과 함께 사용하세요.\n예: /route 이 PDF를 요약해줘\n"
-        + "작업유형과 이력 기반 강점 사전을 보고 Claude·Codex·agy 중 적합한 제공자를 추천합니다."
+        + "작업유형과 이력 기반 강점 사전을 보고 Claude·Codex·Antigravity 중 적합한 제공자를 추천합니다."
       );
       return;
     }
@@ -2036,7 +2039,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     );
   });
 
-  // /synth <작업>: 병렬 종합. Claude·Codex·agy를 읽기 전용으로 동시에 시키고, Claude
+  // /synth <작업>: 병렬 종합. Claude·Codex·Antigravity를 읽기 전용으로 동시에 시키고, Claude
   // Opus 4.8 high 심사자(실패 시 첫 후보 채택)가 최우수 답을 고른 뒤 승자가
   // 통합해 최종답을 낸다.
   // 읽기·조언 작업 전용(파일 수정 안 함). 토큰·시간이 N배인 비싼 경로.
@@ -2051,13 +2054,13 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (!arg) {
       await ctx.reply(
         "작업 설명과 함께 사용하세요.\n예: /synth 이 설계의 위험 요소를 분석해줘\n"
-        + "Claude·Codex·agy를 읽기 전용으로 동시에 실행하고 Opus 4.8 high 심사자가 최우수 답을 골라 통합합니다. "
+        + "Claude·Codex·Antigravity를 읽기 전용으로 동시에 실행하고 Opus 4.8 high 심사자가 최우수 답을 골라 통합합니다. "
         + "읽기·조언 작업 전용이며 토큰·시간이 더 듭니다."
       );
       return;
     }
     await ctx.reply(
-      "병렬 종합을 시작합니다. Claude·Codex·agy를 읽기 전용으로 동시 실행 → 심사 → 통합. "
+      "병렬 종합을 시작합니다. Claude·Codex·Antigravity를 읽기 전용으로 동시 실행 → 심사 → 통합. "
       + "잠시 걸립니다."
     );
     try {
@@ -2433,8 +2436,8 @@ export function createBot(config: AppConfig, store: StateStore) {
     });
     await ctx.reply(
       resolved
-        ? `다음 실행부터 agy 추론 강도를 ${agyThinkingLabel(resolved)}(으)로 사용합니다.`
-        : "agy 추론 강도를 API 기본(레벨 미지정)으로 초기화했습니다. 다음 실행부터 적용됩니다."
+        ? `다음 실행부터 Antigravity 추론 강도를 ${agyThinkingLabel(resolved)}(으)로 사용합니다.`
+        : "Antigravity 추론 강도를 기본값(레벨 미지정)으로 초기화했습니다. 다음 실행부터 적용됩니다."
     );
   }
 
@@ -2513,7 +2516,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     const label = target === "codex"
       ? `Codex · ${codexModelLabel(config.modelCatalog, updated?.codexModel ?? DEFAULT_CODEX_MODEL)}`
       : target === "agy"
-      ? `agy · ${agyModelLabel(config.modelCatalog, updated?.agyModel ?? DEFAULT_AGY_MODEL)}`
+      ? `Antigravity · ${agyModelLabel(config.modelCatalog, updated?.agyModel ?? DEFAULT_AGY_MODEL)}`
       : `Claude · ${modelLabel(config.modelCatalog, updated?.model ?? DEFAULT_CLAUDE_MODEL)}`;
     await ctx.reply(
       `제공자를 ${label}로 전환했습니다. 다음 메시지부터 새 제공자가 직전 작업 요약을 이어받아 진행합니다.`
@@ -2563,7 +2566,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     const modelId = ctx.callbackQuery.data.slice("amodel:".length);
     const option = config.modelCatalog.agyModels.find((item) => item.id === modelId);
     if (!option) {
-      await ctx.answerCallbackQuery({ text: "지원하지 않는 agy 모델입니다.", show_alert: true });
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 Antigravity 모델입니다.", show_alert: true });
       return;
     }
     const topicId = ctx.callbackQuery.message?.message_thread_id;
@@ -2582,7 +2585,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     // 브리지를 재구성하여 새 ModelTarget을 적용한다. 대화 문맥은 유지된다.
     const hasConv = !!session.agyConversationId;
     await ctx.reply(
-      `agy 모델을 ${option.label}(으)로 변경했습니다.\n`
+      `Antigravity 모델을 ${option.label}(으)로 변경했습니다.\n`
       + `다음 메시지부터 같은 대화${hasConv ? `(${session.agyConversationId!.slice(0, 8)}…)` : ""}를 `
       + `유지한 채 새 모델로 재구성됩니다.`
     );
@@ -2592,7 +2595,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     const sessionId = ctx.callbackQuery.data.slice("agygo:".length);
     const session = store.getSession(sessionId);
     if (!session || session.provider !== "agy") {
-      await ctx.answerCallbackQuery({ text: "agy 세션을 찾을 수 없습니다.", show_alert: true });
+      await ctx.answerCallbackQuery({ text: "Antigravity 세션을 찾을 수 없습니다.", show_alert: true });
       return;
     }
     if (sessions.isActive(session.id)) {
@@ -2680,7 +2683,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       }
       const defaults = store.updateSessionDefaults({ agyModel: option.id });
       await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
-      await ctx.reply(`새 세션 기본 agy 모델: ${option.label}`, {
+      await ctx.reply(`새 세션 기본 Antigravity 모델: ${option.label}`, {
         reply_markup: defaultPanelKeyboard(defaults)
       });
       return;
@@ -2726,7 +2729,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       }
       const defaults = store.updateSessionDefaults({ agyThinkingLevel: option.id });
       await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
-      await ctx.reply(`새 세션 기본 agy 추론 강도: ${option.label}`, {
+      await ctx.reply(`새 세션 기본 Antigravity 추론 강도: ${option.label}`, {
         reply_markup: defaultPanelKeyboard(defaults)
       });
       return;
@@ -2892,7 +2895,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     const prompt = defaults.provider === "codex"
       ? "새 세션 기본 Codex 추론 강도를 선택하세요."
       : defaults.provider === "agy"
-      ? "새 세션 기본 agy 추론 강도를 선택하세요."
+      ? "새 세션 기본 Antigravity 추론 강도를 선택하세요."
       : "새 세션 기본 Claude thinking을 선택하세요.";
     await ctx.reply(prompt, {
       reply_markup: defaultsReasoningKeyboard(defaults, config.modelCatalog)
@@ -2904,7 +2907,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     const defaults = store.getSessionDefaults();
     if (defaults.provider !== "claude") {
       await ctx.reply(
-        "작업량(effort)은 Claude 기본값 전용입니다. Codex·agy는 추론 강도(💭)가 작업량을 겸합니다.",
+        "작업량(effort)은 Claude 기본값 전용입니다. Codex·Antigravity는 추론 강도(💭)가 작업량을 겸합니다.",
         { reply_markup: defaultPanelKeyboard(defaults) }
       );
       return;
