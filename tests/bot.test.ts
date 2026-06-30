@@ -471,6 +471,36 @@ describe("/new defaults fast path", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("reuses a configured project when its display name differs from the folder name", async () => {
+    const root = mkdtempSync(join(tmpdir(), "telegram-folder-browser-"));
+    const projectDir = join(root, "LLM-Wiki");
+    mkdirSync(projectDir);
+    process.env.CHATKJB_FOLDER_BROWSER_ROOT = root;
+    const { bot, config, store, sessions } = botSetup();
+    const project = {
+      name: "LLM Wiki",
+      cwd: realpathSync(projectDir),
+      defaultMode: "default" as const
+    };
+    config.projects.push(project);
+    store.syncProjects([project]);
+    vi.spyOn(sessions as unknown as { execute: () => Promise<void> }, "execute")
+      .mockResolvedValue();
+
+    await bot.handleUpdate(newCommand());
+    await bot.handleUpdate(callbackUpdate("newfs:o:0", 2));
+    await bot.handleUpdate(callbackUpdate("newfs:s", 3));
+    await bot.handleUpdate(textMessage("위키 폴더 작업", 4, 7777));
+
+    const created = store
+      .listSessions(10)
+      .find((item) => item.topicId === 7777);
+    expect(created?.projectName).toBe("LLM Wiki");
+    expect(created?.cwd).toBe(realpathSync(projectDir));
+    expect(store.getProjectByCwd(realpathSync(projectDir))?.name).toBe("LLM Wiki");
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("creates a session from the current new-session defaults", async () => {
     const { bot, store, sessions } = botSetup();
     // 세션 생성은 즉시 백그라운드 실행을 큐에 넣는다. 테스트에서는 실제 Claude 실행이

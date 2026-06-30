@@ -83,6 +83,12 @@ interface SessionRow {
   updated_at: number;
 }
 
+interface ProjectRow {
+  name: string;
+  cwd: string;
+  default_mode: PermissionMode;
+}
+
 interface ApprovalRow {
   nonce: string;
   tool_use_id: string;
@@ -326,6 +332,20 @@ export class StateStore {
         statement.run(project.name, project.cwd, project.defaultMode, now);
       }
     })();
+  }
+
+  listProjects(): ProjectConfig[] {
+    const rows = this.db
+      .prepare("SELECT name, cwd, default_mode FROM projects ORDER BY name COLLATE NOCASE")
+      .all() as ProjectRow[];
+    return rows.map((row) => this.mapProject(row));
+  }
+
+  getProjectByCwd(cwd: string): ProjectConfig | undefined {
+    const row = this.db
+      .prepare("SELECT name, cwd, default_mode FROM projects WHERE cwd = ?")
+      .get(cwd) as ProjectRow | undefined;
+    return row ? this.mapProject(row) : undefined;
   }
 
   countSessionsByProject(name: string): number {
@@ -688,6 +708,14 @@ export class StateStore {
       usageSnapshot: this.parseUsageSnapshot(row.usage_snapshot),
       createdAt: row.created_at,
       updatedAt: row.updated_at
+    };
+  }
+
+  private mapProject(row: ProjectRow): ProjectConfig {
+    return {
+      name: row.name,
+      cwd: row.cwd,
+      defaultMode: row.default_mode
     };
   }
 

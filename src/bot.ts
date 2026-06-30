@@ -122,6 +122,17 @@ function projectNameFromSelectedPath(path: string): string {
     .slice(0, 32) || "project";
 }
 
+function uniqueProjectName(baseName: string, existingNames: ReadonlySet<string>): string {
+  let candidate = baseName;
+  let suffixNumber = 2;
+  while (existingNames.has(candidate.toLocaleLowerCase("en-US"))) {
+    const suffix = `-${suffixNumber}`;
+    candidate = `${baseName.slice(0, Math.max(1, 32 - suffix.length))}${suffix}`;
+    suffixNumber += 1;
+  }
+  return candidate;
+}
+
 function folderBrowserRoot(): string {
   return process.env.CHATKJB_FOLDER_BROWSER_ROOT?.trim() || DEFAULT_SYNOLOGY_DRIVE_ROOT;
 }
@@ -867,11 +878,23 @@ export function createBot(config: AppConfig, store: StateStore) {
     );
   };
 
-  const projectFromSelectedFolder = (path: string): ProjectConfig => ({
-    name: projectNameFromSelectedPath(path),
-    cwd: path,
-    defaultMode: "auto"
-  });
+  const projectFromSelectedFolder = (path: string): ProjectConfig => {
+    const configured = config.projects.find((project) => project.cwd === path);
+    if (configured) return configured;
+
+    const stored = store.getProjectByCwd(path);
+    if (stored) return stored;
+
+    const existingNames = new Set(
+      [...config.projects, ...store.listProjects()]
+        .map((project) => project.name.toLocaleLowerCase("en-US"))
+    );
+    return {
+      name: uniqueProjectName(projectNameFromSelectedPath(path), existingNames),
+      cwd: path,
+      defaultMode: "auto"
+    };
+  };
 
   const openPendingReserveTopic = async (
     project: ProjectConfig,
