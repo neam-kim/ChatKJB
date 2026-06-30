@@ -146,14 +146,15 @@ function folderBrowserText(path: string): string {
 
 function folderBrowserKeyboard(
   state: FolderBrowserState,
-  atRoot: boolean
+  atRoot: boolean,
+  callbackPrefix: string
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const [index, name] of state.directories.entries()) {
-    keyboard.text(name, `newfs:o:${index}`).row();
+    keyboard.text(name, `${callbackPrefix}:o:${index}`).row();
   }
-  keyboard.text("이 폴더 선택", "newfs:s").row();
-  if (!atRoot) keyboard.text("뒤로", "newfs:b").row();
+  keyboard.text("이 폴더 선택", `${callbackPrefix}:s`).row();
+  if (!atRoot) keyboard.text("뒤로", `${callbackPrefix}:b`).row();
   return keyboard;
 }
 
@@ -867,6 +868,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   const showFolderBrowser = async (
     key: string,
     path: string,
+    callbackPrefix: string,
     send: (text: string, keyboard: InlineKeyboard) => Promise<unknown>
   ): Promise<void> => {
     const root = await realpath(folderBrowserRoot());
@@ -874,7 +876,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     folderBrowsers.set(key, state);
     await send(
       folderBrowserText(state.currentPath),
-      folderBrowserKeyboard(state, state.currentPath === root)
+      folderBrowserKeyboard(state, state.currentPath === root, callbackPrefix)
     );
   };
 
@@ -900,6 +902,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     project: ProjectConfig,
     defaults: SessionDefaults
   ): Promise<number> => {
+    store.syncProjects([project]);
     const topicId = await transport.createTopic(config.chatId, `예약 - ${project.name}`);
     const defaultsSummaryText = defaultsSummary(defaults, config.modelCatalog);
     pendingReserves.set(
@@ -1135,7 +1138,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
     const key = pendingStartKey(config.allowedUserId, ctx.message?.message_thread_id);
     try {
-      await showFolderBrowser(key, folderBrowserRoot(), (text, keyboard) =>
+      await showFolderBrowser(key, folderBrowserRoot(), "newfs", (text, keyboard) =>
         ctx.reply(text, { reply_markup: keyboard })
       );
     } catch (error) {
@@ -1146,7 +1149,14 @@ export function createBot(config: AppConfig, store: StateStore) {
   bot.command("reserve", async (ctx) => {
     const input = ctx.match.trim();
     if (!input) {
-      await ctx.reply("예약할 프로젝트를 선택하세요.", { reply_markup: reserveProjectKeyboard(config.projects) });
+      const key = pendingStartKey(config.allowedUserId, ctx.message?.message_thread_id);
+      try {
+        await showFolderBrowser(key, folderBrowserRoot(), "resfs", (text, keyboard) =>
+          ctx.reply(text, { reply_markup: keyboard })
+        );
+      } catch (error) {
+        await ctx.reply(`Synology Drive 폴더를 읽지 못했습니다.\n${safeErrorMessage(error)}`);
+      }
       return;
     }
     const parsed = parseReserveCommand(input, new Date());
@@ -2169,7 +2179,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
     if (action === "b") {
       try {
-        await showFolderBrowser(key, resolve(state.currentPath, ".."), (text, keyboard) =>
+        await showFolderBrowser(key, resolve(state.currentPath, ".."), "newfs", (text, keyboard) =>
           ctx.editMessageText(text, { reply_markup: keyboard })
         );
         await ctx.answerCallbackQuery({ text: "뒤로" });
@@ -2187,7 +2197,56 @@ export function createBot(config: AppConfig, store: StateStore) {
         return;
       }
       try {
-        await showFolderBrowser(key, join(state.currentPath, directory), (text, keyboard) =>
+        await showFolderBrowser(key, join(state.currentPath, directory), "newfs", (text, keyboard) =>
+          ctx.editMessageText(text, { reply_markup: keyboard })
+        );
+        await ctx.answerCallbackQuery({ text: directory });
+      } catch (error) {
+        await ctx.answerCallbackQuery({ text: "폴더를 읽지 못했습니다.", show_alert: true });
+        await ctx.reply(`폴더를 읽지 못했습니다.\n${safeErrorMessage(error)}`);
+      }
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "지원하지 않는 폴더 동작입니다.", show_alert: true });
+  });
+
+  bot.callbackQuery(/^resfs:/, async (ctx) => {
+    const key = pendingStartKey(config.allowedUserId, ctx.callbackQuery.message?.message_thread_id);
+    const state = folderBrowsers.get(key);
+    if (!state) {
+      await ctx.answerCallbackQuery({ text: "폴더 선택 상태가 만료되었습니다.", show_alert: true });
+      return;
+    }
+    const action = ctx.callbackQuery.data.slice("resfs:".length);
+    if (action === "s") {
+      const project = projectFromSelectedFolder(state.currentPath);
+      await openPendingReserveTopic(project, store.getSessionDefaults());
+      folderBrowsers.delete(key);
+      await ctx.answerCallbackQuery({ text: `${project.name} 예약` });
+      await ctx.editMessageText(`${project.name} 예약 토픽을 열었습니다.\n${project.cwd}`);
+      return;
+    }
+    if (action === "b") {
+      try {
+        await showFolderBrowser(key, resolve(state.currentPath, ".."), "resfs", (text, keyboard) =>
+          ctx.editMessageText(text, { reply_markup: keyboard })
+        );
+        await ctx.answerCallbackQuery({ text: "뒤로" });
+      } catch (error) {
+        await ctx.answerCallbackQuery({ text: "상위 폴더를 읽지 못했습니다.", show_alert: true });
+        await ctx.reply(`상위 폴더를 읽지 못했습니다.\n${safeErrorMessage(error)}`);
+      }
+      return;
+    }
+    if (action.startsWith("o:")) {
+      const index = Number.parseInt(action.slice("o:".length), 10);
+      const directory = Number.isInteger(index) ? state.directories[index] : undefined;
+      if (!directory) {
+        await ctx.answerCallbackQuery({ text: "폴더를 찾을 수 없습니다.", show_alert: true });
+        return;
+      }
+      try {
+        await showFolderBrowser(key, join(state.currentPath, directory), "resfs", (text, keyboard) =>
           ctx.editMessageText(text, { reply_markup: keyboard })
         );
         await ctx.answerCallbackQuery({ text: directory });

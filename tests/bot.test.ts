@@ -647,45 +647,65 @@ describe("/new defaults fast path", () => {
 });
 
 describe("/reserve command", () => {
-  it("shows project choices when reserve is called without arguments", async () => {
+  it("shows folder choices when reserve is called without arguments", async () => {
+    const root = mkdtempSync(join(tmpdir(), "telegram-folder-browser-"));
+    mkdirSync(join(root, "Reserve Project"));
+    process.env.CHATKJB_FOLDER_BROWSER_ROOT = root;
     const { bot, calls } = botSetup();
 
-    await bot.handleUpdate(reserveCommand("/reserve"));
+    try {
+      await bot.handleUpdate(reserveCommand("/reserve"));
 
-    const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
-    expect(reply?.text).toBe("예약할 프로젝트를 선택하세요.");
-    expect(JSON.stringify(reply?.reply_markup)).toContain("resp:0");
+      const reply = calls.filter((call) => call.method === "sendMessage").at(-1)?.payload;
+      expect(reply?.text).toContain("폴더를 선택하세요.");
+      expect(JSON.stringify(reply?.reply_markup)).toContain("resfs:s");
+      expect(JSON.stringify(reply?.reply_markup)).toContain("resfs:o:0");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
-  it("opens a reservation topic after a project is picked", async () => {
+  it("opens a reservation topic after a folder is picked", async () => {
+    const root = mkdtempSync(join(tmpdir(), "telegram-folder-browser-"));
+    mkdirSync(join(root, "Reserve Project"));
+    process.env.CHATKJB_FOLDER_BROWSER_ROOT = root;
     const { bot, calls } = botSetup();
 
-    await bot.handleUpdate(reserveCommand("/reserve"));
-    await bot.handleUpdate(callbackUpdate("resp:0", 2));
+    try {
+      await bot.handleUpdate(reserveCommand("/reserve"));
+      await bot.handleUpdate(callbackUpdate("resfs:o:0", 2));
+      await bot.handleUpdate(callbackUpdate("resfs:s", 3));
 
-    expect(calls.some((call) => call.method === "createForumTopic")).toBe(true);
-    const topicMessage = calls
-      .filter((call) => call.method === "sendMessage")
-      .map((call) => call.payload)
-      .find((payload) => payload.message_thread_id === 7777);
-    expect(topicMessage?.text).toContain("test 예약");
-    expect(topicMessage?.text).toContain("이 토픽에 예약할 시간과 작업을 입력하세요");
-    expect(topicMessage?.reply_markup).toEqual({ remove_keyboard: true });
+      expect(calls.some((call) => call.method === "createForumTopic")).toBe(true);
+      const topicMessage = calls
+        .filter((call) => call.method === "sendMessage")
+        .map((call) => call.payload)
+        .find((payload) => payload.message_thread_id === 7777);
+      expect(topicMessage?.text).toContain("Reserve Project 예약");
+      expect(topicMessage?.text).toContain("이 토픽에 예약할 시간과 작업을 입력하세요");
+      expect(topicMessage?.reply_markup).toEqual({ remove_keyboard: true });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("stores a topic-backed reservation from a message in the reservation topic", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 5, 29, 22, 10, 0, 0));
+    const root = mkdtempSync(join(tmpdir(), "telegram-folder-browser-"));
+    mkdirSync(join(root, "Reserve Project"));
+    process.env.CHATKJB_FOLDER_BROWSER_ROOT = root;
     try {
       const { bot, store, calls } = botSetup();
 
       await bot.handleUpdate(reserveCommand("/reserve"));
-      await bot.handleUpdate(callbackUpdate("resp:0", 2));
-      await bot.handleUpdate(textMessage("내일 오전 9시에 README 점검", 3, 7777));
+      await bot.handleUpdate(callbackUpdate("resfs:o:0", 2));
+      await bot.handleUpdate(callbackUpdate("resfs:s", 3));
+      await bot.handleUpdate(textMessage("내일 오전 9시에 README 점검", 4, 7777));
 
       const task = store.listPendingReservedTasks()[0];
       expect(task).toMatchObject({
-        projectName: "test",
+        projectName: "Reserve Project",
         prompt: "README 점검",
         dueAt: new Date(2026, 5, 30, 9, 0, 0, 0).getTime(),
         topicId: 7777,
@@ -696,6 +716,7 @@ describe("/reserve command", () => {
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
