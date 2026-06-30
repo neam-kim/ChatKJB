@@ -602,7 +602,8 @@ describe("/new defaults fast path", () => {
       .map((call) => call.payload)
       .find((payload) => payload.message_thread_id === 7777);
     expect(reply?.text).toContain("실행할 작업을 입력하세요");
-    expect(reply?.reply_markup).toBeDefined();
+    expect(reply?.text).not.toContain("아래 패널");
+    expect(reply?.reply_markup).toEqual({ remove_keyboard: true });
   });
 });
 
@@ -630,6 +631,7 @@ describe("/reserve command", () => {
       .find((payload) => payload.message_thread_id === 7777);
     expect(topicMessage?.text).toContain("test 예약");
     expect(topicMessage?.text).toContain("이 토픽에 예약할 시간과 작업을 입력하세요");
+    expect(topicMessage?.reply_markup).toEqual({ remove_keyboard: true });
   });
 
   it("stores a topic-backed reservation from a message in the reservation topic", async () => {

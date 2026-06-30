@@ -391,6 +391,7 @@ function providerDisplayLabel(provider: ProviderKind): string {
 // 아직 배선되지 않은 빈 패널 슬롯 라벨. 추후 제공자별 추가 선택 항목을 여기에 연결한다.
 // (user 요청: 빈 패널은 '-' 표기, 추후 배선 가능성만 열어둔다.)
 const RESERVED_SLOT_LABEL = "➖";
+const removeReplyKeyboard = { remove_keyboard: true } as const;
 
 function defaultsKeyboard(
   defaults: SessionDefaults,
@@ -829,10 +830,10 @@ export function createBot(config: AppConfig, store: StateStore) {
     );
     await bot.api.sendMessage(
       config.chatId,
-      `${project.name} 프로젝트 · ${defaultsSummary(defaults, config.modelCatalog)}\n이 토픽에 실행할 작업을 입력하세요. (기본값은 아래 패널에서 변경)`,
+      `${project.name} 프로젝트 · ${defaultsSummary(defaults, config.modelCatalog)}\n이 토픽에 실행할 작업을 입력하세요.`,
       {
         message_thread_id: topicId,
-        reply_markup: defaultPanelKeyboard(defaults)
+        reply_markup: removeReplyKeyboard
       }
     );
   };
@@ -892,7 +893,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       `${project.name} 예약 · ${defaultsSummaryText}\n이 토픽에 예약할 시간과 작업을 입력하세요.\n예: 내일 오전 9시 README 점검해줘`,
       {
         message_thread_id: topicId,
-        reply_markup: defaultPanelKeyboard(defaults)
+        reply_markup: removeReplyKeyboard
       }
     );
     return topicId;
