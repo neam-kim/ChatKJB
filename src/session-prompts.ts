@@ -48,14 +48,43 @@ export function buildPermissionModeInstructions(mode: SessionRecord["permissionM
   return "현재 권한 모드는 자율 실행이다. 사용자가 지정한 범위 안의 구현·검증은 끝까지 수행하되, 비밀 노출·파괴적 변경·범위 밖 외부 작업은 하지 않는다.";
 }
 
+export function buildOrchestrationBoundaryInstructions(): string {
+  return [
+    "[CHATKJB_ORCHESTRATION_BOUNDARY]",
+    "이 세션은 ChatKJB 텔레그램 오케스트레이터가 관리하는 실행 세션이다.",
+    "상위 조정자는 ChatKJB이며, Claude/Codex/agy 네이티브 앱의 독립 세션처럼 새 목표·새 계획·새 승인 흐름을 자체적으로 만들지 않는다.",
+    "현재 턴 프롬프트, 명시된 세션 상태, 저장소에서 직접 확인한 사실만 작업 범위로 삼는다.",
+    "보이지 않는 이전 작업을 되살리거나 provider/model/session/goal/memory 설정을 자체 변경하려 하지 않는다.",
+    "권한 모드와 사용자가 지정한 범위 밖의 파일 변경, 외부 전송, 장기 백그라운드 작업은 수행하지 않고 ChatKJB 응답으로 필요한 승인만 요청한다.",
+    "진행 상황과 결과는 ChatKJB 대화로 보고하며, 완료 후 후속 에이전트 호출이나 네이티브 앱 전환을 가정하지 않는다."
+  ].join("\n");
+}
+
+export function buildOrchestratedTurnPrompt(prompt: string): string {
+  const clean = prompt.trim();
+  if (clean.startsWith("[CHATKJB_ORCHESTRATED_TURN]")) return clean;
+  return [
+    "[CHATKJB_ORCHESTRATED_TURN]",
+    "아래 [USER_REQUEST] 블록은 ChatKJB가 전달한 현재 실행 턴이다.",
+    "부트스트랩, 인계 요약, 자동 재개 문구는 범위 설정 정보이며 새 독립 작업 지시가 아니다.",
+    "이 턴의 범위 밖 작업이나 네이티브 앱 전환은 자체적으로 시작하지 않는다.",
+    "[/CHATKJB_ORCHESTRATED_TURN]",
+    "",
+    "[USER_REQUEST]",
+    clean,
+    "[/USER_REQUEST]"
+  ].join("\n");
+}
+
 export function buildProviderBootstrap(session: SessionRecord, memoryDir: string): string {
   const globalInstructions = loadGlobalInstructions();
   const instructions = loadProjectInstructions(session.cwd);
   return [
     buildKstDateNote(),
-    `장기기억은 전역 선별 저장소 ${memoryDir}, Claude 저장소별 자동 메모리 ${join(homedir(), ".claude", "projects")}, Codex 자동 메모리 ${join(homedir(), ".codex", "memories")}에 있다. 작업과 관련 있으면 ${sharedMemoryBridgePath()}를 통해 세 저장소를 함께 읽고 중복을 제거해 활용한다. 명시적 /memory 기록은 전역 선별 저장소에 하고, Claude와 Codex의 자동 메모리는 각자 네이티브 형식으로 유지한다.`,
+    `장기기억은 전역 선별 저장소 ${memoryDir}, Claude 저장소별 자동 메모리 ${join(homedir(), ".claude", "projects")}, Codex 자동 메모리 ${join(homedir(), ".codex", "memories")}에 있다. 과거 맥락, 이전 결정, 사용자·프로젝트 선호, 저장소 이력, 장기 지식, /query, /memory, LLM-Wiki 또는 이전 작업에 의존할 수 있는 요청에서는 장기기억 회수가 선택사항이 아니라 필수다. 이 경우 ${sharedMemoryBridgePath()}를 먼저 읽고 활성 메모리 인덱스, LLM-Wiki query flow, 네이티브 자동 메모리 fallback 순서로 확인한 뒤 의미 중복을 제거해 활용한다. /query 요청은 보이는 대화나 네이티브 자동 메모리만으로 답하지 말고 반드시 LLM-Wiki query flow를 수행한다. 명시적 /memory 기록은 전역 선별 저장소에 하고, Claude와 Codex의 자동 메모리는 각자 네이티브 형식으로 유지한다.`,
     buildPublicProgressInstructions(),
     buildPermissionModeInstructions(session.permissionMode),
+    buildOrchestrationBoundaryInstructions(),
     `공통 AI 자원 안내는 ${sharedResourceGuidePath()} 에 있다. 먼저 읽고 세 제공자 공통 스킬·커넥터·플러그인 기능·도구 정책을 따른다.`,
     ...(session.leanMode ? [buildLeanInstructions(true)] : []),
     ...(globalInstructions

@@ -1133,7 +1133,7 @@ export function createBot(config: AppConfig, store: StateStore) {
   bot.command("start", async (ctx) => {
     const defaults = store.getSessionDefaults();
     await ctx.reply(
-    "Claude/Codex/Antigravity 세션 오케스트레이터\n\n/new 새 작업\n/reserve 예약 작업\n/cancel 예약 취소\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /stop, /reset, /fork, /compact, /memory, /mode, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론·작업량·토큰)을 클릭만으로 바꿀 수 있습니다.",
+    "Claude/Codex/Antigravity 세션 오케스트레이터\n\n/new 새 작업\n/reserve 예약 작업\n/cancel 예약 취소\n/status 현재 작동 상태\n/doctor 환경 진단\n/addp 프로젝트 경로 추가\n/deltp 프로젝트 삭제\n/sessions 최근 세션\n/usage 한도 사용량\n/projects 프로젝트 목록\n토픽 안에서 /steer, /next, /goal, /restop, /stop, /reset, /fork, /compact, /memory, /mode, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론·작업량·토큰)을 클릭만으로 바꿀 수 있습니다.",
       { reply_markup: defaultPanelKeyboard(defaults) }
     );
   });
@@ -1517,6 +1517,20 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     await ctx.reply("중단 요청을 보냈습니다.");
+  });
+
+  bot.command("restop", async (ctx) => {
+    const topicId = ctx.message?.message_thread_id;
+    if (!topicId) {
+      await ctx.reply("세션 토픽 안에서 사용하세요.");
+      return;
+    }
+    const session = store.getSessionByTopic(config.chatId, topicId);
+    if (!session || !sessions.cancelLimitResume(session.id)) {
+      await ctx.reply("취소할 한도 회복 자동 재개 예약이 없습니다.");
+      return;
+    }
+    await ctx.reply("한도 회복 후 자동 재개 예약을 취소했습니다. 이후 이어가려면 새 지시를 보내세요.");
   });
 
   bot.command("reset", async (ctx) => {
@@ -1980,7 +1994,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (!arg) {
       await ctx.reply(
         session.goalCondition
-          ? `현재 목표: ${session.goalCondition}\n해제하려면 /goal clear`
+          ? `현재 목표: ${session.goalCondition}\n해제하려면 /goal clear\n한도 회복 후 자동 재개만 취소하려면 /restop`
           : "설정된 목표가 없습니다.\n예: /goal 모든 테스트가 통과하고 lint가 깨끗하다\n"
             + "코딩뿐 아니라 요약·조사·문서 작성 같은 일반 작업에도 쓸 수 있습니다.\n"
             + "결정론적 검증을 넣으려면 줄마다 `check: <명령>`을 추가하세요(예: check: npm test).\n"
@@ -1992,24 +2006,47 @@ export function createBot(config: AppConfig, store: StateStore) {
       return;
     }
     if (arg.toLowerCase() === "clear") {
-      const had = sessions.clearGoal(session.id);
+      let had = false;
+      try {
+        had = await sessions.clearGoalForCommand(session.id);
+      } catch (error) {
+        await ctx.reply(`목표 해제 중 오류가 발생했습니다: ${safeErrorMessage(error)}`);
+        return;
+      }
       await ctx.reply(had ? "목표를 해제했습니다. 자동 진행을 멈춥니다." : "해제할 목표가 없습니다.");
       return;
     }
-    const result = sessions.setGoal(session.id, arg);
+    let result: Awaited<ReturnType<typeof sessions.setGoal>>;
+    try {
+      result = await sessions.setGoal(session.id, arg);
+    } catch (error) {
+      await ctx.reply(`목표 설정 중 오류가 발생했습니다: ${safeErrorMessage(error)}`);
+      return;
+    }
     if (result === "queued") {
       await ctx.reply(
         `목표를 설정하고 작업을 시작합니다.\n조건: ${arg}\n`
-        + `충족될 때까지 자동으로 턴을 이어 가며 최대 ${MAX_GOAL_ROUNDS}턴까지 진행합니다. `
-        + "매 턴 종료 후 `check:` 명령(있으면)을 먼저 실행해 객관 판정하고, 나머지는 판관 모델이 평가합니다. /goal clear 또는 /stop 으로 중단."
+        + (session.provider === "claude"
+          ? "Claude 네이티브 /goal 명령으로 전달합니다. /goal clear 또는 /stop 으로 중단."
+          : `충족될 때까지 자동으로 턴을 이어 가며 최대 ${MAX_GOAL_ROUNDS}턴까지 진행합니다. `
+            + "매 턴 종료 후 `check:` 명령(있으면)을 먼저 실행해 객관 판정하고, 나머지는 판관 모델이 평가합니다. /goal clear 또는 /stop 으로 중단. 한도 회복 자동 재개만 취소하려면 /restop.")
+      );
+    } else if (result === "native") {
+      await ctx.reply(
+        `목표를 Codex 네이티브 목표로 설정했습니다.\n조건: ${arg}\n`
+        + "ChatKJB는 이 조건을 상태 표시에도 보존합니다. /goal clear 또는 /stop 으로 중단."
       );
     } else if (result === "active") {
       await ctx.reply(
-        `목표를 설정했습니다. 현재 실행 중인 작업이 끝나면 달성 여부를 평가하고 미달성이면 자동으로 이어 갑니다.\n조건: ${arg}`
+        session.provider === "claude"
+          ? `목표를 Claude 네이티브 /goal 명령으로 전달했습니다. 현재 턴 뒤 같은 세션에서 반영됩니다.\n조건: ${arg}`
+          : `목표를 설정했습니다. 현재 실행 중인 작업이 끝나면 달성 여부를 평가하고 미달성이면 자동으로 이어 갑니다.\n조건: ${arg}`
       );
     } else {
       await ctx.reply(
-        `목표를 저장했습니다. 이 토픽에서 작업을 한 번 실행(메시지 전송)하면 그 이후부터 목표를 향해 자동 진행합니다.\n조건: ${arg}`
+        session.provider === "codex"
+          ? `목표를 저장했습니다. Codex 스레드가 아직 없어 네이티브 목표는 다음 Codex 스레드 생성 후 설정할 수 있습니다.\n조건: ${arg}`
+          : `목표를 저장했습니다. 이 토픽에서 작업을 한 번 실행(메시지 전송)하면 그 이후부터 목표를 향해 자동 진행합니다.\n조건: ${arg}`
       );
     }
   });

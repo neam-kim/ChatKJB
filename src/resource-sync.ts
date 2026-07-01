@@ -3,6 +3,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readlinkSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -73,7 +74,11 @@ function ensureSymlink(target: string, linkPath: string): void {
   mkdirSync(dirname(linkPath), { recursive: true });
   try {
     const current = lstatSync(linkPath);
-    if (current.isSymbolicLink() && realpathSync(linkPath) === realpathSync(target)) return;
+    if (current.isSymbolicLink()) {
+      const currentTarget = readlinkSync(linkPath);
+      const resolvedCurrentTarget = resolve(dirname(linkPath), currentTarget);
+      if (resolvedCurrentTarget === resolve(target)) return;
+    }
     rmSync(linkPath, { recursive: current.isDirectory(), force: true });
   } catch {
     // Missing or broken link.
@@ -243,6 +248,84 @@ export function sharedMemoryBridgePath(home = homedir()): string {
   return join(home, ".claude", "shared-resources", "MEMORY-BRIDGE.md");
 }
 
+interface SharedMemoryTextPaths {
+  claudeMemory: string;
+  claudeAutoMemory: string;
+  codexMemory: string;
+  llmWikiRoot: string;
+  llmWikiRouter: string;
+  llmWikiInbox: string;
+  memoryBridge: string;
+  skillCatalog: string;
+  connectorRegistry: string;
+}
+
+export function buildSharedMemoryBridgeText(paths: SharedMemoryTextPaths): string {
+  return [
+    "# Claude and Codex Memory Bridge",
+    "",
+    "Both native memory systems remain enabled and keep their own formats.",
+    "",
+    `- Claude canonical facts: ${paths.claudeMemory}`,
+    `- Claude index: ${join(paths.claudeMemory, "MEMORY.md")}`,
+    `- LLM-Wiki root: ${paths.llmWikiRoot}`,
+    `- LLM-Wiki router: ${paths.llmWikiRouter}`,
+    `- LLM-Wiki inbox: ${paths.llmWikiInbox}`,
+    "- LLM-Wiki connector: llm-wiki, when available through the shared connector registry",
+    `- Claude native auto-memory roots: ${paths.claudeAutoMemory}`,
+    `- Codex native auto-memory: ${paths.codexMemory}`,
+    `- Codex summary: ${join(paths.codexMemory, "memory_summary.md")}`,
+    `- Claude can read Codex through ${join(paths.claudeMemory, "CODEX_MEMORY_SUMMARY.md")} and ${join(paths.claudeMemory, "CODEX_MEMORY_INDEX.md")}.`,
+    `- Codex can read Claude through ${join(paths.codexMemory, "CLAUDE_MEMORY_INDEX.md")}.`,
+    `- Codex can read Claude repository auto memories through ${join(paths.codexMemory, "CLAUDE_AUTO_MEMORIES")}.`,
+    "",
+    "Recall policy:",
+    "",
+    "Memory recall is mandatory, not optional, whenever a task mentions past context, prior decisions, user or project preferences, repository history, durable knowledge, /query, /memory, LLM-Wiki, or anything that could reasonably depend on earlier work.",
+    "Do not answer such tasks from the current chat alone until the query-first recall path below has been attempted and duplicate facts have been reconciled by meaning.",
+    "",
+    "Recall order:",
+    "",
+    "1. Read /Users/neam/.claude/shared-resources/RESOURCE.md and this bridge when memory is relevant under the mandatory policy above.",
+    `2. Check ${join(paths.claudeMemory, "MEMORY.md")} for active routing facts, high-risk rules, and pointers.`,
+    "3. For long project history, prior decisions, user or project patterns, and reusable knowledge, use the LLM-Wiki query flow first.",
+    "   - /query requests must use this LLM-Wiki flow; do not satisfy /query only from native auto-memory or the visible chat.",
+    "   - Prefer the llm-wiki connector if the active provider exposes it.",
+    "   - If the connector is not available, use standard file read/search tools from 30-wiki/index.md, then routed topic/index/alias pages, then targeted grep in 30-wiki.",
+    "4. If LLM-Wiki does not answer, or session recovery requires provider-specific hints, search Claude native auto-memory and Codex native memory, then deduplicate by meaning.",
+    "5. If live recall is skipped despite possible relevance, explicitly state that the answer is not memory-verified and may be stale.",
+    "",
+    "Write order:",
+    "",
+    `1. Explicit globally active durable facts go to ${paths.claudeMemory} as one fact per file and one index line.`,
+    "2. Long project knowledge, implementation history, transcript-derived facts, and result logs should enter LLM-Wiki as source material in 10-inbox, then be compiled into 30-wiki before becoming queryable.",
+    "3. Claude repository learnings stay in Claude auto-memory. Codex automatic capture stays in Codex memories.",
+    "4. Never overwrite, reformat, or merge one provider's native auto-memory into another store.",
+    ""
+  ].join("\n");
+}
+
+export function buildSharedResourceGuideText(paths: SharedMemoryTextPaths & { home: string }): string {
+  return [
+    "# Shared AI Resources",
+    "",
+    "This is the common resource layer for Claude, Codex, and agy.",
+    "",
+    `- Global instructions: ${join(paths.home, ".claude", "CLAUDE.md")} and ${join(paths.home, ".codex", "AGENTS.md")}`,
+    `- Claude memory: ${join(paths.home, ".claude", "memory")}`,
+    `- Claude native auto memory: ${paths.claudeAutoMemory}`,
+    `- Codex native memory: ${join(paths.home, ".codex", "memories")}`,
+    `- Memory bridge: ${paths.memoryBridge}`,
+    `- Shared skill catalog: ${paths.skillCatalog}`,
+    `- Shared connector registry: ${paths.connectorRegistry}`,
+    "- Plugin capabilities: plugin-provided skills are included in the shared skill catalog; MCP-backed plugin tools are included in the shared connector registry.",
+    "- Tools: use the same MCP connector names and the provider's native filesystem, shell, web, and editing tools under the active permission mode.",
+    "",
+    "Before acting, use the memory bridge whenever the mandatory recall policy can apply. For /query and long-memory work, run active Claude memory index lookup first, then the LLM-Wiki query flow, then native auto-memory fallback only if needed. Prefer the llm-wiki connector when exposed; otherwise use standard file read/search tools. Search the shared skill catalog for task-specific workflows. Treat provider-native UI-only plugins as optional surfaces, not as a source of different behavior.",
+    ""
+  ].join("\n");
+}
+
 export function syncSharedResources(
   overrides: Partial<SharedResourcePaths> = {}
 ): SharedResourceSummary {
@@ -296,45 +379,20 @@ export function syncSharedResources(
     join(codexMemory, "CLAUDE_AUTO_MEMORIES")
   );
 
-  writeFileSync(
-    paths.memoryBridge,
-    [
-      "# Claude and Codex Memory Bridge",
-      "",
-      "Both native memory systems remain enabled and keep their own formats.",
-      "",
-      `- Claude canonical facts: ${claudeMemory}`,
-      `- Claude index: ${join(claudeMemory, "MEMORY.md")}`,
-      `- LLM-Wiki root: ${llmWikiRoot}`,
-      `- LLM-Wiki router: ${llmWikiRouter}`,
-      `- LLM-Wiki inbox: ${llmWikiInbox}`,
-      "- LLM-Wiki connector: llm-wiki, when available through the shared connector registry",
-      `- Claude native auto-memory roots: ${claudeAutoMemory}`,
-      `- Codex native auto-memory: ${codexMemory}`,
-      `- Codex summary: ${join(codexMemory, "memory_summary.md")}`,
-      `- Claude can read Codex through ${join(claudeMemory, "CODEX_MEMORY_SUMMARY.md")} and ${join(claudeMemory, "CODEX_MEMORY_INDEX.md")}.`,
-      `- Codex can read Claude through ${join(codexMemory, "CLAUDE_MEMORY_INDEX.md")}.`,
-      `- Codex can read Claude repository auto memories through ${join(codexMemory, "CLAUDE_AUTO_MEMORIES")}.`,
-      "",
-      "Recall order:",
-      "",
-      "1. Read /Users/neam/.claude/shared-resources/RESOURCE.md and this bridge when memory is relevant.",
-      `2. Check ${join(claudeMemory, "MEMORY.md")} for active routing facts, high-risk rules, and pointers.`,
-      "3. For long project history, prior decisions, user or project patterns, and reusable knowledge, use the LLM-Wiki query flow first.",
-      "   - Prefer the llm-wiki connector if the active provider exposes it.",
-      "   - If the connector is not available, use standard file read/search tools from 30-wiki/index.md, then routed topic/index/alias pages, then targeted grep in 30-wiki.",
-      "4. If LLM-Wiki does not answer, or session recovery requires provider-specific hints, search Claude native auto-memory and Codex native memory, then deduplicate by meaning.",
-      "",
-      "Write order:",
-      "",
-      `1. Explicit globally active durable facts go to ${claudeMemory} as one fact per file and one index line.`,
-      "2. Long project knowledge, implementation history, transcript-derived facts, and result logs should enter LLM-Wiki as source material in 10-inbox, then be compiled into 30-wiki before becoming queryable.",
-      "3. Claude repository learnings stay in Claude auto-memory. Codex automatic capture stays in Codex memories.",
-      "4. Never overwrite, reformat, or merge one provider's native auto-memory into another store.",
-      ""
-    ].join("\n"),
-    { mode: 0o644 }
-  );
+  const memoryTextPaths = {
+    claudeMemory,
+    claudeAutoMemory,
+    codexMemory,
+    llmWikiRoot,
+    llmWikiRouter,
+    llmWikiInbox,
+    memoryBridge: paths.memoryBridge,
+    skillCatalog: paths.skillCatalog,
+    connectorRegistry: paths.connectorRegistry
+  };
+  writeFileSync(paths.memoryBridge, buildSharedMemoryBridgeText(memoryTextPaths), {
+    mode: 0o644
+  });
 
   const connectors = loadMergedConnectors();
   const registry = Object.fromEntries(
@@ -360,28 +418,10 @@ export function syncSharedResources(
     paths.connectorRegistry
   );
 
-  writeFileSync(
-    paths.resourceGuide,
-    [
-      "# Shared AI Resources",
-      "",
-      "This is the common resource layer for Claude, Codex, and agy.",
-      "",
-      `- Global instructions: ${join(paths.home, ".claude", "CLAUDE.md")} and ${join(paths.home, ".codex", "AGENTS.md")}`,
-      `- Claude memory: ${join(paths.home, ".claude", "memory")}`,
-      `- Claude native auto memory: ${claudeAutoMemory}`,
-      `- Codex native memory: ${join(paths.home, ".codex", "memories")}`,
-      `- Memory bridge: ${paths.memoryBridge}`,
-      `- Shared skill catalog: ${paths.skillCatalog}`,
-      `- Shared connector registry: ${paths.connectorRegistry}`,
-      "- Plugin capabilities: plugin-provided skills are included in the shared skill catalog; MCP-backed plugin tools are included in the shared connector registry.",
-      "- Tools: use the same MCP connector names and the provider's native filesystem, shell, web, and editing tools under the active permission mode.",
-      "",
-      "Before acting, use the memory bridge when recall is relevant: active Claude memory index first, LLM-Wiki query flow next, and native auto-memory stores only as fallback or session-recovery hints. Prefer the llm-wiki connector when exposed; otherwise use standard file read/search tools. Search the shared skill catalog for task-specific workflows. Treat provider-native UI-only plugins as optional surfaces, not as a source of different behavior.",
-      ""
-    ].join("\n"),
-    { mode: 0o644 }
-  );
+  writeFileSync(paths.resourceGuide, buildSharedResourceGuideText({
+    ...memoryTextPaths,
+    home: paths.home
+  }), { mode: 0o644 });
 
   return {
     skillCount: skills.length,

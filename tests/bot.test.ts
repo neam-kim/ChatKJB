@@ -217,6 +217,16 @@ function goalCommand(text: string, updateId = 1) {
   };
 }
 
+function restopCommand(updateId = 1) {
+  return {
+    ...modelCommand("/restop", updateId),
+    message: {
+      ...modelCommand("/restop", updateId).message,
+      entities: [{ type: "bot_command" as const, offset: 0, length: 7 }]
+    }
+  };
+}
+
 function usageCommand(updateId = 1) {
   return {
     ...modelCommand("/usage", updateId),
@@ -891,8 +901,12 @@ describe("/goal command", () => {
   });
 
   it("clears an existing goal", async () => {
-    const { bot, store, calls } = botSetup();
+    const { bot, sessions, store, calls } = botSetup();
     store.updateSession("session", { goalCondition: "모든 테스트 통과" });
+    vi.spyOn(sessions, "clearGoalForCommand").mockImplementation(async () => {
+      store.updateSession("session", { goalCondition: null });
+      return true;
+    });
 
     await bot.handleUpdate(goalCommand("/goal clear"));
 
@@ -903,13 +917,37 @@ describe("/goal command", () => {
 
   it("wires a new goal condition into the session manager", async () => {
     const { bot, sessions, calls } = botSetup();
-    const setGoal = vi.spyOn(sessions, "setGoal").mockReturnValue("active");
+    const setGoal = vi.spyOn(sessions, "setGoal").mockResolvedValue("active");
 
     await bot.handleUpdate(goalCommand("/goal 모든 테스트가 통과한다"));
 
     expect(setGoal).toHaveBeenCalledWith("session", "모든 테스트가 통과한다");
     expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
-      .toContain("끝나면 달성 여부를 평가");
+      .toContain("Claude 네이티브 /goal");
+  });
+
+  it("reports when a Codex goal is set through the native goal surface", async () => {
+    const { bot, sessions, store, calls } = botSetup();
+    store.updateSession("session", { provider: "codex", codexThreadId: "thread-1" });
+    vi.spyOn(sessions, "setGoal").mockResolvedValue("native");
+
+    await bot.handleUpdate(goalCommand("/goal 모든 테스트가 통과한다"));
+
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
+      .toContain("Codex 네이티브 목표로 설정");
+  });
+});
+
+describe("/restop command", () => {
+  it("cancels a waiting-limit auto resume without stopping the active run", async () => {
+    const { bot, sessions, calls } = botSetup();
+    const cancelLimitResume = vi.spyOn(sessions, "cancelLimitResume").mockReturnValue(true);
+
+    await bot.handleUpdate(restopCommand());
+
+    expect(cancelLimitResume).toHaveBeenCalledWith("session");
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
+      .toContain("자동 재개 예약을 취소했습니다");
   });
 });
 

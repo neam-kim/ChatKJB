@@ -95,6 +95,8 @@ import {
 // 프롬프트·지침 빌더는 session-prompts.ts로 이동했으나 기존 import 경로 호환을 위해 재export한다.
 export {
   buildLeanInstructions,
+  buildOrchestrationBoundaryInstructions,
+  buildOrchestratedTurnPrompt,
   buildPublicProgressInstructions,
   buildPermissionModeInstructions,
   buildCompactCommand,
@@ -117,6 +119,8 @@ import {
   buildGoalPrompt,
   buildLeanInstructions,
   buildLimitResumePrompt,
+  buildOrchestrationBoundaryInstructions,
+  buildOrchestratedTurnPrompt,
   buildPermissionModeInstructions,
   buildProviderBootstrap,
   buildPublicProgressInstructions,
@@ -157,6 +161,7 @@ import {
 } from "./session-collectors.js";
 import { AgyInteractiveSession, type AgyAttachment, type AgyInteractiveTurnResult, type AgyLiveStatus } from "./agy-interactive.js";
 import { AgyCliSession } from "./agy-cli.js";
+import { CodexAppServerGoalClient, type CodexGoalClient } from "./codex-app-server.js";
 import {
   buildPeerCritiquePrompt,
   buildJudgePrompt,
@@ -346,7 +351,7 @@ interface RunRequest {
   prompt: string;
   resumeSessionId?: string;
   forkSession?: boolean;
-  operation?: "prompt" | "compact";
+  operation?: "prompt" | "compact" | "goal_native";
   // 자동 한도 재시도/재개에서는 원 사용자 프롬프트를 새 명령처럼 다시 넣지 않고,
   // 재개 경계 프롬프트로 치환한다. originalPrompt는 컨텍스트가 유실된 경우에만 함께 보낸다.
   limitResume?: {
@@ -383,6 +388,7 @@ interface SessionManagerOptions {
   claudeMemoryDir: string;
   modelCatalog: ModelCatalog;
   deleteClaudeSession?: typeof deleteClaudeSession;
+  codexGoalClient?: CodexGoalClient;
   // 테스트 주입용: agy 영속 대화 save_dir 경로. 기본값은 브리지 설정과 동일한 경로.
   agyConvSaveDir?: string;
 }
@@ -452,6 +458,8 @@ export interface ResetContextResult {
   ok: boolean;
   reason?: string;
 }
+
+export type GoalSetResult = "queued" | "active" | "stored" | "native";
 
 export interface SynthesisResult {
   ok: boolean;
@@ -556,6 +564,7 @@ export class SessionManager {
   // Codex 다중 계정 풀(CODEX_HOME 디렉터리 기준, sticky 선택 + reactive 페일오버).
   private readonly codexAccountPool: CodexAccountPool;
   private readonly codexUsageByHome = new Map<string, CodexUsageSnapshot>();
+  private readonly codexGoalClient: CodexGoalClient;
 
   constructor(
     private readonly store: StateStore,
@@ -577,6 +586,7 @@ export class SessionManager {
       ? options.codexAccountHomes
       : [process.env.CODEX_HOME?.trim() || join(homedir(), ".codex")];
     this.codexAccountPool = new CodexAccountPool(codexHomes);
+    this.codexGoalClient = options.codexGoalClient ?? new CodexAppServerGoalClient();
     this.restoreCodexAccountState();
   }
 
@@ -708,11 +718,10 @@ export class SessionManager {
   }
 
   /**
-   * 목표를 설정한다. 유휴 상태이고 이어 갈 세션(Claude/Codex/agy)이 있으면 즉시 목표를 향한
-   * 턴을 시작한다("queued"). 실행 중이면 현재 턴이 끝날 때 평가한다("active"). 이어 갈 세션이
-   * 아직 없으면 저장만 한다("stored").
+   * 목표를 설정한다. Claude는 네이티브 `/goal`, Codex는 app-server `thread/goal/set`에
+   * 우선 연결한다. Antigravity는 현재 동등한 goal 제어 API가 없어 기존 ChatKJB 자동 진행을 쓴다.
    */
-  setGoal(sessionId: string, condition: string): "queued" | "active" | "stored" {
+  async setGoal(sessionId: string, condition: string): Promise<GoalSetResult> {
     const session = this.store.getSession(sessionId);
     if (!session) return "stored";
     // 개행은 보존하고 각 줄 안의 공백만 압축한다. check: 게이트는 줄 단위로 추출하므로
@@ -720,22 +729,56 @@ export class SessionManager {
     const clean = normalizeGoalCondition(condition);
     this.store.updateSession(sessionId, { goalCondition: clean });
     this.goalRounds.set(sessionId, 0);
+
+    if (session.provider === "codex" && session.codexThreadId) {
+      await this.setCodexNativeGoal(session, clean);
+      return "native";
+    }
+
+    if (session.provider === "claude") {
+      if (this.active.has(sessionId)) {
+        return this.enqueueNativeClaudeGoal(sessionId, clean) ? "active" : "stored";
+      }
+      if (!session.sdkSessionId) return "stored";
+      this.store.updateSession(sessionId, { status: "queued" });
+      this.enqueue({
+        session: this.store.getSession(sessionId) ?? session,
+        prompt: `/goal ${clean}`,
+        operation: "goal_native",
+        resumeSessionId: session.sdkSessionId
+      });
+      return "queued";
+    }
+
     if (this.active.has(sessionId)) return "active";
     if (!this.resumeHandle(session)) return "stored";
     this.store.updateSession(sessionId, { status: "queued" });
     this.enqueue({
       session: this.store.getSession(sessionId) ?? session,
-      prompt: buildGoalPrompt(clean),
-      // resumeSessionId는 Claude 전용 재개 핸들이다. codex/agy는 executeX가 스레드/대화 id를
-      // 저장소에서 다시 읽어 재개하므로 전달하지 않는다.
-      ...(session.provider === "claude" && session.sdkSessionId
-        ? { resumeSessionId: session.sdkSessionId }
-        : {})
+      prompt: buildGoalPrompt(clean)
     });
     return "queued";
   }
 
-  /** 목표 자동 진행을 끈다. 끌 목표가 있었으면 true. */
+  private async setCodexNativeGoal(session: SessionRecord, condition: string): Promise<void> {
+    if (!session.codexThreadId) return;
+    const codexHome = this.selectCodexHome(session);
+    await this.codexGoalClient.setGoal(session.codexThreadId, condition, { codexHome });
+    if (session.codexHome !== codexHome) {
+      this.store.updateSession(session.id, { codexHome });
+    }
+  }
+
+  private enqueueNativeClaudeGoal(sessionId: string, condition: string): boolean {
+    const run = this.active.get(sessionId);
+    if (!run) return false;
+    run.pendingTurns += 1;
+    if (run.input.push(buildUserMessage(`/goal ${condition}`, "next"))) return true;
+    run.pendingTurns -= 1;
+    return false;
+  }
+
+  /** 저장소에 남긴 목표 상태를 끈다. 끌 목표가 있었으면 true. */
   clearGoal(sessionId: string): boolean {
     const had = !!this.store.getSession(sessionId)?.goalCondition;
     this.goalRounds.delete(sessionId);
@@ -745,9 +788,41 @@ export class SessionManager {
     return had;
   }
 
+  async clearGoalForCommand(sessionId: string): Promise<boolean> {
+    const session = this.store.getSession(sessionId);
+    const had = this.clearGoal(sessionId);
+    if (!session) return had;
+
+    if (session.provider === "codex" && session.codexThreadId) {
+      const codexHome = this.selectCodexHome(session);
+      const cleared = await this.codexGoalClient.clearGoal(session.codexThreadId, { codexHome });
+      return had || cleared;
+    }
+
+    if (session.provider === "claude") {
+      if (this.active.has(sessionId)) {
+        return this.enqueueNativeClaudeGoal(sessionId, "clear") || had;
+      }
+      if (!session.sdkSessionId) return had;
+      this.store.updateSession(sessionId, { status: "queued" });
+      this.enqueue({
+        session: this.store.getSession(sessionId) ?? session,
+        prompt: "/goal clear",
+        operation: "goal_native",
+        resumeSessionId: session.sdkSessionId
+      });
+      return true;
+    }
+
+    return had;
+  }
+
   stop(sessionId: string): boolean {
     // /stop은 진행 중인 목표 자동 진행도 함께 멈춘다.
     this.clearGoal(sessionId);
+    void this.clearProviderGoal(sessionId).catch((error: unknown) => {
+      console.error(`Native goal clear failed: ${safeErrorMessage(error, this.oauthTokens)}`);
+    });
     // 한도 회복을 기다리며 예약된 자동 재개가 있으면 그것도 중단으로 친다.
     if (this.cancelLimitWaiter(sessionId)) {
       if (this.store.getSession(sessionId)?.status === "waiting_limit") {
@@ -765,6 +840,30 @@ export class SessionManager {
     // 강제 종료한다 — in-flight MCP 호출/transport와 서브에이전트까지 함께 정리되어
     // 종료 후 MCP 호출이 남아 가로막는 문제를 막는다. finally의 close()는 멱등 백업.
     run.query?.close();
+    return true;
+  }
+
+  private async clearProviderGoal(sessionId: string): Promise<boolean> {
+    const session = this.store.getSession(sessionId);
+    if (!session) return false;
+    if (session.provider === "codex" && session.codexThreadId) {
+      return this.codexGoalClient.clearGoal(session.codexThreadId, {
+        codexHome: this.selectCodexHome(session)
+      });
+    }
+    if (session.provider === "claude" && this.active.has(sessionId)) {
+      return this.enqueueNativeClaudeGoal(sessionId, "clear");
+    }
+    return false;
+  }
+
+  cancelLimitResume(sessionId: string): boolean {
+    const canceled = this.cancelLimitWaiter(sessionId);
+    if (!canceled) return false;
+    const session = this.store.getSession(sessionId);
+    if (session?.status === "waiting_limit") {
+      this.store.updateSession(sessionId, { status: "aborted" });
+    }
     return true;
   }
 
@@ -1214,12 +1313,12 @@ export class SessionManager {
     const session = this.store.getSession(sessionId);
     if (session?.provider === "codex" && run.codexCurrentPrompt) {
       const base = run.codexRestartPrompt ?? run.codexCurrentPrompt;
-      run.codexRestartPrompt = buildCodexSteeredPrompt(base, clean);
+      run.codexRestartPrompt = buildOrchestratedTurnPrompt(buildCodexSteeredPrompt(base, clean));
       run.controller.abort();
       return "restarted";
     }
     run.pendingTurns += 1;
-    if (run.input.push(buildUserMessage(clean, "now"))) return "queued";
+    if (run.input.push(buildUserMessage(buildOrchestratedTurnPrompt(clean), "now"))) return "queued";
     run.pendingTurns -= 1;
     return false;
   }
@@ -1229,7 +1328,7 @@ export class SessionManager {
     const clean = prompt.trim();
     if (!run || !clean) return false;
     run.pendingTurns += 1;
-    if (run.input.push(buildUserMessage(clean, "next"))) return true;
+    if (run.input.push(buildUserMessage(buildOrchestratedTurnPrompt(clean), "next"))) return true;
     run.pendingTurns -= 1;
     return false;
   }
@@ -1267,6 +1366,7 @@ export class SessionManager {
       session.chatId,
       session.topicId,
       `${lead} ${when}에 한도가 회복되면 자동으로 이어서 실행합니다. `
+      + "원치 않으면 /restop 으로 자동 재개만 취소할 수 있습니다. "
       + "(그 전에 새 지시를 보내면 즉시 재개를 시도합니다.)"
     ).catch(() => undefined);
     void this.safeRename(session, `[WAIT] ${session.title}`);
@@ -1382,7 +1482,7 @@ export class SessionManager {
     const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
     const abortController = new AbortController();
     const input = new MessageQueue();
-    input.push(buildUserMessage(promptForRequest(request)));
+    input.push(buildUserMessage(buildOrchestratedTurnPrompt(promptForRequest(request))));
     const run: ActiveRun = {
       controller: abortController,
       input,
@@ -1463,6 +1563,7 @@ export class SessionManager {
             + `${sharedMemoryBridgePath()}를 통해 세 메모리 저장소를 함께 검색한다.`
             + `\n\n${buildPublicProgressInstructions()}`
             + `\n\n${buildPermissionModeInstructions(session.permissionMode)}`
+            + `\n\n${buildOrchestrationBoundaryInstructions()}`
             + `\n\n공통 AI 자원 안내는 ${sharedResourceGuidePath()} 에 있다. 먼저 읽고 세 제공자 공통 스킬·커넥터·플러그인 기능·도구 정책을 따른다.`
             + (session.leanMode ? `\n\n${buildLeanInstructions(true)}` : "")
             + (() => {
@@ -1652,7 +1753,7 @@ export class SessionManager {
         `${finalStatus === "done" ? "[DONE]" : "[ERROR]"} ${session.title}`
       );
       // 턴이 정상 완료됐으면 활성 목표 충족 여부를 평가하고, 미충족이면 다음 턴을 자동 예약한다.
-      if (finalStatus === "done") {
+      if (finalStatus === "done" && request.operation !== "goal_native") {
         await this.maybeContinueGoal(session, request, sdkSessionId);
       }
     } catch (error) {
@@ -1718,7 +1819,7 @@ export class SessionManager {
     const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
     let controller = new AbortController();
     const input = new MessageQueue();
-    input.push(buildUserMessage(promptForRequest(request)));
+    input.push(buildUserMessage(buildOrchestratedTurnPrompt(promptForRequest(request))));
     const run: ActiveRun = {
       controller,
       input,
@@ -1849,6 +1950,12 @@ export class SessionManager {
         if (thread.id && thread.id !== codexThreadId) {
           codexThreadId = thread.id;
           this.store.updateSession(session.id, { codexThreadId });
+          const updated = this.store.getSession(session.id);
+          if (updated?.goalCondition) {
+            await this.setCodexNativeGoal(updated, updated.goalCondition).catch((error: unknown) => {
+              renderer.note(`Codex 네이티브 목표 동기화 실패: ${safeErrorMessage(error, this.oauthTokens)}`);
+            });
+          }
         }
         lastResponse = attemptResponse || lastResponse;
         firstTurn = false;
@@ -1873,7 +1980,7 @@ export class SessionManager {
       await this.safeRename(session, `[DONE] ${session.title}`);
       // 활성 목표가 있으면 충족 여부를 읽기 전용 Haiku로 평가하고, 미충족이면 다음 턴을 자동 예약한다.
       // codex는 Claude 재개 핸들이 없으므로 sdkSessionId=null로 넘긴다(executeCodex가 스레드를 재개).
-      if (request.operation !== "compact") {
+      if (request.operation !== "compact" && request.operation !== "goal_native") {
         await this.maybeContinueGoal(session, request, null);
       }
     } catch (error) {
@@ -2058,7 +2165,7 @@ export class SessionManager {
     const renderer = new StreamRenderer(session, this.transport, this.options.debounceMs);
     const controller = new AbortController();
     const input = new MessageQueue();
-    input.push(buildUserMessage(promptForRequest(request)));
+    input.push(buildUserMessage(buildOrchestratedTurnPrompt(promptForRequest(request))));
     const run: ActiveRun = {
       controller,
       input,
@@ -2181,7 +2288,7 @@ export class SessionManager {
       await this.safeRename(session, `[DONE] ${session.title}`);
       // 활성 목표가 있으면 충족 여부를 읽기 전용 Haiku로 평가하고, 미충족이면 다음 턴을 자동 예약한다.
       // agy는 Claude 재개 핸들이 없으므로 sdkSessionId=null로 넘긴다(executeAgy가 대화를 재개).
-      if (request.operation !== "compact") {
+      if (request.operation !== "compact" && request.operation !== "goal_native") {
         await this.maybeContinueGoal(session, request, null);
       }
     } catch (error) {
@@ -2234,7 +2341,8 @@ export class SessionManager {
       session.chatId,
       session.topicId,
       `${this.tokenPool.size > 1 ? "모든 계정 토큰이" : "토큰이"} 한도에 도달해 목표 달성 여부를 `
-      + `아직 확인하지 못했습니다. ${when}에 회복되면 자동으로 다시 평가하고 목표 진행을 이어 갑니다.`
+      + `아직 확인하지 못했습니다. ${when}에 회복되면 자동으로 다시 평가하고 목표 진행을 이어 갑니다. `
+      + "원치 않으면 /restop 으로 자동 재개만 취소할 수 있습니다."
     ).catch(() => undefined);
     void this.safeRename(session, `[WAIT] ${session.title}`);
     this.cancelLimitWaiter(session.id);
@@ -2260,6 +2368,7 @@ export class SessionManager {
   ): Promise<void> {
     const condition = this.store.getSession(session.id)?.goalCondition;
     if (!condition || this.deleting.has(session.id)) return;
+    if (session.provider === "claude") return;
 
     // 모든 토큰이 한도면 판관(세션 모델)을 부를 수 없으므로 충족 여부 평가 자체가 불가능하다.
     // 다른 모델로 대신 판정하지 않고, 가장 먼저 회복되는 시각에 다시 예약한다.

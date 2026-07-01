@@ -16,6 +16,8 @@ import {
   buildLeanInstructions,
   buildLimitResumePrompt,
   buildMemoryPrompt,
+  buildOrchestrationBoundaryInstructions,
+  buildOrchestratedTurnPrompt,
   buildPermissionModeInstructions,
   buildPublicProgressInstructions,
   buildRolloverSummaryPrompt,
@@ -43,6 +45,7 @@ import {
 import { StateStore } from "../src/store.js";
 import type { MessageTransport, SessionRecord } from "../src/types.js";
 import { agyApiModel, normalizeAgyResponse } from "../src/agy-interactive.js";
+import { buildProviderBootstrap } from "../src/session-prompts.js";
 
 const fakeTransport: MessageTransport = {
   async sendText() { return 1; },
@@ -54,6 +57,38 @@ const fakeTransport: MessageTransport = {
   async sendChatAction() {},
   async sendFile() {}
 };
+
+function baseSession(id: string, cwd: string): SessionRecord {
+  const now = Date.now();
+  return {
+    id,
+    sdkSessionId: null,
+    chatId: -1001,
+    topicId: 42,
+    projectName: "test",
+    cwd,
+    title: id,
+    status: "done",
+    permissionMode: "default",
+    provider: "claude",
+    model: null,
+    thinking: null,
+    claudeEffort: null,
+    codexModel: null,
+    codexReasoning: null,
+    codexThreadId: null,
+    agyModel: null,
+    agyThinkingLevel: null,
+    agyConversationId: null,
+    agyUsage: null,
+    handoffSummary: null,
+    goalCondition: null,
+    leanMode: true,
+    usageSnapshot: null,
+    createdAt: now,
+    updatedAt: now
+  };
+}
 
 function sessionManagerOptions(directory: string, codexAccountHomes?: string[]) {
   return {
@@ -570,6 +605,37 @@ describe("memory command", () => {
     );
     expect(buildMemoryPrompt("token")).toContain("비밀정보, 자격증명은 저장하지 않는다");
   });
+
+  it("injects mandatory query-first long-memory recall into provider bootstrap", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-bootstrap-memory-"));
+    try {
+      const prompt = buildProviderBootstrap(
+        {
+          ...baseSession("bootstrap-memory", directory),
+          permissionMode: "auto"
+        },
+        join(directory, ".claude", "memory")
+      );
+
+      expect(prompt).toContain("장기기억 회수가 선택사항이 아니라 필수");
+      expect(prompt).toContain("LLM-Wiki query flow");
+      expect(prompt).toContain("/query 요청은 보이는 대화나 네이티브 자동 메모리만으로 답하지 말고");
+      expect(prompt).toContain("[CHATKJB_ORCHESTRATION_BOUNDARY]");
+      expect(prompt).toContain("상위 조정자는 ChatKJB");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("wraps provider turns with an explicit ChatKJB boundary", () => {
+    const prompt = buildOrchestratedTurnPrompt("현재 요청");
+
+    expect(prompt).toContain("[CHATKJB_ORCHESTRATED_TURN]");
+    expect(prompt).toContain("[USER_REQUEST]\n현재 요청\n[/USER_REQUEST]");
+    expect(prompt).toContain("새 독립 작업 지시가 아니다");
+    expect(buildOrchestratedTurnPrompt(prompt)).toBe(prompt);
+    expect(buildOrchestrationBoundaryInstructions()).toContain("네이티브 앱의 독립 세션처럼");
+  });
 });
 
 describe("lean implementation policy", () => {
@@ -643,7 +709,7 @@ describe("goal prompts", () => {
 });
 
 describe("goal state", () => {
-  it("stores a goal without launching a run when there is no resumable session", () => {
+  it("stores a goal without launching a run when there is no resumable session", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-goal-"));
     const store = new StateStore(join(directory, "state.sqlite"));
     store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
@@ -693,7 +759,7 @@ describe("goal state", () => {
 
     try {
       // sdkSessionId가 없으므로 resume할 수 없어 실행을 시작하지 않고 저장만 한다.
-      expect(manager.setGoal(session.id, "  모든 테스트   통과  ")).toBe("stored");
+      await expect(manager.setGoal(session.id, "  모든 테스트   통과  ")).resolves.toBe("stored");
       expect(store.getSession(session.id)?.goalCondition).toBe("모든 테스트 통과");
       expect(store.getSession(session.id)?.status).toBe("done");
 
@@ -706,7 +772,34 @@ describe("goal state", () => {
     }
   });
 
-  it("launches a goal run for codex and agy sessions via their resume handles", async () => {
+  it("cancels a scheduled limit resume and marks the waiting session aborted", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-limit-restop-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const session = {
+      ...baseSession("limit-session", directory),
+      status: "waiting_limit" as const
+    };
+    store.createSession(session);
+    const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const manager = new SessionManager(store, fakeTransport, permissions, sessionManagerOptions(directory));
+    const timer = setTimeout(() => {}, 60_000);
+
+    try {
+      (manager as unknown as { limitWaiters: Map<string, ReturnType<typeof setTimeout>> })
+        .limitWaiters.set(session.id, timer);
+
+      expect(manager.cancelLimitResume(session.id)).toBe(true);
+      expect(store.getSession(session.id)?.status).toBe("aborted");
+      expect(manager.cancelLimitResume(session.id)).toBe(false);
+    } finally {
+      clearTimeout(timer);
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses Codex native goal for existing Codex threads and ChatKJB fallback for agy", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-goal-providers-"));
     const store = new StateStore(join(directory, "state.sqlite"));
     store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
@@ -752,6 +845,7 @@ describe("goal state", () => {
     store.createSession(agySession);
     store.createSession(noResumeCodex);
     const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const codexGoalCalls: Array<{ threadId: string; objective: string; codexHome?: string | null }> = [];
     const manager = new SessionManager(store, fakeTransport, permissions, {
       debounceMs: 1,
       claudeCodeOauthToken: "test-token",
@@ -763,18 +857,31 @@ describe("goal state", () => {
       turnIdleTimeoutMs: 600_000,
       claudeMemoryDir: join(directory, ".claude", "memory"),
       modelCatalog: FALLBACK_MODEL_CATALOG,
+      codexAccountHomes: [join(directory, "codex-home")],
+      codexGoalClient: {
+        async setGoal(threadId, objective, options) {
+          codexGoalCalls.push({ threadId, objective, codexHome: options?.codexHome ?? null });
+        },
+        async clearGoal() {
+          return true;
+        }
+      },
       // 백그라운드 실제 실행을 막기 위해 곧장 삭제로 드레인하므로 Claude 트랜스크립트 삭제는 무시한다.
       deleteClaudeSession: async () => {}
     });
 
     try {
-      // 재개 핸들(codexThreadId/agyConversationId)이 있으면 즉시 목표 턴을 큐에 넣는다.
-      expect(manager.setGoal("codex-goal", "테스트 통과")).toBe("queued");
-      expect(store.getSession("codex-goal")?.status).toBe("queued");
-      expect(manager.setGoal("agy-goal", "테스트 통과")).toBe("queued");
-      expect(store.getSession("agy-goal")?.status).toBe("queued");
+      await expect(manager.setGoal("codex-goal", "테스트 통과")).resolves.toBe("native");
+      expect(codexGoalCalls).toEqual([{
+        threadId: "thread-1",
+        objective: "테스트 통과",
+        codexHome: join(directory, "codex-home")
+      }]);
+      expect(store.getSession("codex-goal")?.status).toBe("done");
+      // Antigravity는 동등한 네이티브 goal 제어 API가 없으므로 기존 ChatKJB 자동 진행을 유지한다.
+      await expect(manager.setGoal("agy-goal", "테스트 통과")).resolves.toBe("queued");
       // 재개 핸들이 없으면(한 번도 실행 안 한 세션) 저장만 한다.
-      expect(manager.setGoal("codex-no-handle", "테스트 통과")).toBe("stored");
+      await expect(manager.setGoal("codex-no-handle", "테스트 통과")).resolves.toBe("stored");
       expect(store.getSession("codex-no-handle")?.status).toBe("done");
 
       // 큐에 들어간 실제 실행이 외부 CLI를 호출하기 전에 안전하게 드레인한다.
