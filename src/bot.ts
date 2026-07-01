@@ -2039,9 +2039,9 @@ export function createBot(config: AppConfig, store: StateStore) {
     );
   });
 
-  // /synth <작업>: 병렬 종합. Claude·Codex·Antigravity를 읽기 전용으로 동시에 시키고, Claude
-  // Opus 4.8 high 심사자(실패 시 첫 후보 채택)가 최우수 답을 고른 뒤 승자가
-  // 통합해 최종답을 낸다.
+  // /synth <작업>: 병렬 종합. Claude·Codex·Antigravity를 읽기 전용으로 동시에 시키고,
+  // 서로 비판한 뒤 원 모델들이 보완 답을 낸다. Claude Opus 4.8 high 심사자가 보완 후보를
+  // 승점제 리그 방식으로 비교해 최우수 답을 고른 뒤 승자가 통합해 최종답을 낸다.
   // 읽기·조언 작업 전용(파일 수정 안 함). 토큰·시간이 N배인 비싼 경로.
   bot.command("synth", async (ctx) => {
     const topicId = ctx.message?.message_thread_id;
@@ -2054,13 +2054,13 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (!arg) {
       await ctx.reply(
         "작업 설명과 함께 사용하세요.\n예: /synth 이 설계의 위험 요소를 분석해줘\n"
-        + "Claude·Codex·Antigravity를 읽기 전용으로 동시에 실행하고 Opus 4.8 high 심사자가 최우수 답을 골라 통합합니다. "
+        + "Claude·Codex·Antigravity를 읽기 전용으로 실행하고 상호 비판 → 원 모델별 보완 → 승점제 리그 심사 → 승자 통합 순서로 답합니다. "
         + "읽기·조언 작업 전용이며 토큰·시간이 더 듭니다."
       );
       return;
     }
     await ctx.reply(
-      "병렬 종합을 시작합니다. Claude·Codex·Antigravity를 읽기 전용으로 동시 실행 → 심사 → 통합. "
+      "병렬 종합을 시작합니다. Claude·Codex·Antigravity 원답 → 상호 비판 → 원 모델별 보완 → 승점제 리그 심사 → 통합. "
       + "잠시 걸립니다."
     );
     try {
@@ -2077,9 +2077,15 @@ export function createBot(config: AppConfig, store: StateStore) {
       const candidateLabels = (result.candidates ?? [])
         .map((p) => providerDisplayLabel(p))
         .join("·");
+      const scoreLine = result.verdict?.scores && result.candidates
+        ? "\n승점: " + result.verdict.scores
+          .map((score, index) => `${providerDisplayLabel(result.candidates![index]!)} ${score}`)
+          .join(" / ")
+        : "";
       const tail =
         `\n\n———\n후보: ${candidateLabels} / 심사: ${judgeLabel}`
         + (result.synthesizedBy ? ` / 통합: ${providerDisplayLabel(result.synthesizedBy)}` : "")
+        + scoreLine
         + (result.verdict ? `\n근거: ${result.verdict.reason}` : "");
       await ctx.reply(`${result.answer ?? ""}${tail}`);
     } catch (error) {
@@ -2087,10 +2093,10 @@ export function createBot(config: AppConfig, store: StateStore) {
     }
   });
 
-  // /query <질문>: LLM-Wiki에 질문한다. 현재 세션 에이전트(Claude/Codex/agy)에게 위키
-  // 규약(.claude/commands/query.md)을 먼저 읽고 그대로 수행하라고 주입한다. 봇은 규약
-  // 본문을 복제하지 않으므로 위키 규약이 바뀌어도 자동으로 따라간다. 검색 대상은 항상
-  // LLM-Wiki(절대경로)이며 현재 세션 프로젝트 cwd와 무관하다.
+  // /query <질문>: LLM-Wiki에 질문한다. 현재 세션 에이전트(Claude/Codex/agy)에게
+  // llm-wiki 커넥터를 우선 사용하고, 없으면 위키 규약(.claude/commands/query.md)을
+  // 읽어 그대로 수행하라고 주입한다. 검색 대상은 항상 LLM-Wiki(절대경로)이며 현재
+  // 세션 프로젝트 cwd와 무관하다.
   bot.command("query", async (ctx) => {
     const topicId = ctx.message?.message_thread_id;
     const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
@@ -2102,7 +2108,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (!arg) {
       await ctx.reply(
         "질문과 함께 사용하세요.\n예: /query 멀티모델 오케스트레이션이 뭐야?\n"
-        + "현재 세션 에이전트가 LLM-Wiki를 query.md 규약대로 검색해 인용과 함께 답합니다."
+        + "현재 세션 에이전트가 llm-wiki 커넥터 또는 query.md 규약으로 검색해 인용과 함께 답합니다."
       );
       return;
     }
@@ -2114,8 +2120,10 @@ export function createBot(config: AppConfig, store: StateStore) {
     const prompt =
       `다음 질문에 LLM-Wiki로 답하라.\n\n`
       + `질문: ${arg}\n\n`
-      + `절차: 먼저 \`${vault}/.claude/commands/query.md\`를 읽고, 그 규약(2단 라우팅 `
-      + `Route→Search, 근거 인용, 지어내기 금지)을 그대로 따른다. 검색 대상 저장소 루트는 `
+      + `절차: llm-wiki 커넥터가 노출되어 있으면 먼저 그 커넥터의 query/search/read 도구로 `
+      + `후보를 회수한다. 커넥터가 없으면 \`${vault}/.claude/commands/query.md\`를 읽고, `
+      + `그 규약(2단 라우팅 Route→Search, 근거 인용, 지어내기 금지)을 그대로 따른다. `
+      + `검색 대상 저장소 루트는 `
       + `\`${vault}\` 이며, 현재 작업 디렉터리가 아니라 이 절대경로 안의 파일만 읽는다. `
       + `규약대로 회수한 페이지 내용으로만, 각 주장에 \`[[페이지]]\` 인용을 붙여 답하라. `
       + `근거가 없으면 "위키에 없음 — /ingest 필요"라고 답하고 지어내지 마라. 위키 파일을 `

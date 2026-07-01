@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildPeerCritiquePrompt,
   buildJudgePrompt,
   buildJudgeUserPrompt,
+  buildRevisionPrompt,
   buildSynthesisPrompt,
   parseJudgeResponse,
   type JudgeCandidate,
@@ -19,6 +21,22 @@ describe("심사 응답 파싱", () => {
     expect(parseJudgeResponse('{"winner":1,"reason":"정답"}', 3)).toEqual({
       winner: 1,
       reason: "정답",
+    });
+  });
+
+  it("승점 배열을 함께 파싱한다", () => {
+    expect(parseJudgeResponse('{"scores":[6,3,0],"winner":1,"reason":"리그 1위"}', 3)).toEqual({
+      scores: [6, 3, 0],
+      winner: 1,
+      reason: "리그 1위",
+    });
+  });
+
+  it("winner가 없으면 승점 1위로 winner를 계산한다", () => {
+    expect(parseJudgeResponse('{"scores":[1,4,2],"reason":"승점 우세"}', 3)).toEqual({
+      scores: [1, 4, 2],
+      winner: 2,
+      reason: "승점 우세",
     });
   });
 
@@ -54,12 +72,34 @@ describe("심사 프롬프트", () => {
     const prompt = buildJudgePrompt("2+2?", candidates);
     expect(prompt).toContain("중립 심사자");
     expect(prompt).toContain("[후보 2] (codex)");
+    expect(prompt).toContain("승점제 리그 방식");
+    expect(prompt).toContain("후보 1 vs 후보 2");
     expect(prompt).toContain("JSON 한 줄로만 답한다");
   });
 
+  it("상호 비판 프롬프트는 후보별 비판 메모만 요구한다", () => {
+    const prompt = buildPeerCritiquePrompt("2+2?", candidates, "claude");
+    expect(prompt).toContain("claude 관점");
+    expect(prompt).toContain("[후보 3] (agy)");
+    expect(prompt).toContain("비판 메모만");
+    expect(prompt).toContain("최종 답변을 다시 쓰지 말고");
+  });
+
+  it("보완 프롬프트는 원 모델이 비판과 장점을 반영해 다시 쓰게 한다", () => {
+    const prompt = buildRevisionPrompt("2+2?", candidates[1]!, candidates, [
+      { provider: "claude", text: "codex 답은 산술이 틀림" },
+      { provider: "agy", text: "claude 답이 정답" },
+    ]);
+    expect(prompt).toContain("codex의 원답");
+    expect(prompt).toContain("← 너의 원답");
+    expect(prompt).toContain("상호 비판 메모");
+    expect(prompt).toContain("보완된 최종 후보 답변만");
+  });
+
   it("종합 프롬프트는 최우수 후보를 표시하고 통합을 지시한다", () => {
-    const prompt = buildSynthesisPrompt("2+2?", candidates, { winner: 2, reason: "더 정확" });
+    const prompt = buildSynthesisPrompt("2+2?", candidates, { winner: 2, reason: "더 정확", scores: [1, 4, 0] });
     expect(prompt).toContain("후보 2이(가) 최우수");
+    expect(prompt).toContain("후보 2 4점");
     expect(prompt).toContain("← 최우수");
     expect(prompt).toContain("통합");
     expect(prompt).toContain("파일을 수정하지 말고");

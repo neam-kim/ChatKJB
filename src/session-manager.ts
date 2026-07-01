@@ -158,11 +158,14 @@ import {
 import { AgyInteractiveSession, type AgyAttachment, type AgyInteractiveTurnResult, type AgyLiveStatus } from "./agy-interactive.js";
 import { AgyCliSession } from "./agy-cli.js";
 import {
+  buildPeerCritiquePrompt,
   buildJudgePrompt,
+  buildRevisionPrompt,
   buildSynthesisPrompt,
   parseJudgeResponse,
   type JudgeCandidate,
-  type JudgeVerdict
+  type JudgeVerdict,
+  type SynthCritique
 } from "./judge.js";
 
 // 일시적 과부하(Overloaded/5xx) 자동 재시도 상한과 백오프(지수, 상한 60초).
@@ -2488,11 +2491,13 @@ export class SessionManager {
     return text;
   }
 
-  // ── 2단계 병렬 종합 ──────────────────────────────────────────────────────
+  // ── 다단계 병렬 종합 ─────────────────────────────────────────────────────
   // 같은 작업을 Claude·Codex·agy에 읽기 전용으로 동시에 시키고(파일 충돌 없음), Claude
-  // Opus 4.8 high 심사자(실패 시 Codex 5.5 high 폴백)가 가장 나은 답을 고른 뒤,
-  // 승자 provider가 다른 후보의 더 나은 부분을 통합해 최종답을 만든다. /synth 명령으로만
-  // 호출되는 비싼 경로다.
+  // Opus 4.8 high 심사자가 가장 나은 답을 고른다. 단, 바로 승자를 정하지 않고 먼저
+  // 각 provider가 서로의 원답을 비판하고, 원 provider가 자기 답을 보완한 뒤 승점제
+  // 리그 방식으로 재심사한다.
+  // 마지막에는 승자 provider가 다른 보완 후보의 더 나은 부분을 통합해 최종답을 만든다.
+  // /synth 명령으로만 호출되는 비싼 경로다.
   async runSynthesis(session: SessionRecord, prompt: string): Promise<SynthesisResult> {
     if (this.active.has(session.id)) {
       return { ok: false, reason: "실행 중에는 병렬 종합을 시작할 수 없습니다. 작업 완료 또는 /stop 후 다시 시도하세요." };
@@ -2532,11 +2537,16 @@ export class SessionManager {
       };
     }
 
-    const verdict = await this.judgeCandidates(session, prompt, candidates);
-    const winner = candidates[verdict.winner - 1] ?? candidates[0]!;
+    const critiques = await this.collectPeerCritiques(session, prompt, candidates);
+    const revisedCandidates = await this.reviseCandidates(session, prompt, candidates, critiques);
+    const judgedCandidates = revisedCandidates.length >= 2 ? revisedCandidates : candidates;
+    const judgedProviders = judgedCandidates.map((c) => c.provider);
+
+    const verdict = await this.judgeCandidates(session, prompt, judgedCandidates);
+    const winner = judgedCandidates[verdict.winner - 1] ?? judgedCandidates[0]!;
 
     // 승자 기반 통합: 승자 provider에게 후보들을 주고 최종본을 합치게 한다(읽기 전용).
-    const synthPrompt = buildSynthesisPrompt(prompt, candidates, verdict);
+    const synthPrompt = buildSynthesisPrompt(prompt, judgedCandidates, verdict);
     let answer = winner.text;
     try {
       answer = (await this.runSilentReadOnly(session, winner.provider, synthPrompt)).trim() || winner.text;
@@ -2548,14 +2558,69 @@ export class SessionManager {
     return {
       ok: true,
       answer,
-      candidates: candidateProviders,
+      candidates: judgedProviders,
       verdict,
       synthesizedBy: winner.provider
     };
   }
 
-  // 후보들을 심사한다. Claude Opus 4.8 high 우선, 실패 시 Codex 5.5 high 폴백,
-  // 그마저 실패하면 1번 후보.
+  private async collectPeerCritiques(
+    session: SessionRecord,
+    question: string,
+    candidates: JudgeCandidate[]
+  ): Promise<SynthCritique[]> {
+    const settled = await Promise.allSettled(
+      candidates.map(async (candidate, index) => {
+        if (index > 0) {
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, index * SYNTH_PROVIDER_STAGGER_MS));
+        }
+        const critiquePrompt = buildPeerCritiquePrompt(question, candidates, candidate.provider);
+        return {
+          provider: candidate.provider,
+          text: (await this.runSilentReadOnly(session, candidate.provider, critiquePrompt)).trim()
+        };
+      })
+    );
+    const critiques: SynthCritique[] = [];
+    for (const result of settled) {
+      if (result.status === "fulfilled" && result.value.text) {
+        critiques.push(result.value);
+      }
+    }
+    return critiques;
+  }
+
+  private async reviseCandidates(
+    session: SessionRecord,
+    question: string,
+    candidates: JudgeCandidate[],
+    critiques: SynthCritique[]
+  ): Promise<JudgeCandidate[]> {
+    if (critiques.length === 0) return [];
+    const settled = await Promise.allSettled(
+      candidates.map(async (candidate, index) => {
+        if (index > 0) {
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, index * SYNTH_PROVIDER_STAGGER_MS));
+        }
+        const revisionPrompt = buildRevisionPrompt(question, candidate, candidates, critiques);
+        return {
+          provider: candidate.provider,
+          text: (await this.runSilentReadOnly(session, candidate.provider, revisionPrompt)).trim()
+        };
+      })
+    );
+    const revised: JudgeCandidate[] = [];
+    for (const result of settled) {
+      if (result.status === "fulfilled" && result.value.text) {
+        revised.push(result.value);
+      }
+    }
+    return revised;
+  }
+
+  // 후보들을 승점제 리그 방식으로 심사한다. Claude Opus 4.8 high가 실패하면 1번 후보.
   private async judgeCandidates(
     session: SessionRecord,
     question: string,
@@ -2579,7 +2644,7 @@ export class SessionManager {
 
     // 판관은 Opus 4.8 high로 고정한다. Opus 판정이 실패하면 다른 모델로 폴백하지 않고
     // 첫 후보를 그대로 채택한다(투명성을 위해 judge: "fallback"으로 표기).
-    return { winner: 1, reason: "심사자(Opus 4.8)를 사용할 수 없어 첫 후보를 선택했습니다.", judge: "fallback" };
+    return { winner: 1, reason: "승점제 심사자(Opus 4.8)를 사용할 수 없어 첫 후보를 선택했습니다.", judge: "fallback" };
   }
 
   // provider 하나에 같은 프롬프트를 읽기 전용·새 맥락으로 1회 실행해 최종 텍스트만 받는다.

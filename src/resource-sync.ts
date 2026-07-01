@@ -269,6 +269,16 @@ export function syncSharedResources(
   const claudeMemory = join(paths.home, ".claude", "memory");
   const claudeAutoMemory = join(paths.home, ".claude", "projects");
   const codexMemory = join(paths.home, ".codex", "memories");
+  const llmWikiRoot = join(
+    paths.home,
+    "Library",
+    "CloudStorage",
+    "SynologyDrive-neam",
+    "AI",
+    "LLM-Wiki"
+  );
+  const llmWikiRouter = join(llmWikiRoot, "30-wiki", "index.md");
+  const llmWikiInbox = join(llmWikiRoot, "10-inbox");
   ensureSymlink(
     join(codexMemory, "memory_summary.md"),
     join(claudeMemory, "CODEX_MEMORY_SUMMARY.md")
@@ -295,6 +305,10 @@ export function syncSharedResources(
       "",
       `- Claude canonical facts: ${claudeMemory}`,
       `- Claude index: ${join(claudeMemory, "MEMORY.md")}`,
+      `- LLM-Wiki root: ${llmWikiRoot}`,
+      `- LLM-Wiki router: ${llmWikiRouter}`,
+      `- LLM-Wiki inbox: ${llmWikiInbox}`,
+      "- LLM-Wiki connector: llm-wiki, when available through the shared connector registry",
       `- Claude native auto-memory roots: ${claudeAutoMemory}`,
       `- Codex native auto-memory: ${codexMemory}`,
       `- Codex summary: ${join(codexMemory, "memory_summary.md")}`,
@@ -302,7 +316,21 @@ export function syncSharedResources(
       `- Codex can read Claude through ${join(codexMemory, "CLAUDE_MEMORY_INDEX.md")}.`,
       `- Codex can read Claude repository auto memories through ${join(codexMemory, "CLAUDE_AUTO_MEMORIES")}.`,
       "",
-      "For recall, search the curated Claude store plus both native auto-memory stores and deduplicate by meaning. For writes, preserve native ownership: explicit durable facts go to curated Claude memory; Claude repository learnings stay in Claude auto memory; Codex automatic capture stays in Codex memories. Never overwrite one store with another.",
+      "Recall order:",
+      "",
+      "1. Read /Users/neam/.claude/shared-resources/RESOURCE.md and this bridge when memory is relevant.",
+      `2. Check ${join(claudeMemory, "MEMORY.md")} for active routing facts, high-risk rules, and pointers.`,
+      "3. For long project history, prior decisions, user or project patterns, and reusable knowledge, use the LLM-Wiki query flow first.",
+      "   - Prefer the llm-wiki connector if the active provider exposes it.",
+      "   - If the connector is not available, use standard file read/search tools from 30-wiki/index.md, then routed topic/index/alias pages, then targeted grep in 30-wiki.",
+      "4. If LLM-Wiki does not answer, or session recovery requires provider-specific hints, search Claude native auto-memory and Codex native memory, then deduplicate by meaning.",
+      "",
+      "Write order:",
+      "",
+      `1. Explicit globally active durable facts go to ${claudeMemory} as one fact per file and one index line.`,
+      "2. Long project knowledge, implementation history, transcript-derived facts, and result logs should enter LLM-Wiki as source material in 10-inbox, then be compiled into 30-wiki before becoming queryable.",
+      "3. Claude repository learnings stay in Claude auto-memory. Codex automatic capture stays in Codex memories.",
+      "4. Never overwrite, reformat, or merge one provider's native auto-memory into another store.",
       ""
     ].join("\n"),
     { mode: 0o644 }
@@ -349,7 +377,7 @@ export function syncSharedResources(
       "- Plugin capabilities: plugin-provided skills are included in the shared skill catalog; MCP-backed plugin tools are included in the shared connector registry.",
       "- Tools: use the same MCP connector names and the provider's native filesystem, shell, web, and editing tools under the active permission mode.",
       "",
-      "Before acting, consult both memory stores through the memory bridge when relevant. Search the shared skill catalog for task-specific workflows. Treat provider-native UI-only plugins as optional surfaces, not as a source of different behavior.",
+      "Before acting, use the memory bridge when recall is relevant: active Claude memory index first, LLM-Wiki query flow next, and native auto-memory stores only as fallback or session-recovery hints. Prefer the llm-wiki connector when exposed; otherwise use standard file read/search tools. Search the shared skill catalog for task-specific workflows. Treat provider-native UI-only plugins as optional surfaces, not as a source of different behavior.",
       ""
     ].join("\n"),
     { mode: 0o644 }
