@@ -245,6 +245,7 @@ ChatKJB는 개인 작업 자동화를 위한 도구이므로 다음 안전장치
 ```bash
 git clone https://github.com/neam-kim/ChatKJB
 cd ChatKJB
+nvm use
 npm install
 ```
 
@@ -254,7 +255,7 @@ Node 버전 확인:
 node -v
 ```
 
-`v22` 이상이어야 합니다. Node 버전이 낮으면 `better-sqlite3` 같은 네이티브 모듈에서 문제가 날 수 있습니다.
+`v26.4.0` 이상이어야 합니다. ChatKJB는 최신 Node Current 런타임 기준으로 검증하며, Node 버전이 섞이면 `better-sqlite3` 같은 네이티브 모듈에서 문제가 날 수 있습니다.
 
 ## 2단계. Telegram 준비
 
@@ -722,7 +723,7 @@ npm install
 npm run build
 ```
 
-Node 22 이상에서 다시 설치하십시오.
+ChatKJB를 실행하는 Node와 의존성을 설치하는 Node를 모두 `v26.4.0` 이상으로 맞춘 뒤 다시 설치하십시오.
 
 ## Telegram 응답이 없을 때
 
