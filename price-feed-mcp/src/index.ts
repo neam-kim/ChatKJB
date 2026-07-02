@@ -4,9 +4,8 @@
  *
  * Tool: get_quote(symbol) -> { price, currency, source, delaySeconds, asOf, attempts }
  *
- * Source preference (internal code fallback): toss -> yahoo -> google.
- * Toss self-skips until TOSS_APP_KEY / TOSS_APP_SECRET / TOSS_API_BASE are set,
- * so the chain is wired now and "just works" the moment 어르신's keys land.
+ * Source: Toss Securities only. Public Yahoo/Google-style fallbacks are
+ * intentionally not wired into the real-money order gate.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -25,10 +24,10 @@ server.registerTool(
   {
     title: "Get stock quote",
     description:
-      "Get a near-real-time US stock quote. Tries Toss Securities first (when " +
-      "keys are provisioned), then falls back to Yahoo, then Google/Stooq. " +
+      "Get a near-real-time US stock quote from Toss Securities. " +
       "Returns price, currency, source, and the data delay in seconds so the " +
-      "caller can set a safe LIMIT price. Usage: { \"symbol\": \"AAPL\" }.",
+      "caller can decide whether the quote is usable for the order gate. " +
+      "Usage: { \"symbol\": \"AAPL\" }.",
     inputSchema: {
       symbol: z
         .string()
@@ -68,14 +67,11 @@ server.registerTool(
         toss: tossConfigured()
           ? "configured"
           : "dormant (keys not provisioned)",
-        yahoo: "available (Yahoo query1, ~15min delayed)",
-        google: "available (Yahoo query2 backup host, ~15min delayed)",
       },
-      fallbackOrder: ["toss", "yahoo", "google"],
+      fallbackOrder: ["toss"],
       note:
-        "The 'google' slot currently uses Yahoo's secondary host because " +
-        "Google Finance / Stooq scraping was unreliable. Source labels in " +
-        "get_quote reflect which upstream actually answered.",
+        "Yahoo and Google stock API fallbacks are intentionally removed. " +
+        "When Toss is not configured or fails, get_quote fails closed.",
     };
     return {
       content: [{ type: "text", text: JSON.stringify(status, null, 2) }],

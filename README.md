@@ -515,7 +515,7 @@ npm run transcripts:install-agent
 
 ## price-feed MCP
 
-`price-feed-mcp/`는 별도 하위 패키지입니다. 미국 주식 근실시간 시세를 반환하는 독립 MCP 서버이며, 코드상 Toss Securities, Yahoo, Google 순서의 provider 흐름을 갖습니다.
+`price-feed-mcp/`는 별도 하위 패키지입니다. 미국 주식 근실시간 시세를 반환하는 독립 MCP 서버이며, 주문 안전 게이트용 외부 시세는 Toss Securities provider만 사용합니다. Yahoo와 Google 주식 API fallback은 실거래 게이트에서 제거되어 있습니다.
 
 ```bash
 cd price-feed-mcp

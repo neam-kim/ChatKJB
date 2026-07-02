@@ -1,19 +1,16 @@
 /**
- * Fallback orchestrator. The fallback chain lives here in code, exactly as
- * 어르신 requested: the quote *lookup* is its own MCP server, and the
- * toss -> yahoo -> google fallback is internal code, not a separate system.
+ * Toss-only quote orchestrator. This MCP server intentionally avoids public
+ * Yahoo/Google-style fallback feeds for real-money order gating.
  */
 
 import {
   fetchToss,
-  fetchYahoo,
-  fetchGoogle,
   tossConfigured,
   type Quote,
 } from "./providers.js";
 
 export interface Attempt {
-  source: "toss" | "yahoo" | "google";
+  source: "toss";
   ok: boolean;
   error?: string;
   skipped?: boolean;
@@ -25,20 +22,18 @@ export interface QuoteResult extends Quote {
 }
 
 type Provider = {
-  source: "toss" | "yahoo" | "google";
+  source: "toss";
   fetch: (symbol: string) => Promise<Quote>;
   available: () => boolean;
 };
 
 const CHAIN: Provider[] = [
   { source: "toss", fetch: fetchToss, available: tossConfigured },
-  { source: "yahoo", fetch: fetchYahoo, available: () => true },
-  { source: "google", fetch: fetchGoogle, available: () => true },
 ];
 
 /**
- * Try each provider in order, returning the first success along with the
- * full attempt trace. Throws only if every provider fails.
+ * Try the Toss provider, returning the quote along with the attempt trace.
+ * Throws when Toss is not configured or fails.
  */
 export async function getQuote(symbol: string): Promise<QuoteResult> {
   const sym = symbol.trim().toUpperCase();

@@ -1,12 +1,10 @@
 /**
  * Quote providers. Each provider returns a normalized Quote or throws.
- * The fallback chain (toss -> yahoo -> google) is assembled in feed.ts.
  *
  * Design notes for 어르신's safety requirements:
  * - Every quote carries its `source` and `delaySeconds` so the caller can
- *   decide how much head-room to add when placing a LIMIT order.
- * - Toss is preferred (near-real-time, ~1s polling) but only usable once
- *   the Open API keys are provisioned; until then it self-skips.
+ *   decide whether the value is usable for an IBKR order gate.
+ * - Toss is the only external stock-price provider wired here.
  */
 
 export interface Quote {
@@ -15,7 +13,7 @@ export interface Quote {
   price: number;
   currency: string;
   /** Which upstream produced this value. */
-  source: "toss" | "yahoo" | "google";
+  source: "toss";
   /** Approximate data delay in seconds (0 = real-time, 900 = 15 min). */
   delaySeconds: number;
   /** Provider-reported timestamp (ms epoch) when available, else fetch time. */
@@ -160,62 +158,4 @@ export async function fetchToss(symbol: string): Promise<Quote> {
     delaySeconds: Number(process.env.TOSS_DELAY_SECONDS ?? 1),
     asOf: Date.now(),
   };
-}
-
-/* --------------------------------------------------------------- Yahoo --- */
-
-/**
- * Yahoo's lightweight chart endpoint. ~15 min delayed for US equities on the
- * free tier, which is fine as a LIMIT-price reference with head-room.
- *
- * Yahoo serves the same API from two physically independent hosts (query1 /
- * query2). We use query1 as the primary "yahoo" provider and query2 as the
- * last-resort fallback, so a single-host outage on Yahoo's side does not take
- * out the whole price feed. (Google Finance / Stooq scraping proved too
- * fragile and bot-blocked to rely on for real-money LIMIT pricing.)
- */
-async function fetchYahooHost(
-  symbol: string,
-  host: string,
-  source: Quote["source"],
-): Promise<Quote> {
-  const url =
-    `https://${host}/v8/finance/chart/` +
-    `${encodeURIComponent(symbol)}?interval=1m&range=1d`;
-  const body = await fetchJson(url, source);
-  const chart = asRecord(asRecord(body).chart);
-  const resultArr = chart.result;
-  if (!Array.isArray(resultArr) || resultArr.length === 0) {
-    const err = chart.error;
-    throw new ProviderError(
-      source,
-      err ? JSON.stringify(err) : "empty chart result",
-    );
-  }
-  const meta = asRecord(asRecord(resultArr[0]).meta);
-  const price = meta.regularMarketPrice;
-  if (typeof price !== "number" || !Number.isFinite(price)) {
-    throw new ProviderError(source, "no regularMarketPrice");
-  }
-  const currency = typeof meta.currency === "string" ? meta.currency : "USD";
-  const ts =
-    typeof meta.regularMarketTime === "number"
-      ? meta.regularMarketTime * 1000
-      : Date.now();
-  return { symbol, price, currency, source, delaySeconds: 900, asOf: ts };
-}
-
-export function fetchYahoo(symbol: string): Promise<Quote> {
-  return fetchYahooHost(symbol, "query1.finance.yahoo.com", "yahoo");
-}
-
-/* ------------------------------------------------------- Yahoo backup --- */
-
-/**
- * Last-resort fallback: Yahoo's secondary host (query2). Kept as a distinct
- * provider slot so the attempt trace clearly shows the feed exhausted its
- * independent options before failing.
- */
-export function fetchGoogle(symbol: string): Promise<Quote> {
-  return fetchYahooHost(symbol, "query2.finance.yahoo.com", "google");
 }
