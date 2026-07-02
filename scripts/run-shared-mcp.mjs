@@ -18,11 +18,36 @@ if (!server || server.type !== "stdio" || typeof server.command !== "string") {
 
 const child = spawn(server.command, Array.isArray(server.args) ? server.args : [], {
   env: { ...process.env, ...(server.env ?? {}) },
-  stdio: "inherit"
+  stdio: "inherit",
+  detached: true
 });
 
+let terminating = false;
+let killFallback;
+
+function signalChildTree(signal) {
+  if (child.exitCode !== null || child.killed) return;
+  if (typeof child.pid === "number") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      if (error && error.code === "ESRCH") return;
+    }
+  }
+  child.kill(signal);
+}
+
+function terminate(signal) {
+  if (terminating) return;
+  terminating = true;
+  signalChildTree(signal);
+  killFallback = setTimeout(() => signalChildTree("SIGKILL"), 2_000);
+  killFallback.unref();
+}
+
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => child.kill(signal));
+  process.on(signal, () => terminate(signal));
 }
 
 child.on("error", (error) => {
@@ -30,6 +55,7 @@ child.on("error", (error) => {
   process.exit(1);
 });
 child.on("exit", (code, signal) => {
+  if (killFallback) clearTimeout(killFallback);
   if (signal) process.kill(process.pid, signal);
   else process.exit(code ?? 1);
 });

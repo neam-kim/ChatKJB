@@ -281,10 +281,10 @@ describe("syncCodexMcpConfig", () => {
     );
     const merged = {
       native: { type: "stdio", command: "native-command" },
-      notion: {
+      localtool: {
         type: "stdio",
         command: "node",
-        args: ["notion.mjs"],
+        args: ["localtool.mjs"],
         env: { NOTION_TOKEN: "secret-value" }
       },
       remote: { type: "http", url: "https://example.com/mcp" }
@@ -299,8 +299,8 @@ describe("syncCodexMcpConfig", () => {
     );
     expect(first).toEqual({ changed: true, count: 2 });
     const text = readFileSync(configPath, "utf8");
-    expect(text).toContain("[mcp_servers.\"notion\"]");
-    expect(text).toContain('args = ["/wrapper.mjs", "/connectors.json", "notion"]');
+    expect(text).toContain("[mcp_servers.\"localtool\"]");
+    expect(text).toContain('args = ["/wrapper.mjs", "/connectors.json", "localtool"]');
     expect(text).toContain('url = "https://example.com/mcp"');
     expect(text).not.toContain("secret-value");
 
@@ -312,6 +312,32 @@ describe("syncCodexMcpConfig", () => {
       "/connectors.json"
     );
     expect(second).toEqual({ changed: false, count: 2 });
+  });
+
+  it("does not duplicate Codex-native plugin MCP servers in the managed block", () => {
+    const dir = tempDir();
+    const configPath = join(dir, "config.toml");
+    const merged = {
+      codex: { type: "stdio", command: "node" },
+      gmail: { type: "stdio", command: "node" },
+      notion: { type: "stdio", command: "node" },
+      localtool: { type: "stdio", command: "node" }
+    } as unknown as Record<string, McpServerConfig>;
+
+    const result = syncCodexMcpConfig(
+      merged,
+      configPath,
+      "/node",
+      "/wrapper.mjs",
+      "/connectors.json"
+    );
+
+    expect(result).toEqual({ changed: true, count: 1 });
+    const text = readFileSync(configPath, "utf8");
+    expect(text).toContain("[mcp_servers.\"localtool\"]");
+    expect(text).not.toContain("[mcp_servers.\"codex\"]");
+    expect(text).not.toContain("[mcp_servers.\"gmail\"]");
+    expect(text).not.toContain("[mcp_servers.\"notion\"]");
   });
 
   it("can configure agy stdio connectors through the same wrapper", () => {
@@ -327,6 +353,50 @@ describe("syncCodexMcpConfig", () => {
     expect(config.mcpServers.notion).toEqual({
       command: "/node",
       args: ["/wrapper.mjs", "/connectors.json", "notion"]
+    });
+  });
+
+  it("removes stale wrapper-managed agy connectors while preserving user servers", () => {
+    const dir = tempDir();
+    const geminiPath = join(dir, "mcp_config.json");
+    writeFileSync(geminiPath, JSON.stringify({
+      mcpServers: {
+        userserver: { command: "keepme" },
+        stale: {
+          command: "/node",
+          args: ["/wrapper.mjs", "/connectors.json", "stale"]
+        },
+        staleRemote: {
+          serverUrl: "https://example.com/stale"
+        }
+      },
+      other: true
+    }));
+
+    const merged = {
+      keep: { type: "stdio", command: "node" }
+    } as unknown as Record<string, McpServerConfig>;
+    const result = syncAgyMcpConfig(
+      merged,
+      geminiPath,
+      "/node",
+      "/wrapper.mjs",
+      "/connectors.json",
+      new Set(["keep", "stale", "staleRemote"])
+    );
+
+    expect(result).toEqual({ changed: true, count: 1 });
+    const config = JSON.parse(readFileSync(geminiPath, "utf8")) as {
+      mcpServers: Record<string, unknown>;
+      other: boolean;
+    };
+    expect(config.other).toBe(true);
+    expect(config.mcpServers.userserver).toEqual({ command: "keepme" });
+    expect(config.mcpServers.stale).toBeUndefined();
+    expect(config.mcpServers.staleRemote).toBeUndefined();
+    expect(config.mcpServers.keep).toEqual({
+      command: "/node",
+      args: ["/wrapper.mjs", "/connectors.json", "keep"]
     });
   });
 });

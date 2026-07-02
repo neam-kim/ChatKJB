@@ -5,7 +5,9 @@
 
 import {
   fetchToss,
+  fetchTossOrderBook,
   tossConfigured,
+  type OrderBook,
   type Quote,
 } from "./providers.js";
 
@@ -21,25 +23,50 @@ export interface QuoteResult extends Quote {
   attempts: Attempt[];
 }
 
+export interface OrderBookResult extends OrderBook {
+  /** Per-provider trace so the caller can see what was tried and why. */
+  attempts: Attempt[];
+}
+
 type Provider = {
   source: "toss";
-  fetch: (symbol: string) => Promise<Quote>;
+  fetchQuote: (symbol: string) => Promise<Quote>;
+  fetchOrderBook: (symbol: string) => Promise<OrderBook>;
   available: () => boolean;
 };
 
 const CHAIN: Provider[] = [
-  { source: "toss", fetch: fetchToss, available: tossConfigured },
+  {
+    source: "toss",
+    fetchQuote: fetchToss,
+    fetchOrderBook: fetchTossOrderBook,
+    available: tossConfigured,
+  },
 ];
+
+function normalizeSymbol(symbol: string): string {
+  const sym = symbol.trim().toUpperCase();
+  if (!sym || !/^[A-Z0-9.\-]{1,20}$/.test(sym)) {
+    throw new Error(`invalid symbol: '${symbol}'`);
+  }
+  return sym;
+}
+
+function failureMessage(kind: string, symbol: string, attempts: Attempt[]): string {
+  const detail = attempts
+    .map((a) =>
+      a.skipped ? `${a.source}: skipped` : `${a.source}: ${a.error ?? "failed"}`,
+    )
+    .join("; ");
+  return `all ${kind} providers failed for ${symbol} — ${detail}`;
+}
 
 /**
  * Try the Toss provider, returning the quote along with the attempt trace.
  * Throws when Toss is not configured or fails.
  */
 export async function getQuote(symbol: string): Promise<QuoteResult> {
-  const sym = symbol.trim().toUpperCase();
-  if (!sym || !/^[A-Z.\-]{1,12}$/.test(sym)) {
-    throw new Error(`invalid symbol: '${symbol}'`);
-  }
+  const sym = normalizeSymbol(symbol);
 
   const attempts: Attempt[] = [];
   for (const provider of CHAIN) {
@@ -48,7 +75,7 @@ export async function getQuote(symbol: string): Promise<QuoteResult> {
       continue;
     }
     try {
-      const quote = await provider.fetch(sym);
+      const quote = await provider.fetchQuote(sym);
       attempts.push({ source: provider.source, ok: true });
       return { ...quote, attempts };
     } catch (err) {
@@ -60,10 +87,34 @@ export async function getQuote(symbol: string): Promise<QuoteResult> {
     }
   }
 
-  const detail = attempts
-    .map((a) =>
-      a.skipped ? `${a.source}: skipped` : `${a.source}: ${a.error ?? "failed"}`,
-    )
-    .join("; ");
-  throw new Error(`all price providers failed for ${sym} — ${detail}`);
+  throw new Error(failureMessage("price", sym, attempts));
+}
+
+/**
+ * Try the Toss provider, returning the order book along with the attempt trace.
+ * Throws when Toss is not configured or fails.
+ */
+export async function getOrderBook(symbol: string): Promise<OrderBookResult> {
+  const sym = normalizeSymbol(symbol);
+
+  const attempts: Attempt[] = [];
+  for (const provider of CHAIN) {
+    if (!provider.available()) {
+      attempts.push({ source: provider.source, ok: false, skipped: true });
+      continue;
+    }
+    try {
+      const orderBook = await provider.fetchOrderBook(sym);
+      attempts.push({ source: provider.source, ok: true });
+      return { ...orderBook, attempts };
+    } catch (err) {
+      attempts.push({
+        source: provider.source,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  throw new Error(failureMessage("order book", sym, attempts));
 }

@@ -799,6 +799,43 @@ describe("goal state", () => {
     }
   });
 
+  it("allows a follow-up to queue while a completed run is still finalizing", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-finalizing-resume-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const session = {
+      ...baseSession("finalizing-session", directory),
+      sdkSessionId: "sdk-session",
+      status: "done" as const
+    };
+    store.createSession(session);
+    const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const manager = new SessionManager(store, fakeTransport, permissions, sessionManagerOptions(directory));
+    const activeRun = {
+      controller: new AbortController(),
+      input: new MessageQueue(),
+      pendingTurns: 0,
+      startedAt: Date.now(),
+      codexTimers: new Map(),
+      codexStarts: new Map(),
+      mcpFailures: new Map()
+    };
+    const neverDispatches = new Promise<void>(() => undefined);
+
+    try {
+      (manager as unknown as { active: Map<string, unknown> }).active.set(session.id, activeRun);
+      (manager as unknown as { projectTails: Map<string, Promise<void>> }).projectTails.set(directory, neverDispatches);
+
+      expect(manager.isActive(session.id)).toBe(true);
+      expect(manager.isFinalizing(session.id)).toBe(true);
+      expect(manager.resume(session, "다음 작업")).toBe(true);
+      expect(store.getSession(session.id)?.status).toBe("queued");
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("uses Codex native goal for existing Codex threads and ChatKJB fallback for agy", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-goal-providers-"));
     const store = new StateStore(join(directory, "state.sqlite"));
@@ -891,6 +928,52 @@ describe("goal state", () => {
       const drains = [manager.deleteSession(codexSession), manager.deleteSession(agySession)];
       await new Promise((resolve) => setTimeout(resolve, 100));
       await Promise.all(drains);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to ChatKJB goal automation when Codex native goal fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-goal-codex-fallback-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const session = baseSession("codex-goal-fallback", directory);
+    store.createSession({
+      ...session,
+      provider: "codex",
+      codexThreadId: "thread-1",
+      status: "done"
+    });
+    const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const manager = new SessionManager(store, fakeTransport, permissions, {
+      debounceMs: 1,
+      claudeCodeOauthToken: "test-token",
+      mcpToolTimeoutMs: 1000,
+      mcpMaxAttempts: 1,
+      codexMcpTimeoutMs: 1000,
+      codexMcpHeartbeatMs: 1000,
+      longRunningMcpServers: new Set(["codex"]),
+      turnIdleTimeoutMs: 600_000,
+      claudeMemoryDir: join(directory, ".claude", "memory"),
+      modelCatalog: FALLBACK_MODEL_CATALOG,
+      codexAccountHomes: [join(directory, "codex-home")],
+      codexGoalClient: {
+        async setGoal() {
+          throw new Error("unsupported method");
+        },
+        async clearGoal() {
+          throw new Error("unsupported method");
+        }
+      },
+      deleteClaudeSession: async () => {}
+    });
+
+    try {
+      await expect(manager.setGoal("codex-goal-fallback", "테스트 통과")).resolves.toBe("fallback");
+      expect(store.getSession("codex-goal-fallback")?.goalCondition).toBe("테스트 통과");
+      const queued = store.getSession("codex-goal-fallback");
+      if (queued) await manager.deleteSession(queued);
     } finally {
       store.close();
       rmSync(directory, { recursive: true, force: true });

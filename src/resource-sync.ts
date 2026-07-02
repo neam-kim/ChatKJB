@@ -216,6 +216,21 @@ function registryServer(server: McpServerConfig): Record<string, unknown> {
   };
 }
 
+function selectedAgyMcpConnectors(
+  connectors: Record<string, McpServerConfig>,
+  rawNames = process.env.AGY_MCP_SERVERS ?? "llm-wiki"
+): Record<string, McpServerConfig> {
+  const names = new Set(
+    rawNames.split(",")
+      .map((name) => name.trim())
+      .filter(Boolean)
+  );
+  if (names.size === 0) return {};
+  return Object.fromEntries(
+    Object.entries(connectors).filter(([name]) => names.has(name))
+  );
+}
+
 function writeRouterSkill(paths: SharedResourcePaths): void {
   mkdirSync(paths.routerSkill, { recursive: true });
   writeFileSync(
@@ -412,11 +427,12 @@ export function syncSharedResources(
     paths.connectorRegistry
   );
   syncAgyMcpConfig(
-    connectors,
+    selectedAgyMcpConnectors(connectors),
     paths.agyMcpConfig,
     process.execPath,
     paths.wrapperScript,
-    paths.connectorRegistry
+    paths.connectorRegistry,
+    new Set(Object.keys(connectors))
   );
 
   writeFileSync(paths.resourceGuide, buildSharedResourceGuideText({

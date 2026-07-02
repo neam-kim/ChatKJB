@@ -8,6 +8,22 @@ import { normalizeAgyResponse, type AgyInteractiveTurnResult, type AgyLiveStatus
 const DEFAULT_PRINT_TIMEOUT_MS = 30 * 60_000;
 const CONVERSATION_RE = /Print mode: conversation=([0-9a-f-]{36}), sending message/i;
 
+function signalChildTree(
+  child: Pick<ChildProcess, "exitCode" | "kill" | "killed" | "pid">,
+  signal: NodeJS.Signals
+): void {
+  if (child.exitCode !== null || child.killed) return;
+  if (typeof child.pid === "number") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return;
+    }
+  }
+  child.kill(signal);
+}
+
 export interface AgyCliSessionOptions {
   executable: string;
   cwd: string;
@@ -60,7 +76,8 @@ export class AgyCliSession {
       const child = spawn(this.options.executable, args, {
         cwd: this.options.cwd,
         env: this.options.env,
-        stdio: ["ignore", "pipe", "pipe"]
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true
       });
       this.child = child;
 
@@ -70,7 +87,7 @@ export class AgyCliSession {
         reject(error);
       };
       const onAbort = () => {
-        if (child.exitCode === null && !child.killed) child.kill("SIGTERM");
+        signalChildTree(child, "SIGTERM");
         finishReject(new Error("turn aborted"));
       };
       if (signal) {
@@ -133,7 +150,7 @@ export class AgyCliSession {
 
   interrupt(): void {
     if (this.child && this.child.exitCode === null && !this.child.killed) {
-      this.child.kill("SIGTERM");
+      signalChildTree(this.child, "SIGTERM");
     }
   }
 

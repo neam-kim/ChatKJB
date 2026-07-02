@@ -1,8 +1,12 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 /**
- * Quote providers. Each provider returns a normalized Quote or throws.
+ * Quote providers. Each provider returns normalized market data or throws.
  *
  * Design notes for 어르신's safety requirements:
- * - Every quote carries its `source` and `delaySeconds` so the caller can
+ * - Every result carries its `source` and `delaySeconds` so the caller can
  *   decide whether the value is usable for an IBKR order gate.
  * - Toss is the only external stock-price provider wired here.
  */
@@ -20,6 +24,29 @@ export interface Quote {
   asOf: number;
 }
 
+export interface OrderBookLevel {
+  price: number;
+  volume: number;
+  rawPrice: string;
+  rawVolume: string;
+}
+
+export interface OrderBook {
+  symbol: string;
+  currency: string;
+  source: "toss";
+  /** Provider-reported timestamp string when available. */
+  timestamp: string | null;
+  asks: OrderBookLevel[];
+  bids: OrderBookLevel[];
+  bestAsk?: number;
+  bestBid?: number;
+  spread?: number;
+  delaySeconds: number;
+  /** Provider-reported timestamp (ms epoch) when available, else fetch time. */
+  asOf: number;
+}
+
 export class ProviderError extends Error {
   constructor(
     public readonly provider: string,
@@ -31,6 +58,11 @@ export class ProviderError extends Error {
 }
 
 const DEFAULT_TIMEOUT_MS = 8000;
+const DEFAULT_TOSS_API_BASE = "https://openapi.tossinvest.com";
+const LOCAL_TOSS_KEY_FILE = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../Toss_API_KEY.yaml",
+);
 
 async function fetchJson(
   url: string,
@@ -52,9 +84,15 @@ async function fetchJson(
       },
     });
     if (!res.ok) {
-      throw new ProviderError(provider, `HTTP ${res.status}`);
+      const text = await res.text();
+      const detail = text.trim().slice(0, 500);
+      throw new ProviderError(
+        provider,
+        detail ? `HTTP ${res.status}: ${detail}` : `HTTP ${res.status}`,
+      );
     }
-    return await res.json();
+    const text = await res.text();
+    return JSON.parse(text) as unknown;
   } catch (err) {
     if (err instanceof ProviderError) throw err;
     const reason = err instanceof Error ? err.message : String(err);
@@ -71,38 +109,127 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function numericField(obj: Record<string, unknown>, key: string): number {
+  const raw = obj[key];
+  const n = typeof raw === "string" ? Number(raw) : (raw as number);
+  if (!Number.isFinite(n)) throw new Error(`field '${key}' is not numeric`);
+  return n;
+}
+
+function stringField(obj: Record<string, unknown>, key: string): string {
+  const raw = obj[key];
+  if (typeof raw !== "string" || !raw.trim()) {
+    throw new Error(`field '${key}' is missing`);
+  }
+  return raw;
+}
+
+function timestampMs(timestamp: unknown): number {
+  if (typeof timestamp === "string" && timestamp.trim()) {
+    const parsed = Date.parse(timestamp);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return Date.now();
+}
+
+function normalizeCredentialKey(key: string): string {
+  return key.replace(/[^a-z0-9]/gi, "").toUpperCase();
+}
+
+let localTossCredentials: Record<string, string> | null | undefined;
+
+function readLocalTossCredentials(): Record<string, string> | null {
+  if (localTossCredentials !== undefined) return localTossCredentials;
+  if (!existsSync(LOCAL_TOSS_KEY_FILE)) {
+    localTossCredentials = null;
+    return localTossCredentials;
+  }
+
+  const parsed: Record<string, string> = {};
+  for (const line of readFileSync(LOCAL_TOSS_KEY_FILE, "utf8").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const match = trimmed.match(/^([^:=\s][^:=]*?)\s*[:=]\s*(.*?)\s*$/);
+    if (!match) continue;
+    const key = normalizeCredentialKey(match[1]);
+    let value = match[2].trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (key && value) parsed[key] = value;
+  }
+  localTossCredentials = parsed;
+  return localTossCredentials;
+}
+
+function configValue(...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+
+  const local = readLocalTossCredentials();
+  if (!local) return undefined;
+  for (const name of names) {
+    const value = local[normalizeCredentialKey(name)]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function tossClientId(): string | undefined {
+  return configValue(
+    "TOSS_API_KEY",
+    "TOSS_APP_KEY",
+    "TOSS_CLIENT_ID",
+    "TOSSINVEST_CLIENT_ID",
+  );
+}
+
+function tossClientSecret(): string | undefined {
+  return configValue(
+    "TOSS_SECRET_KEY",
+    "TOSS_APP_SECRET",
+    "TOSS_CLIENT_SECRET",
+    "TOSSINVEST_CLIENT_SECRET",
+  );
+}
+
+function tossApiBase(): string {
+  return (
+    configValue("TOSS_API_BASE", "TOSSINVEST_API_BASE_URL") ??
+    DEFAULT_TOSS_API_BASE
+  ).replace(/\/+$/, "");
+}
+
+function tossApiUrl(path: string): string {
+  return `${tossApiBase()}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 /* ---------------------------------------------------------------- Toss --- */
 
 /**
  * Toss Securities Open API.
  *
- * As of 2026-06 the official spec is REST-only (no public WebSocket yet) and
- * the key issuance is gated behind the not-yet-general-availability period.
- * So this provider is fully wired but stays dormant until the env keys exist.
+ * Official OpenAPI spec checked live on 2026-07-02:
+ *   https://openapi.tossinvest.com/openapi-docs/latest/openapi.json
  *
- * Endpoint/field paths below are intentionally read from env so they can be
- * corrected the moment 어르신's keys + final docs land, without code edits:
- *   TOSS_API_BASE      e.g. https://openapi.tossinvest.com
- *   TOSS_QUOTE_PATH    e.g. /v1/overseas/quote   ({symbol} placeholder)
- *   TOSS_PRICE_FIELD   dot-path to the price, e.g. "result.price"
- *   TOSS_APP_KEY / TOSS_APP_SECRET  (OAuth client credentials)
+ * Auth:
+ *   POST /oauth2/token with application/x-www-form-urlencoded
+ *   grant_type=client_credentials, client_id, client_secret
+ *
+ * Market data:
+ *   GET /api/v1/prices?symbols=AAPL
+ *   GET /api/v1/orderbook?symbol=AAPL
+ *
+ * Credentials may come from environment variables or ChatKJB/Toss_API_KEY.yaml:
+ *   TOSS_API_KEY / TOSS_SECRET_KEY
  */
 export function tossConfigured(): boolean {
-  return Boolean(
-    process.env.TOSS_APP_KEY &&
-      process.env.TOSS_APP_SECRET &&
-      process.env.TOSS_API_BASE,
-  );
-}
-
-function digFloat(obj: unknown, dotPath: string): number {
-  let cur: unknown = obj;
-  for (const key of dotPath.split(".")) {
-    cur = asRecord(cur)[key];
-  }
-  const n = typeof cur === "string" ? Number(cur) : (cur as number);
-  if (!Number.isFinite(n)) throw new Error(`field '${dotPath}' is not numeric`);
-  return n;
+  return Boolean(tossClientId() && tossClientSecret());
 }
 
 let tossToken: { value: string; expiresAt: number } | null = null;
@@ -111,51 +238,117 @@ async function tossAccessToken(): Promise<string> {
   const now = Date.now();
   if (tossToken && tossToken.expiresAt > now + 30_000) return tossToken.value;
 
-  const base = process.env.TOSS_API_BASE!;
-  const tokenPath = process.env.TOSS_TOKEN_PATH ?? "/oauth/token";
-  const body = await fetchJson(`${base}${tokenPath}`, "toss", {
+  const clientId = tossClientId();
+  const clientSecret = tossClientSecret();
+  if (!clientId || !clientSecret) {
+    throw new ProviderError("toss", "not configured (missing credentials)");
+  }
+
+  const tokenPath = configValue("TOSS_TOKEN_PATH") ?? "/oauth2/token";
+  const form = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: clientId,
+    client_secret: clientSecret,
+  });
+  const body = await fetchJson(tossApiUrl(tokenPath), "toss", {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      grant_type: "client_credentials",
-      appkey: process.env.TOSS_APP_KEY,
-      appsecret: process.env.TOSS_APP_SECRET,
-    }),
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: form,
   });
   const rec = asRecord(body);
-  const token = rec.access_token ?? rec.accessToken;
+  const token = rec.access_token;
   if (typeof token !== "string") {
     throw new ProviderError("toss", "no access_token in token response");
   }
-  const ttl = Number(rec.expires_in ?? rec.expiresIn ?? 3600);
+  const ttl = Number(rec.expires_in ?? 3600);
   tossToken = { value: token, expiresAt: now + ttl * 1000 };
   return token;
+}
+
+async function fetchTossApi(path: string): Promise<unknown> {
+  const token = await tossAccessToken();
+  return fetchJson(tossApiUrl(path), "toss", {
+    headers: { authorization: `Bearer ${token}` },
+  });
 }
 
 export async function fetchToss(symbol: string): Promise<Quote> {
   if (!tossConfigured()) {
     throw new ProviderError("toss", "not configured (keys not provisioned)");
   }
-  const base = process.env.TOSS_API_BASE!;
-  const quotePath = (process.env.TOSS_QUOTE_PATH ?? "/v1/overseas/quote").replace(
-    "{symbol}",
-    encodeURIComponent(symbol),
-  );
-  const url = quotePath.includes(encodeURIComponent(symbol))
-    ? `${base}${quotePath}`
-    : `${base}${quotePath}?symbol=${encodeURIComponent(symbol)}`;
-  const token = await tossAccessToken();
-  const body = await fetchJson(url, "toss", {
-    headers: { authorization: `Bearer ${token}` },
-  });
-  const priceField = process.env.TOSS_PRICE_FIELD ?? "result.price";
-  const price = digFloat(body, priceField);
+  const params = new URLSearchParams({ symbols: symbol });
+  const body = await fetchTossApi(`/api/v1/prices?${params.toString()}`);
+  const result = asRecord(body).result;
+  if (!Array.isArray(result) || result.length < 1) {
+    throw new ProviderError("toss", "no result in prices response");
+  }
+  const matching =
+    result.find((item) => {
+      try {
+        return stringField(asRecord(item), "symbol").toUpperCase() === symbol;
+      } catch {
+        return false;
+      }
+    }) ?? result[0];
+  const rec = asRecord(matching);
+  const timestamp = rec.timestamp;
   return {
     symbol,
-    price,
-    currency: process.env.TOSS_CURRENCY ?? "USD",
+    price: numericField(rec, "lastPrice"),
+    currency: stringField(rec, "currency"),
     source: "toss",
-    delaySeconds: Number(process.env.TOSS_DELAY_SECONDS ?? 1),
-    asOf: Date.now(),
+    delaySeconds: Number(configValue("TOSS_DELAY_SECONDS") ?? 0),
+    asOf: timestampMs(timestamp),
+  };
+}
+
+function parseOrderBookLevels(value: unknown, side: "asks" | "bids"): OrderBookLevel[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`field '${side}' is not an array`);
+  }
+  return value.map((entry) => {
+    const rec = asRecord(entry);
+    const rawPrice = stringField(rec, "price");
+    const rawVolume = stringField(rec, "volume");
+    const price = Number(rawPrice);
+    const volume = Number(rawVolume);
+    if (!Number.isFinite(price)) {
+      throw new Error(`field '${side}.price' is not numeric`);
+    }
+    if (!Number.isFinite(volume)) {
+      throw new Error(`field '${side}.volume' is not numeric`);
+    }
+    return { price, volume, rawPrice, rawVolume };
+  });
+}
+
+export async function fetchTossOrderBook(symbol: string): Promise<OrderBook> {
+  if (!tossConfigured()) {
+    throw new ProviderError("toss", "not configured (keys not provisioned)");
+  }
+  const params = new URLSearchParams({ symbol });
+  const body = await fetchTossApi(`/api/v1/orderbook?${params.toString()}`);
+  const result = asRecord(asRecord(body).result);
+  const timestamp = result.timestamp;
+  const timestampString = typeof timestamp === "string" ? timestamp : null;
+  const asks = parseOrderBookLevels(result.asks, "asks");
+  const bids = parseOrderBookLevels(result.bids, "bids");
+  const bestAsk = asks[0]?.price;
+  const bestBid = bids[0]?.price;
+  const spread =
+    bestAsk !== undefined && bestBid !== undefined ? bestAsk - bestBid : undefined;
+
+  return {
+    symbol,
+    currency: stringField(result, "currency"),
+    source: "toss",
+    timestamp: timestampString,
+    asks,
+    bids,
+    bestAsk,
+    bestBid,
+    spread,
+    delaySeconds: Number(configValue("TOSS_DELAY_SECONDS") ?? 0),
+    asOf: timestampMs(timestamp),
   };
 }

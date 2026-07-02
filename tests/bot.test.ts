@@ -82,7 +82,8 @@ function botSetup(extra?: { claudeCodeOauthTokens?: string[]; codexAccountHomes?
     agyBackend: "api",
     agyExecutable: "agy",
     geminiApiKey: "test-gemini-api-key-value-1234567890",
-    agySdkPython: "/usr/bin/python3"
+    agySdkPython: "/usr/bin/python3",
+    agyMcpServers: ["llm-wiki"]
   } satisfies AppConfig;
   const instance = createBot(config, store);
   instance.bot.botInfo = {
@@ -923,7 +924,7 @@ describe("/goal command", () => {
 
     expect(setGoal).toHaveBeenCalledWith("session", "모든 테스트가 통과한다");
     expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
-      .toContain("Claude 네이티브 /goal");
+      .toContain("목표를 설정했습니다");
   });
 
   it("reports when a Codex goal is set through the native goal surface", async () => {
@@ -935,6 +936,17 @@ describe("/goal command", () => {
 
     expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
       .toContain("Codex 네이티브 목표로 설정");
+  });
+
+  it("reports when a Codex native goal falls back to ChatKJB automation", async () => {
+    const { bot, sessions, store, calls } = botSetup();
+    store.updateSession("session", { provider: "codex", codexThreadId: "thread-1" });
+    vi.spyOn(sessions, "setGoal").mockResolvedValue("fallback");
+
+    await bot.handleUpdate(goalCommand("/goal 모든 테스트가 통과한다"));
+
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
+      .toContain("ChatKJB 자동 진행으로 전환");
   });
 });
 
@@ -948,6 +960,25 @@ describe("/restop command", () => {
     expect(cancelLimitResume).toHaveBeenCalledWith("session");
     expect(calls.find((call) => call.method === "sendMessage")?.payload.text)
       .toContain("자동 재개 예약을 취소했습니다");
+  });
+});
+
+describe("plain follow-up messages", () => {
+  it("starts a follow-up when the previous run is only finalizing after completion", async () => {
+    const { bot, sessions, calls } = botSetup();
+    vi.spyOn(sessions, "isActive").mockReturnValue(true);
+    vi.spyOn(sessions, "isFinalizing").mockReturnValue(true);
+    const resume = vi.spyOn(sessions, "resume").mockReturnValue(true);
+
+    await bot.handleUpdate(textMessage("다음 작업 진행"));
+
+    expect(resume).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "session" }),
+      "다음 작업 진행"
+    );
+    const replies = calls.filter((call) => call.method === "sendMessage").map((call) => call.payload.text);
+    expect(replies).toContain("후속 작업을 시작했습니다.");
+    expect(replies).not.toContain("현재 작업이 실행 중입니다.\n현재 작업을 수정하려면 `/steer 지시`, 끝난 뒤 실행하려면 `/next 지시`를 사용하세요.");
   });
 });
 

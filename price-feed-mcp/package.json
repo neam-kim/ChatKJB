@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Independent MCP server that returns near-real-time US stock quotes from Toss Securities for order-gate use.",
+  "description": "Independent MCP server that returns near-real-time stock quotes and order books from Toss Securities for order-gate use.",
   "bin": {
     "price-feed-mcp": "dist/index.js"
   },

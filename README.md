@@ -109,7 +109,7 @@ Telegram 명령어는 `/`로 시작합니다.
 | --- | --- |
 | `/steer <지시>` | 실행 중인 작업에 즉시 방향 수정을 보냅니다. |
 | `/next <지시>` | 현재 작업이 끝난 뒤 실행할 후속 작업을 예약합니다. |
-| `/goal <조건>` | 목표 조건을 설정합니다. Claude는 네이티브 `/goal`, Codex는 네이티브 목표 상태에 연결하고, Antigravity는 ChatKJB 자동 진행을 사용합니다. |
+| `/goal <조건>` | 목표 조건을 설정합니다. 기본은 ChatKJB 자동 진행이며, Codex 네이티브 목표 클라이언트가 명시 구성된 경우에만 그쪽에 연결합니다. |
 | `/goal clear` | 자동 목표를 해제합니다. |
 | `/restop` | 한도 회복 후 자동 재개 예약만 취소합니다. |
 | `/fork` | 현재 세션을 복제해 다른 방향으로 이어 갑니다. |
@@ -118,7 +118,7 @@ Telegram 명령어는 `/`로 시작합니다.
 | `/diff` | 현재 프로젝트의 git diff 요약을 봅니다. |
 | `/upload <경로>` | 프로젝트 안의 결과 파일을 Telegram으로 받습니다. |
 
-Antigravity의 `/goal`은 `check:` 줄을 함께 쓸 수 있습니다. `check:` 명령이 실패하면 목표가 아직 미달성인 것으로 판단합니다. Claude와 Codex에서는 각 제공자의 네이티브 목표 기능이 목표 상태를 맡습니다.
+`/goal`은 `check:` 줄을 함께 쓸 수 있습니다. `check:` 명령이 실패하면 목표가 아직 미달성인 것으로 판단합니다. Codex 네이티브 목표 클라이언트가 없거나 호출에 실패하면 ChatKJB 자동 진행으로 폴백합니다.
 
 ```text
 /goal README가 최신 기능을 모두 설명하고 검증 명령이 통과한다
@@ -516,7 +516,17 @@ npm run transcripts:install-agent
 
 ## price-feed MCP
 
-`price-feed-mcp/`는 별도 하위 패키지입니다. 미국 주식 근실시간 시세를 반환하는 독립 MCP 서버이며, 주문 안전 게이트용 외부 시세는 Toss Securities provider만 사용합니다. Yahoo와 Google 주식 API fallback은 실거래 게이트에서 제거되어 있습니다.
+`price-feed-mcp/`는 별도 하위 패키지입니다. 미국·국내 주식 시세와 호가창을 반환하는 독립 MCP 서버이며, 주문 안전 게이트용 외부 시세는 Toss Securities provider만 사용합니다. Yahoo와 Google 주식 API fallback은 실거래 게이트에서 제거되어 있습니다.
+
+제공 도구:
+
+| 도구 | 역할 |
+| --- | --- |
+| `get_quote` | Toss OpenAPI `/api/v1/prices`로 현재가를 조회합니다. |
+| `get_order_book` | Toss OpenAPI `/api/v1/orderbook`으로 매도/매수 호가와 best bid/ask를 조회합니다. |
+| `feed_status` | Toss 자격증명 설정 여부와 fallback 정책을 확인합니다. |
+
+자격증명은 환경변수 `TOSS_API_KEY`/`TOSS_SECRET_KEY` 또는 ChatKJB 루트의 로컬 `Toss_API_KEY.yaml`에서 읽습니다. 이 파일은 비밀 파일이므로 Git에 커밋하지 않습니다.
 
 ```bash
 cd price-feed-mcp

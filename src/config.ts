@@ -70,7 +70,8 @@ const environmentSchema = z.object({
   AGY_BACKEND: z.enum(["api", "cli"]).default("api"),
   AGY_EXECUTABLE: z.string().optional(),
   GEMINI_API_KEY: optionalGeminiApiKey,
-  AGY_SDK_PYTHON: z.string().optional()
+  AGY_SDK_PYTHON: z.string().optional(),
+  AGY_MCP_SERVERS: z.string().default("llm-wiki")
 });
 
 const projectSchema = z.object({
@@ -176,6 +177,15 @@ export function parseCodexAccountHomes(
     result.push(absPath);
   }
   return result.length > 0 ? result : [fallbackHome];
+}
+
+export function parseMcpServerNames(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  return [...new Set(
+    raw.split(",")
+      .map((part) => part.trim())
+      .filter(Boolean)
+  )];
 }
 
 // agy 바이너리 경로를 정한다. 데몬 PATH에 ~/.local/bin이 없을 수 있어, 명시 env가 없으면
@@ -458,6 +468,7 @@ export async function loadConfig() {
     agyBackend: env.AGY_BACKEND,
     agyExecutable: resolveAgyExecutable(env.AGY_EXECUTABLE),
     geminiApiKey: env.GEMINI_API_KEY,
+    agyMcpServers: parseMcpServerNames(env.AGY_MCP_SERVERS),
     agySdkPython: env.AGY_SDK_PYTHON
       ? absolutePath(env.AGY_SDK_PYTHON)
       : join(

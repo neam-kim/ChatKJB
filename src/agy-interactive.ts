@@ -8,6 +8,22 @@ const START_TIMEOUT_MS = 30_000;
 const CANCEL_FALLBACK_MS = 3_000;
 const CONTROL_TIMEOUT_MS = 5_000;
 
+function signalChildTree(
+  child: Pick<ChildProcessWithoutNullStreams, "exitCode" | "kill" | "killed" | "pid">,
+  signal: NodeJS.Signals
+): void {
+  if (child.exitCode !== null || child.killed) return;
+  if (typeof child.pid === "number") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return;
+    }
+  }
+  child.kill(signal);
+}
+
 export interface AgyInteractiveOptions {
   pythonPath: string;
   bridgePath: string;
@@ -19,6 +35,7 @@ export interface AgyInteractiveOptions {
   conversationId: string | null;
   systemInstructions: string;
   connectorRegistry: string;
+  mcpServerNames: readonly string[];
   skillsPaths: string[];
   env: NodeJS.ProcessEnv;
 }
@@ -152,7 +169,8 @@ export class AgyInteractiveSession {
       const child = spawn(this.options.pythonPath, [this.options.bridgePath], {
         cwd: this.options.cwd,
         env: this.options.env,
-        stdio: ["pipe", "pipe", "pipe"]
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: true
       });
       this.child = child;
       this.stderr = "";
@@ -209,6 +227,7 @@ export class AgyInteractiveSession {
         conversationId: this.conversationId,
         systemInstructions: this.options.systemInstructions,
         connectorRegistry: this.options.connectorRegistry,
+        mcpServerNames: this.options.mcpServerNames,
         skillsPaths: this.options.skillsPaths
       });
     });
@@ -305,7 +324,7 @@ export class AgyInteractiveSession {
     const timer = setTimeout(() => {
       timerFired = true;
       if (child.exitCode === null && !child.killed) {
-        child.kill("SIGTERM");
+        signalChildTree(child, "SIGTERM");
       }
     }, CANCEL_FALLBACK_MS);
     timer.unref();
@@ -341,10 +360,10 @@ export class AgyInteractiveSession {
     this.failPending(new Error("Antigravity SDK 세션이 종료되었습니다."));
     if (this.child && this.child.exitCode === null) {
       const child = this.child;
-      if (wasPending) child.kill("SIGTERM");
+      if (wasPending) signalChildTree(child, "SIGTERM");
       else this.write({ type: "close" });
       setTimeout(() => {
-        if (child.exitCode === null) child.kill("SIGKILL");
+        if (child.exitCode === null) signalChildTree(child, "SIGKILL");
       }, 2_000).unref();
     }
     this.child = null;

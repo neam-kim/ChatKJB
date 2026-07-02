@@ -442,7 +442,21 @@ export function toGeminiMcpConfig(
 
 const CODEX_MANAGED_START = "# BEGIN telegram-claude-orchestrator shared MCP";
 const CODEX_MANAGED_END = "# END telegram-claude-orchestrator shared MCP";
-const CODEX_NATIVE_PLUGIN_MCP = new Set(["computer-use"]);
+const CODEX_NATIVE_PLUGIN_MCP = new Set([
+  "biocontext-kb",
+  "biomcp",
+  "biorender",
+  "biorxiv",
+  "chembl",
+  "codex",
+  "computer-use",
+  "dataAnalyticsWidgets",
+  "figma",
+  "gmail",
+  "google-calendar",
+  "notion",
+  "pubmed"
+]);
 
 function tomlString(value: string): string {
   return JSON.stringify(value);
@@ -510,7 +524,8 @@ export function syncAgyMcpConfig(
   geminiMcpConfigPath = defaultGeminiMcpConfigPath(),
   nodeExecutable?: string,
   wrapperScript?: string,
-  connectorRegistry?: string
+  connectorRegistry?: string,
+  managedNames: ReadonlySet<string> = new Set(Object.keys(merged))
 ): { changed: boolean; count: number } {
   const desired = toGeminiMcpConfig(
     merged,
@@ -519,7 +534,6 @@ export function syncAgyMcpConfig(
     connectorRegistry
   ).mcpServers;
   const count = Object.keys(desired).length;
-  if (count === 0) return { changed: false, count: 0 };
 
   let existing: Record<string, unknown> = {};
   try {
@@ -533,19 +547,34 @@ export function syncAgyMcpConfig(
     existing.mcpServers && typeof existing.mcpServers === "object"
       ? (existing.mcpServers as Record<string, unknown>)
       : {};
-  const preservedServers = { ...existingServers };
+  const preservedServers = Object.fromEntries(
+    Object.entries(existingServers).filter(([name, server]) => {
+      if (managedNames.has(name) && !Object.prototype.hasOwnProperty.call(desired, name)) {
+        return false;
+      }
+      if (!wrapperScript || !connectorRegistry) return true;
+      if (!server || typeof server !== "object" || Array.isArray(server)) return true;
+      const value = server as Record<string, unknown>;
+      return !(
+        Array.isArray(value.args)
+        && value.args[0] === wrapperScript
+        && value.args[1] === connectorRegistry
+      );
+    })
+  );
   if (desired.dataAnalyticsWidgets && !desired.datascienceWidgets) {
     delete preservedServers.datascienceWidgets;
   }
-  const next = { ...existing, mcpServers: { ...preservedServers, ...desired } };
-
-  const nextText = `${JSON.stringify(next, null, 2)}\n`;
   let prevText = "";
   try {
     prevText = readFileSync(geminiMcpConfigPath, "utf8");
   } catch {
     prevText = "";
   }
+  if (count === 0 && prevText === "") return { changed: false, count };
+
+  const next = { ...existing, mcpServers: { ...preservedServers, ...desired } };
+  const nextText = `${JSON.stringify(next, null, 2)}\n`;
   if (nextText === prevText) return { changed: false, count };
 
   mkdirSync(dirname(geminiMcpConfigPath), { recursive: true });

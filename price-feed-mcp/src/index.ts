@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
- * price-feed-mcp — independent MCP server for near-real-time US stock quotes.
+ * price-feed-mcp — independent MCP server for near-real-time stock quotes.
  *
- * Tool: get_quote(symbol) -> { price, currency, source, delaySeconds, asOf, attempts }
+ * Tools:
+ * - get_quote(symbol) -> { price, currency, source, delaySeconds, asOf, attempts }
+ * - get_order_book(symbol) -> { asks, bids, bestAsk, bestBid, spread, ... }
  *
  * Source: Toss Securities only. Public Yahoo/Google-style fallbacks are
  * intentionally not wired into the real-money order gate.
@@ -11,7 +13,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { getQuote } from "./feed.js";
+import { getOrderBook, getQuote } from "./feed.js";
 import { tossConfigured } from "./providers.js";
 
 const server = new McpServer({
@@ -24,7 +26,7 @@ server.registerTool(
   {
     title: "Get stock quote",
     description:
-      "Get a near-real-time US stock quote from Toss Securities. " +
+      "Get a near-real-time stock quote from Toss Securities. " +
       "Returns price, currency, source, and the data delay in seconds so the " +
       "caller can decide whether the quote is usable for the order gate. " +
       "Usage: { \"symbol\": \"AAPL\" }.",
@@ -32,13 +34,46 @@ server.registerTool(
       symbol: z
         .string()
         .min(1)
-        .max(12)
-        .describe("US ticker symbol, e.g. AAPL"),
+        .max(20)
+        .describe("Ticker symbol, e.g. AAPL or 005930"),
     },
   },
   async ({ symbol }) => {
     try {
       const result = await getQuote(symbol);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Error: ${message}` }],
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "get_order_book",
+  {
+    title: "Get stock order book",
+    description:
+      "Get a stock order book from Toss Securities. " +
+      "Returns asks, bids, bestAsk, bestBid, spread, currency, source, and " +
+      "data delay in seconds for IBKR order-gate use. " +
+      "Usage: { \"symbol\": \"AAPL\" }.",
+    inputSchema: {
+      symbol: z
+        .string()
+        .min(1)
+        .max(20)
+        .describe("Ticker symbol, e.g. AAPL or 005930"),
+    },
+  },
+  async ({ symbol }) => {
+    try {
+      const result = await getOrderBook(symbol);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -71,7 +106,8 @@ server.registerTool(
       fallbackOrder: ["toss"],
       note:
         "Yahoo and Google stock API fallbacks are intentionally removed. " +
-        "When Toss is not configured or fails, get_quote fails closed.",
+        "When Toss is not configured or fails, get_quote and get_order_book " +
+        "fail closed.",
     };
     return {
       content: [{ type: "text", text: JSON.stringify(status, null, 2) }],

@@ -24,15 +24,20 @@ def emit(payload: dict[str, Any]) -> None:
   sys.stdout.flush()
 
 
-def load_mcp_servers(path: str) -> list[Any]:
+def load_mcp_servers(path: str, allowed_names: list[str] | None = None) -> list[Any]:
   if not path:
     return []
   try:
     registry = json.loads(Path(path).read_text(encoding="utf-8"))
   except (OSError, json.JSONDecodeError):
     return []
+  allowed = {name.strip() for name in allowed_names or [] if isinstance(name, str) and name.strip()}
+  if not allowed:
+    return []
   servers: list[Any] = []
   for name, config in registry.items():
+    if name not in allowed:
+      continue
     if not isinstance(config, dict):
       continue
     try:
@@ -214,7 +219,10 @@ async def run() -> None:
       save_dir=str(Path.home() / ".local/share/telegram-claude-orchestrator/agy-conversations"),
       app_data_dir=str(Path.home() / ".local/share/telegram-claude-orchestrator/agy-app-data"),
       skills_paths=init.get("skillsPaths") or None,
-      mcp_servers=load_mcp_servers(init.get("connectorRegistry") or ""),
+      mcp_servers=load_mcp_servers(
+          init.get("connectorRegistry") or "",
+          init.get("mcpServerNames") or [],
+      ),
   )
 
   async with Agent(config) as agent:

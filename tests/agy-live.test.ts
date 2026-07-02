@@ -23,6 +23,7 @@ function liveOptions() {
     conversationId: null,
     systemInstructions: "You are a concise assistant for a live cancellation test.",
     connectorRegistry: join(homedir(), ".claude", "shared-resources", "connectors.json"),
+    mcpServerNames: [],
     skillsPaths: [
       join(homedir(), ".claude", "skills"),
       join(homedir(), ".codex", "skills"),

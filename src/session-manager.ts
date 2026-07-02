@@ -63,6 +63,7 @@ import type {
   ProjectConfig,
   ProviderKind,
   SessionRecord,
+  SessionStatus,
   UsageSnapshot
 } from "./types.js";
 import {
@@ -162,7 +163,7 @@ import {
 } from "./session-collectors.js";
 import { AgyInteractiveSession, type AgyAttachment, type AgyInteractiveTurnResult, type AgyLiveStatus } from "./agy-interactive.js";
 import { AgyCliSession } from "./agy-cli.js";
-import { CodexAppServerGoalClient, type CodexGoalClient } from "./codex-app-server.js";
+import type { CodexGoalClient } from "./codex-app-server.js";
 import {
   buildPeerCritiquePrompt,
   buildJudgePrompt,
@@ -380,6 +381,7 @@ interface SessionManagerOptions {
   agyExecutable?: string | undefined;
   geminiApiKey?: string | undefined;
   agySdkPython?: string | undefined;
+  agyMcpServers?: readonly string[] | undefined;
   mcpToolTimeoutMs: number;
   mcpMaxAttempts: number;
   codexMcpTimeoutMs: number;
@@ -460,7 +462,7 @@ export interface ResetContextResult {
   reason?: string;
 }
 
-export type GoalSetResult = "queued" | "active" | "stored" | "native";
+export type GoalSetResult = "queued" | "active" | "stored" | "native" | "fallback";
 
 export interface SynthesisResult {
   ok: boolean;
@@ -525,6 +527,14 @@ export function resultFailureText(
   return message.subtype === "success" ? null : text || "Claude 실행이 실패했습니다.";
 }
 
+function isTerminalSessionStatus(status: SessionStatus): boolean {
+  return status === "done"
+    || status === "verification_failed"
+    || status === "aborted"
+    || status === "error"
+    || status === "interrupted";
+}
+
 
 function limitResumeRequest(
   request: RunRequest,
@@ -565,7 +575,7 @@ export class SessionManager {
   // Codex 다중 계정 풀(CODEX_HOME 디렉터리 기준, sticky 선택 + reactive 페일오버).
   private readonly codexAccountPool: CodexAccountPool;
   private readonly codexUsageByHome = new Map<string, CodexUsageSnapshot>();
-  private readonly codexGoalClient: CodexGoalClient;
+  private readonly codexGoalClient: CodexGoalClient | undefined;
 
   constructor(
     private readonly store: StateStore,
@@ -587,7 +597,7 @@ export class SessionManager {
       ? options.codexAccountHomes
       : [process.env.CODEX_HOME?.trim() || join(homedir(), ".codex")];
     this.codexAccountPool = new CodexAccountPool(codexHomes);
-    this.codexGoalClient = options.codexGoalClient ?? new CodexAppServerGoalClient();
+    this.codexGoalClient = options.codexGoalClient;
     this.restoreCodexAccountState();
   }
 
@@ -670,21 +680,22 @@ export class SessionManager {
   }
 
   resume(session: SessionRecord, prompt: string): boolean {
-    if (this.active.has(session.id)) return false;
+    const current = this.store.getSession(session.id) ?? session;
+    if (this.active.has(session.id) && !isTerminalSessionStatus(current.status)) return false;
     // Codex 세션은 스레드를 새로 시작할 수 있어 항상 이어 갈 수 있다. Claude 세션은 이어 갈
     // SDK 세션 id가 있어야 한다. 제공사 전환 직후(handoffSummary 보유)에는 양쪽 모두 새
     // 맥락에서 요약을 받아 시작하므로 재개 핸들 없이도 진행한다.
-    const canResume = session.provider === "codex"
-      || session.provider === "agy"
-      || !!session.sdkSessionId
-      || !!session.handoffSummary;
+    const canResume = current.provider === "codex"
+      || current.provider === "agy"
+      || !!current.sdkSessionId
+      || !!current.handoffSummary;
     if (!canResume) return false;
-    this.store.updateSession(session.id, { status: "queued" });
+    this.store.updateSession(current.id, { status: "queued" });
     this.enqueue({
-      session: this.store.getSession(session.id) ?? session,
+      session: this.store.getSession(current.id) ?? current,
       prompt,
-      ...(session.provider === "claude" && session.sdkSessionId
-        ? { resumeSessionId: session.sdkSessionId }
+      ...(current.provider === "claude" && current.sdkSessionId
+        ? { resumeSessionId: current.sdkSessionId }
         : {})
     });
     return true;
@@ -719,8 +730,9 @@ export class SessionManager {
   }
 
   /**
-   * 목표를 설정한다. Claude는 네이티브 `/goal`, Codex는 app-server `thread/goal/set`에
-   * 우선 연결한다. Antigravity는 현재 동등한 goal 제어 API가 없어 기존 ChatKJB 자동 진행을 쓴다.
+   * 목표를 설정한다. Codex 네이티브 goal은 가능한 경우에만 사용하고, 실패하면 기존
+   * ChatKJB 자동 진행으로 폴백한다. Claude/Antigravity는 안정적인 외부 goal 제어 API가
+   * 확인되지 않았으므로 ChatKJB 자동 진행을 쓴다.
    */
   async setGoal(sessionId: string, condition: string): Promise<GoalSetResult> {
     const session = this.store.getSession(sessionId);
@@ -730,25 +742,16 @@ export class SessionManager {
     const clean = normalizeGoalCondition(condition);
     this.store.updateSession(sessionId, { goalCondition: clean });
     this.goalRounds.set(sessionId, 0);
+    let nativeGoalFailed = false;
 
-    if (session.provider === "codex" && session.codexThreadId) {
-      await this.setCodexNativeGoal(session, clean);
-      return "native";
-    }
-
-    if (session.provider === "claude") {
-      if (this.active.has(sessionId)) {
-        return this.enqueueNativeClaudeGoal(sessionId, clean) ? "active" : "stored";
+    if (session.provider === "codex" && session.codexThreadId && this.codexGoalClient) {
+      try {
+        await this.setCodexNativeGoal(session, clean);
+        return "native";
+      } catch (error) {
+        nativeGoalFailed = true;
+        console.warn(`Codex native goal failed, falling back to ChatKJB goal: ${safeErrorMessage(error)}`);
       }
-      if (!session.sdkSessionId) return "stored";
-      this.store.updateSession(sessionId, { status: "queued" });
-      this.enqueue({
-        session: this.store.getSession(sessionId) ?? session,
-        prompt: `/goal ${clean}`,
-        operation: "goal_native",
-        resumeSessionId: session.sdkSessionId
-      });
-      return "queued";
     }
 
     if (this.active.has(sessionId)) return "active";
@@ -758,25 +761,16 @@ export class SessionManager {
       session: this.store.getSession(sessionId) ?? session,
       prompt: buildGoalPrompt(clean)
     });
-    return "queued";
+    return nativeGoalFailed ? "fallback" : "queued";
   }
 
   private async setCodexNativeGoal(session: SessionRecord, condition: string): Promise<void> {
-    if (!session.codexThreadId) return;
+    if (!session.codexThreadId || !this.codexGoalClient) return;
     const codexHome = this.selectCodexHome(session);
     await this.codexGoalClient.setGoal(session.codexThreadId, condition, { codexHome });
     if (session.codexHome !== codexHome) {
       this.store.updateSession(session.id, { codexHome });
     }
-  }
-
-  private enqueueNativeClaudeGoal(sessionId: string, condition: string): boolean {
-    const run = this.active.get(sessionId);
-    if (!run) return false;
-    run.pendingTurns += 1;
-    if (run.input.push(buildUserMessage(`/goal ${condition}`, "next"))) return true;
-    run.pendingTurns -= 1;
-    return false;
   }
 
   /** 저장소에 남긴 목표 상태를 끈다. 끌 목표가 있었으면 true. */
@@ -795,24 +789,14 @@ export class SessionManager {
     if (!session) return had;
 
     if (session.provider === "codex" && session.codexThreadId) {
+      if (!this.codexGoalClient) return had;
       const codexHome = this.selectCodexHome(session);
-      const cleared = await this.codexGoalClient.clearGoal(session.codexThreadId, { codexHome });
-      return had || cleared;
-    }
-
-    if (session.provider === "claude") {
-      if (this.active.has(sessionId)) {
-        return this.enqueueNativeClaudeGoal(sessionId, "clear") || had;
+      try {
+        const cleared = await this.codexGoalClient.clearGoal(session.codexThreadId, { codexHome });
+        return had || cleared;
+      } catch (error) {
+        console.warn(`Codex native goal clear failed: ${safeErrorMessage(error)}`);
       }
-      if (!session.sdkSessionId) return had;
-      this.store.updateSession(sessionId, { status: "queued" });
-      this.enqueue({
-        session: this.store.getSession(sessionId) ?? session,
-        prompt: "/goal clear",
-        operation: "goal_native",
-        resumeSessionId: session.sdkSessionId
-      });
-      return true;
     }
 
     return had;
@@ -847,13 +831,10 @@ export class SessionManager {
   private async clearProviderGoal(sessionId: string): Promise<boolean> {
     const session = this.store.getSession(sessionId);
     if (!session) return false;
-    if (session.provider === "codex" && session.codexThreadId) {
+    if (session.provider === "codex" && session.codexThreadId && this.codexGoalClient) {
       return this.codexGoalClient.clearGoal(session.codexThreadId, {
         codexHome: this.selectCodexHome(session)
       });
-    }
-    if (session.provider === "claude" && this.active.has(sessionId)) {
-      return this.enqueueNativeClaudeGoal(sessionId, "clear");
     }
     return false;
   }
@@ -1044,6 +1025,11 @@ export class SessionManager {
 
   isActive(sessionId: string): boolean {
     return this.active.has(sessionId);
+  }
+
+  isFinalizing(sessionId: string): boolean {
+    const session = this.store.getSession(sessionId);
+    return !!session && this.active.has(sessionId) && isTerminalSessionStatus(session.status);
   }
 
   inspect(): SessionInspection[] {
@@ -1952,9 +1938,9 @@ export class SessionManager {
           codexThreadId = thread.id;
           this.store.updateSession(session.id, { codexThreadId });
           const updated = this.store.getSession(session.id);
-          if (updated?.goalCondition) {
+          if (updated?.goalCondition && this.codexGoalClient) {
             await this.setCodexNativeGoal(updated, updated.goalCondition).catch((error: unknown) => {
-              renderer.note(`Codex 네이티브 목표 동기화 실패: ${safeErrorMessage(error, this.oauthTokens)}`);
+              console.warn(`Codex native goal sync failed: ${safeErrorMessage(error, this.oauthTokens)}`);
             });
           }
         }
@@ -2091,7 +2077,8 @@ export class SessionManager {
       cwd: session.cwd,
       model,
       permissionMode,
-      thinkingLevel
+      thinkingLevel,
+      agyMcpServers: this.options.agyMcpServers ?? []
     });
     const existing = this.agyInteractiveSessions.get(session.id);
     if (existing?.signature === signature && existing.client.alive) return existing.client;
@@ -2134,6 +2121,7 @@ export class SessionManager {
       conversationId: session.agyConversationId,
       systemInstructions: buildProviderBootstrap(session, this.options.claudeMemoryDir),
       connectorRegistry: join(homedir(), ".claude", "shared-resources", "connectors.json"),
+      mcpServerNames: this.options.agyMcpServers ?? [],
       skillsPaths: [
         join(homedir(), ".claude", "skills"),
         join(homedir(), ".codex", "skills"),

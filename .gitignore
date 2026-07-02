@@ -2,6 +2,7 @@ node_modules
 dist/
 __pycache__/
 .env
+Toss_API_KEY.yaml
 data/
 *.log
 projects.json

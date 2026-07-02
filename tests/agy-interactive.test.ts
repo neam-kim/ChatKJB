@@ -84,6 +84,7 @@ function makeStartedSession(options?: Partial<AgyInteractiveOptions>) {
     conversationId: "conv-test",
     systemInstructions: "",
     connectorRegistry: "",
+    mcpServerNames: [],
     skillsPaths: [],
     env: {},
     ...options

@@ -718,6 +718,7 @@ export function createBot(config: AppConfig, store: StateStore) {
     claudeMemoryDir: config.claudeMemoryDir,
     geminiApiKey: config.geminiApiKey,
     agySdkPython: config.agySdkPython,
+    agyMcpServers: config.agyMcpServers,
     modelCatalog: config.modelCatalog,
     ...(config.claudeCodeExecutable
       ? { claudeCodeExecutable: config.claudeCodeExecutable }
@@ -2027,26 +2028,28 @@ export function createBot(config: AppConfig, store: StateStore) {
     if (result === "queued") {
       await ctx.reply(
         `목표를 설정하고 작업을 시작합니다.\n조건: ${arg}\n`
-        + (session.provider === "claude"
-          ? "Claude 네이티브 /goal 명령으로 전달합니다. /goal clear 또는 /stop 으로 중단."
-          : `충족될 때까지 자동으로 턴을 이어 가며 최대 ${MAX_GOAL_ROUNDS}턴까지 진행합니다. `
-            + "매 턴 종료 후 `check:` 명령(있으면)을 먼저 실행해 객관 판정하고, 나머지는 판관 모델이 평가합니다. /goal clear 또는 /stop 으로 중단. 한도 회복 자동 재개만 취소하려면 /restop.")
+        + `충족될 때까지 자동으로 턴을 이어 가며 최대 ${MAX_GOAL_ROUNDS}턴까지 진행합니다. `
+        + "매 턴 종료 후 `check:` 명령(있으면)을 먼저 실행해 객관 판정하고, 나머지는 판관 모델이 평가합니다. /goal clear 또는 /stop 으로 중단. 한도 회복 자동 재개만 취소하려면 /restop."
       );
     } else if (result === "native") {
       await ctx.reply(
         `목표를 Codex 네이티브 목표로 설정했습니다.\n조건: ${arg}\n`
         + "ChatKJB는 이 조건을 상태 표시에도 보존합니다. /goal clear 또는 /stop 으로 중단."
       );
+    } else if (result === "fallback") {
+      await ctx.reply(
+        `목표를 설정하고 ChatKJB 자동 진행으로 전환했습니다.\n조건: ${arg}\n`
+        + `Codex 네이티브 목표 API를 사용할 수 없어 최대 ${MAX_GOAL_ROUNDS}턴까지 이어 갑니다. `
+        + "/goal clear 또는 /stop 으로 중단. 한도 회복 자동 재개만 취소하려면 /restop."
+      );
     } else if (result === "active") {
       await ctx.reply(
-        session.provider === "claude"
-          ? `목표를 Claude 네이티브 /goal 명령으로 전달했습니다. 현재 턴 뒤 같은 세션에서 반영됩니다.\n조건: ${arg}`
-          : `목표를 설정했습니다. 현재 실행 중인 작업이 끝나면 달성 여부를 평가하고 미달성이면 자동으로 이어 갑니다.\n조건: ${arg}`
+        `목표를 설정했습니다. 현재 실행 중인 작업이 끝나면 달성 여부를 평가하고 미달성이면 자동으로 이어 갑니다.\n조건: ${arg}`
       );
     } else {
       await ctx.reply(
         session.provider === "codex"
-          ? `목표를 저장했습니다. Codex 스레드가 아직 없어 네이티브 목표는 다음 Codex 스레드 생성 후 설정할 수 있습니다.\n조건: ${arg}`
+          ? `목표를 저장했습니다. Codex 스레드가 아직 없어 이 토픽에서 작업을 한 번 실행하면 ChatKJB 자동 진행을 시작합니다.\n조건: ${arg}`
           : `목표를 저장했습니다. 이 토픽에서 작업을 한 번 실행(메시지 전송)하면 그 이후부터 목표를 향해 자동 진행합니다.\n조건: ${arg}`
       );
     }
@@ -3107,7 +3110,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       await ctx.reply("/new로 새 작업을 시작하거나 세션 토픽에 메시지를 입력하세요.");
       return;
     }
-    if (sessions.isActive(existing.id)) {
+    if (sessions.isActive(existing.id) && !sessions.isFinalizing(existing.id)) {
       await ctx.reply(
         "현재 작업이 실행 중입니다.\n"
         + "현재 작업을 수정하려면 `/steer 지시`, 끝난 뒤 실행하려면 `/next 지시`를 사용하세요."
