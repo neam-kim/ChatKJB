@@ -1,4 +1,4 @@
-import "dotenv/config";
+import { config as loadDotenv } from "dotenv";
 import {
   accessSync,
   constants,
@@ -12,6 +12,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { FALLBACK_MODEL_CATALOG } from "./model-catalog.js";
 import { filesystemPath } from "./filesystem-path.js";
+import { projectSourceDir } from "./runtime-paths.js";
 import type { ProjectConfig } from "./types.js";
 
 export const CLAUDE_OAUTH_TOKEN_PATTERN = /^sk-ant-oat01-[A-Za-z0-9_-]+$/;
@@ -85,6 +86,10 @@ const projectSchema = z.object({
   defaultMode: z.enum(["default", "acceptEdits", "plan", "dontAsk", "auto"]).default("auto")
 });
 
+function skipProjectDirectoryValidation(): boolean {
+  return process.env.CHATKJB_SKIP_PROJECT_DIRECTORY_VALIDATION === "1";
+}
+
 function normalizeProject(project: z.infer<typeof projectSchema>): ProjectConfig {
   return {
     name: project.name,
@@ -96,9 +101,14 @@ function normalizeProject(project: z.infer<typeof projectSchema>): ProjectConfig
 
 export type AppConfig = Awaited<ReturnType<typeof loadConfig>>;
 
+function projectBaseDir(): string {
+  const configured = process.env.CHATKJB_CONFIG_BASE_DIR?.trim();
+  return configured ? resolve(configured) : projectSourceDir();
+}
+
 function absolutePath(path: string): string {
   const expanded = path.trim().replace(/^~(?=\/|$)/, homedir());
-  return isAbsolute(expanded) ? expanded : resolve(process.cwd(), expanded);
+  return isAbsolute(expanded) ? expanded : resolve(projectBaseDir(), expanded);
 }
 
 export function parseTelegramAllowedUserIds(
@@ -176,8 +186,7 @@ function resolveAgyExecutable(explicit: string | undefined): string {
   return existsSync(local) ? local : "agy";
 }
 
-function validateEnvironmentFile(): void {
-  const path = resolve(process.cwd(), ".env");
+function validateEnvironmentFile(path = resolve(projectBaseDir(), ".env")): void {
   if (!existsSync(path)) return;
   const permissions = statSync(path).mode & 0o777;
   if (permissions !== 0o600) {
@@ -187,6 +196,9 @@ function validateEnvironmentFile(): void {
 
 function validateProjectDirectory(path: string): string {
   const fsPath = filesystemPath(path);
+  if (skipProjectDirectoryValidation()) {
+    return fsPath;
+  }
   accessSync(fsPath, constants.R_OK | constants.W_OK);
   const canonical = realpathSync(fsPath);
   if (!statSync(canonical).isDirectory()) {
@@ -371,7 +383,13 @@ export async function removeProject(
 }
 
 export async function loadConfig() {
-  validateEnvironmentFile();
+  const envPath = process.env.CHATKJB_ENV_PATH?.trim()
+    ? resolve(process.env.CHATKJB_ENV_PATH)
+    : resolve(projectBaseDir(), ".env");
+  validateEnvironmentFile(envPath);
+  if (!process.env.TELEGRAM_BOT_TOKEN) {
+    loadDotenv({ path: envPath, quiet: true });
+  }
   const env = environmentSchema.parse(process.env);
   if (env.AGY_BACKEND === "api" && !env.GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY가 필요합니다. Antigravity 구독 CLI 모드는 AGY_BACKEND=cli로 설정하십시오.");

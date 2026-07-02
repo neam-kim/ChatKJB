@@ -10,7 +10,7 @@
 // 셸 래퍼(run-daemon.sh)를 쓰지 않는 이유: launchd 컨텍스트의 /bin/bash는
 // CloudStorage 경로 접근이 거부되지만(Operation not permitted), node는 허용된다.
 
-import { cpSync, existsSync, lstatSync, mkdirSync, renameSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,27 +21,15 @@ const projectDir = process.env.CHATKJB_PROJECT_DIR
 const nm = join(projectDir, "node_modules");
 const localNm = join(homedir(), ".local", "share", "telegram-claude-orchestrator", "node_modules");
 
-// 동일 볼륨이 아니면 renameSync는 EXDEV로 실패하므로 복사 후 삭제로 폴백한다.
-function relocate(from, to) {
-  try {
-    renameSync(from, to);
-  } catch (error) {
-    if (error?.code !== "EXDEV") throw error;
-    cpSync(from, to, { recursive: true });
-    rmSync(from, { recursive: true, force: true });
-  }
-}
-
 try {
   const stat = existsSync(nm) ? lstatSync(nm) : null;
   if (stat?.isSymbolicLink()) {
     // 이미 심링크 — 정상. 아무것도 하지 않는다.
   } else if (stat?.isDirectory()) {
-    mkdirSync(dirname(localNm), { recursive: true });
-    if (existsSync(localNm)) rmSync(localNm, { recursive: true, force: true });
-    relocate(nm, localNm);
-    symlinkSync(localNm, nm);
-    console.error(`[preload] node_modules를 비클라우드 경로로 이전했습니다: ${localNm}`);
+    // Node 26/macOS launchd 조합에서는 CloudStorage 작업 중 rename이 기동 전에
+    // 무기한 멈출 수 있다. 무거운 이전은 install-launch-agent.mjs에서 끝내고,
+    // 여기서는 데몬 시작을 막지 않기 위해 경고만 남긴다.
+    console.error(`[preload] node_modules가 아직 로컬 심링크가 아닙니다. npm run launchd:install을 다시 실행하십시오: ${nm}`);
   } else if (!stat && existsSync(localNm)) {
     symlinkSync(localNm, nm); // 심링크만 사라진 경우 복구
   }

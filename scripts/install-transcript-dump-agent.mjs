@@ -18,6 +18,7 @@ const label = "com.neam.telegram-claude-orchestrator.transcript-dump";
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const nodePath = process.execPath;
 const scriptPath = join(projectDir, "scripts", "dump-transcripts.mjs");
+const runtimeDir = join(homedir(), ".local", "share", "telegram-claude-orchestrator", "runtime");
 
 function argval(name, fallback) {
   const i = process.argv.indexOf(name);
@@ -59,6 +60,7 @@ function xml(value) {
 }
 
 mkdirSync(agentDir, { recursive: true });
+mkdirSync(runtimeDir, { recursive: true });
 const logDir = join(homedir(), "Library", "Logs", label);
 mkdirSync(logDir, { recursive: true });
 const stdoutLog = join(logDir, "stdout.log");
@@ -77,7 +79,7 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <string>${xml(scriptPath)}</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${xml(projectDir)}</string>
+  <string>${xml(runtimeDir)}</string>
   <key>StartCalendarInterval</key>
   <array>
 ${hours

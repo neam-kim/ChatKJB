@@ -14,6 +14,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import { projectSourceDir } from "./runtime-paths.js";
 import {
   loadMergedConnectors,
   syncAgyMcpConfig,
@@ -54,7 +55,7 @@ function defaultPaths(): SharedResourcePaths {
     routerSkill: join(sharedRoot, "shared-skill-router"),
     codexConfig: join(home, ".codex", "config.toml"),
     agyMcpConfig: join(home, ".gemini", "config", "mcp_config.json"),
-    wrapperScript: resolve(process.cwd(), "scripts", "run-shared-mcp.mjs"),
+    wrapperScript: resolve(projectSourceDir(), "scripts", "run-shared-mcp.mjs"),
     skillRoots: [
       join(home, ".claude", "skills"),
       join(home, ".codex", "skills"),

@@ -1,5 +1,16 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -12,6 +23,11 @@ const agentPath = join(agentDir, `${label}.plist`);
 const runtimeDir = join(homedir(), ".local", "share", "telegram-claude-orchestrator", "runtime");
 const runtimeDist = join(runtimeDir, "dist");
 const runtimePreload = join(runtimeDir, "ensure-local-node-modules.mjs");
+const runtimeEnv = join(runtimeDir, ".env");
+const runtimeProjects = join(runtimeDir, "projects.json");
+const runtimeData = join(runtimeDir, "data");
+const projectNodeModules = join(projectDir, "node_modules");
+const localNodeModules = join(homedir(), ".local", "share", "telegram-claude-orchestrator", "node_modules");
 const uid = process.getuid?.();
 
 function sleepMs(ms) {
@@ -27,9 +43,74 @@ function xml(value) {
     .replaceAll("'", "&apos;");
 }
 
+function relocate(from, to) {
+  try {
+    renameSync(from, to);
+  } catch (error) {
+    if (error?.code !== "EXDEV") throw error;
+    cpSync(from, to, { recursive: true });
+    rmSync(from, { recursive: true, force: true });
+  }
+}
+
+function nodeModulesBackupPath() {
+  const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+  for (let index = 0; index < 100; index += 1) {
+    const suffix = index === 0 ? stamp : `${stamp}-${index}`;
+    const candidate = `${projectNodeModules}.cloudstorage-broken-${suffix}`;
+    if (!existsSync(candidate)) return candidate;
+  }
+  throw new Error("node_modules 백업 경로를 만들 수 없습니다.");
+}
+
+function ensureLocalNodeModules() {
+  const stat = existsSync(projectNodeModules) ? lstatSync(projectNodeModules) : null;
+  if (stat?.isSymbolicLink()) return;
+
+  mkdirSync(dirname(localNodeModules), { recursive: true });
+  if (!stat) {
+    if (existsSync(localNodeModules)) symlinkSync(localNodeModules, projectNodeModules);
+    return;
+  }
+  if (!stat.isDirectory()) return;
+
+  if (existsSync(localNodeModules)) {
+    const backup = nodeModulesBackupPath();
+    renameSync(projectNodeModules, backup);
+    symlinkSync(localNodeModules, projectNodeModules);
+    console.log(`node_modules preserved: ${localNodeModules}`);
+    console.log(`cloud node_modules moved aside: ${backup}`);
+    return;
+  }
+
+  relocate(projectNodeModules, localNodeModules);
+  symlinkSync(localNodeModules, projectNodeModules);
+  console.log(`node_modules relocated: ${localNodeModules}`);
+}
+
+function copyRuntimeConfig() {
+  const projectEnv = join(projectDir, ".env");
+  if (existsSync(projectEnv)) {
+    copyFileSync(projectEnv, runtimeEnv);
+    chmodSync(runtimeEnv, 0o600);
+  }
+
+  if (!existsSync(runtimeProjects)) {
+    const projectProjects = join(projectDir, "projects.json");
+    if (existsSync(projectProjects)) copyFileSync(projectProjects, runtimeProjects);
+  }
+
+  if (!existsSync(runtimeData)) {
+    const projectData = join(projectDir, "data");
+    if (existsSync(projectData)) cpSync(projectData, runtimeData, { recursive: true });
+  }
+}
+
+ensureLocalNodeModules();
 mkdirSync(join(projectDir, "data"), { recursive: true });
 mkdirSync(agentDir, { recursive: true });
 mkdirSync(runtimeDir, { recursive: true });
+copyRuntimeConfig();
 rmSync(runtimeDist, { recursive: true, force: true });
 cpSync(join(projectDir, "dist"), runtimeDist, { recursive: true });
 copyFileSync(join(projectDir, "scripts", "ensure-local-node-modules.mjs"), runtimePreload);
@@ -55,6 +136,12 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
   <dict>
     <key>CHATKJB_PROJECT_DIR</key>
     <string>${xml(projectDir)}</string>
+    <key>CHATKJB_ENV_PATH</key>
+    <string>${xml(runtimeEnv)}</string>
+    <key>CHATKJB_CONFIG_BASE_DIR</key>
+    <string>${xml(runtimeDir)}</string>
+    <key>CHATKJB_SKIP_PROJECT_DIRECTORY_VALIDATION</key>
+    <string>1</string>
   </dict>
   <key>ProgramArguments</key>
   <array>
@@ -64,7 +151,7 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <string>${xml(join(runtimeDist, "index.js"))}</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${xml(projectDir)}</string>
+  <string>${xml(runtimeDir)}</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

@@ -42,6 +42,7 @@ import {
   sharedResourceGuidePath,
   syncSharedResources
 } from "./resource-sync.js";
+import { projectSourceDir } from "./runtime-paths.js";
 import {
   agyModelLabel,
   codexModelLabel,
@@ -2125,7 +2126,7 @@ export class SessionManager {
         "bin",
         "python"
       ),
-      bridgePath: resolve(process.cwd(), "scripts", "agy-sdk-bridge.py"),
+      bridgePath: resolve(projectSourceDir(), "scripts", "agy-sdk-bridge.py"),
       cwd: session.cwd,
       model,
       thinkingLevel,

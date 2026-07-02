@@ -9,6 +9,7 @@ import { Bot, InlineKeyboard, Keyboard } from "grammy";
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { addProject, removeProject, resolveProject, type AppConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
+import { projectSourceDir } from "./runtime-paths.js";
 import {
   agyModelLabel,
   agyThinkingLabel,
@@ -1422,7 +1423,7 @@ export function createBot(config: AppConfig, store: StateStore) {
       config,
       store,
       getTelegramMe: () => bot.api.getMe(),
-      projectDir: process.cwd()
+      projectDir: projectSourceDir()
     });
     for (let offset = 0; offset < report.length; offset += 3900) {
       await ctx.reply(report.slice(offset, offset + 3900));
