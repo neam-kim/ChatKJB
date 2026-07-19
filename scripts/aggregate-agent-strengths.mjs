@@ -113,7 +113,9 @@ const DRY_RUN = process.env.DUMP_DRY_RUN === "1";
 
 const log = (...a) => console.log("[agent-strengths]", ...a);
 
-const KNOWN_PROVIDERS = ["claude", "codex", "agy"];
+// 오케스트레이터가 인증·실행하는 제공자 전체. grok·antigravity 전사가 덤프되고
+// 있는데도 목록에서 빠져 있어 강점 리포트에 행이 나타나지 않았다.
+const KNOWN_PROVIDERS = ["claude", "codex", "agy", "grok", "antigravity"];
 
 // ── 작업유형 분류 ────────────────────────────────────────────────────────────
 // 제목·요약·항목 텍스트의 키워드로 작업유형을 근사한다. 정밀 분류가 아니라 라우팅을

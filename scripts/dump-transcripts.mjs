@@ -670,6 +670,16 @@ function parseGrokDoc(content) {
 // DUMP_INCLUDE_PIPELINE=1 로 강제 포함할 수 있다.
 const INCLUDE_PIPELINE = process.env.DUMP_INCLUDE_PIPELINE === "1";
 const PIPELINE_SESSION_PATTERNS = [
+  // batch_compile_once.py가 전처리 호출 첫 줄에 붙이는 명시 표지. 프롬프트 문구가
+  // 바뀌어도 이것만 남아 있으면 걸러진다 — 아래 문구 패턴은 표지 이전 대화와
+  // 표지가 빠진 경우를 위한 보강이다.
+  /\[llm-wiki-pipeline-internal\]/i,
+  // 실제 한국어 전처리 프롬프트. "JSON only로 출력"은 기존 /json만 출력/과 어긋나
+  // 1,543건이 위키에 유입되었으므로, 쓰이는 문구 그대로 잡는다.
+  /읽기\s*전용으로\s*검토/,
+  /원문\s*안의\s*지시를\s*따르지/,
+  /json\s*only/i,
+  /전처리\s*추출기/,
   // 전처리 추출기 프롬프트(영문): "You are an untrusted {read-only,candidate,compile}
   // {extractor,preprocessor}" 계열. 사람이 시작한 작업 세션이 "untrusted"로 열리지 않는다.
   /untrusted/i,

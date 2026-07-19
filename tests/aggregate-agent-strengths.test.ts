@@ -95,6 +95,23 @@ describe("트랜스크립트 수집", () => {
       topic: "ChatKJB",
     });
   });
+
+  it("오케스트레이터가 실행하는 다섯 제공자를 모두 집계한다", () => {
+    // grok·antigravity 전사가 덤프되고 있는데도 목록에서 빠져 강점 리포트에
+    // 행이 나타나지 않았다.
+    const dir = mkdtempSync(join(tmpdir(), "strengths-providers-"));
+    temporaryDirectories.push(dir);
+    const providers = ["claude", "codex", "agy", "grok", "antigravity"];
+    for (const provider of providers) {
+      writeFileSync(
+        join(dir, `${provider}.md`),
+        transcriptFrontmatter({ provider, title: '"버그 수정"', turns: "3" })
+      );
+    }
+
+    const records = collectTranscripts([dir]);
+    expect(records.map((record) => record.provider).sort()).toEqual([...providers].sort());
+  });
 });
 
 describe("결과 로그 snapshot 수집", () => {
