@@ -16,9 +16,11 @@
 //
 // 환경변수 오버라이드(기본값은 아래 상수, dump-transcripts.mjs와 동일 키 공유):
 //   ORCH_STATE_DB, CLAUDE_PROJECTS_DIR, CODEX_ACCOUNT_HOMES, CODEX_SESSIONS_DIR,
-//   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+//   GROK_SESSIONS_DIR, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 //   CLEANUP_RETAIN_DAYS=7, CLEANUP_DRY_RUN=1, CLEANUP_NOTIFY=0
 //   CLEANUP_DELETE_SOURCE=0 / CLEANUP_DELETE_DB=0 / CLEANUP_DELETE_TOPIC=0 (각 단계 끄기)
+//   CLEANUP_AUDIT=1 이면 삭제 대상 경로를 한 줄씩 찍는다. CLEANUP_DRY_RUN=1과 함께 쓰면
+//   memory/·session_search.sqlite 같은 비세션 자산이 섞이지 않았는지 확인할 수 있다.
 
 import {
   existsSync,
@@ -28,7 +30,7 @@ import {
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
@@ -126,6 +128,10 @@ const CODEX_SESSIONS_DIRS = (() => {
   dirs.push(process.env.CODEX_SESSIONS_DIR || join(homedir(), ".codex", "sessions"));
   return [...new Set(dirs)];
 })();
+// grok은 세션당 파일 하나가 아니라 <인코딩된 cwd>/<세션 uuid>/ 디렉터리 한 벌
+// (chat_history.jsonl 등)을 쓴다. 정리 단위도 그 디렉터리다.
+const GROK_SESSIONS_DIR =
+  process.env.GROK_SESSIONS_DIR || join(homedir(), ".grok", "sessions");
 const ENV_FILE = join(REPO_ROOT, ".env");
 
 const RETAIN_DAYS = Math.max(1, Number(process.env.CLEANUP_RETAIN_DAYS || 7));
@@ -226,31 +232,42 @@ function sourceFileForSession(s) {
 // ── 데스크톱 단독 세션(오케스트레이터 미소유) 파일 열거 ──────────────────────
 const CODEX_UUID_RE =
   /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
+const SESSION_UUID_RE =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 function enumerateDesktopFiles(ownedClaude, ownedCodex) {
   const out = []; // { id, provider, file, mtimeMs }
+  // claude는 서브에이전트 전사를 <프로젝트>/<세션 uuid>/ 아래에 둔다. 예전에는 최상위
+  // 한 겹만 읽어 그 파일들이 영원히 남았다. 재귀로 훑되 memory/는 건드리지 않는다 —
+  // 세션 기록이 아니라 영속 메모리 저장소다.
   if (existsSync(CLAUDE_PROJECTS_DIR)) {
-    for (const dir of readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true })) {
-      if (!dir.isDirectory()) continue;
-      const dirPath = join(CLAUDE_PROJECTS_DIR, dir.name);
-      let files;
+    const stack = [CLAUDE_PROJECTS_DIR];
+    while (stack.length) {
+      const dirPath = stack.pop();
+      let entries;
       try {
-        files = readdirSync(dirPath);
+        entries = readdirSync(dirPath, { withFileTypes: true });
       } catch {
         continue;
       }
-      for (const name of files) {
-        if (!name.endsWith(".jsonl")) continue;
-        const id = name.slice(0, -6);
-        if (ownedClaude.has(id)) continue;
-        const file = join(dirPath, name);
+      for (const entry of entries) {
+        const p = join(dirPath, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== "memory") stack.push(p);
+          continue;
+        }
+        if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+        const id = entry.name.slice(0, -6);
+        // 서브에이전트 파일은 자신의 uuid를 쓰기도 하고 부모 세션 디렉터리 아래
+        // 임의 이름을 쓰기도 한다. 둘 중 하나라도 소유 세션이면 보존한다.
+        if (ownedClaude.has(id) || ownedClaude.has(basename(dirPath))) continue;
         let st;
         try {
-          st = statSync(file);
+          st = statSync(p);
         } catch {
           continue;
         }
-        out.push({ id, provider: "claude", file, mtimeMs: st.mtimeMs });
+        out.push({ id, provider: "claude", file: p, mtimeMs: st.mtimeMs });
       }
     }
   }
@@ -286,7 +303,42 @@ function enumerateDesktopFiles(ownedClaude, ownedCodex) {
       }
     }
   }
+  // grok: <sessions>/<인코딩된 cwd>/<세션 uuid>/ 디렉터리 한 벌이 세션 하나다.
+  // sessions 루트의 session_search.sqlite(덤프 봇이 읽는 색인)와 cwd별
+  // prompt_history.jsonl은 세션이 아니므로 uuid 디렉터리만 고른다.
+  if (existsSync(GROK_SESSIONS_DIR)) {
+    for (const cwdEntry of safeReadDir(GROK_SESSIONS_DIR)) {
+      if (!cwdEntry.isDirectory()) continue;
+      const cwdPath = join(GROK_SESSIONS_DIR, cwdEntry.name);
+      for (const sessionEntry of safeReadDir(cwdPath)) {
+        if (!sessionEntry.isDirectory()) continue;
+        const id = sessionEntry.name;
+        if (!SESSION_UUID_RE.test(id)) continue;
+        const dir = join(cwdPath, id);
+        // 세션 디렉터리 안의 가장 최근 수정 시각을 정착 기준으로 삼는다.
+        let mtimeMs = 0;
+        for (const file of safeReadDir(dir)) {
+          if (!file.isFile()) continue;
+          try {
+            mtimeMs = Math.max(mtimeMs, statSync(join(dir, file.name)).mtimeMs);
+          } catch {
+            /* 사라진 파일은 건너뛴다. */
+          }
+        }
+        if (mtimeMs === 0) continue;
+        out.push({ id, provider: "grok", file: dir, directory: true, mtimeMs });
+      }
+    }
+  }
   return out;
+}
+
+function safeReadDir(dir) {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
 }
 
 // ── 텔레그램 포럼 토픽 삭제 ──────────────────────────────────────────────────
@@ -363,7 +415,8 @@ function isInsideVault(p) {
   return norm.startsWith(vault);
 }
 
-function removeFile(file) {
+// grok 세션은 파일 하나가 아니라 디렉터리 한 벌이라 recursive 제거가 필요하다.
+function removeFile(file, recursiveDirectory = false) {
   if (!file) return false;
   if (isInsideVault(file)) {
     log("거부: 볼트 내부 파일은 삭제하지 않음:", file);
@@ -371,7 +424,7 @@ function removeFile(file) {
   }
   if (DRY_RUN) return true;
   try {
-    rmSync(file, { force: true });
+    rmSync(file, { force: true, ...(recursiveDirectory ? { recursive: true } : {}) });
     return true;
   } catch (e) {
     log("파일 삭제 실패:", file, e?.message || e);
@@ -393,6 +446,7 @@ function main() {
     topicDeleted: 0,
     skippedTopicFailure: 0,
     desktopDeleted: 0,
+    desktopByProvider: {},
     skippedRecent: 0,
     skippedActive: 0,
   };
@@ -454,7 +508,11 @@ function main() {
           counters.skippedRecent++;
           continue;
         }
-        if (removeFile(f.file)) counters.desktopDeleted++;
+        if (process.env.CLEANUP_AUDIT === "1") log("AUDIT", f.provider, f.file);
+        if (!removeFile(f.file, f.directory === true)) continue;
+        counters.desktopDeleted++;
+        counters.desktopByProvider[f.provider] =
+          (counters.desktopByProvider[f.provider] || 0) + 1;
       }
     }
   } finally {
@@ -464,7 +522,13 @@ function main() {
   const summary =
     `정리 대상 ${RETAIN_DAYS}일 경과 종료 세션\n` +
     `· 오케스트레이터: 원본 ${counters.orchSourceDeleted} · DB행 ${counters.orchRowDeleted} · 토픽 ${counters.topicDeleted}\n` +
-    `· 데스크톱 원본: ${counters.desktopDeleted}\n` +
+    `· 데스크톱 원본: ${counters.desktopDeleted}` +
+    (counters.desktopDeleted > 0
+      ? ` (${Object.entries(counters.desktopByProvider)
+          .map(([provider, count]) => `${provider} ${count}`)
+          .join(" · ")})`
+      : "") +
+    "\n" +
     `· 보존: 최근 ${counters.skippedRecent} · 진행중 ${counters.skippedActive} · 토픽삭제 실패 ${counters.skippedTopicFailure}` +
     (DRY_RUN ? " [DRY RUN]" : "");
   log(summary.replace(/\n/g, " | "));
@@ -472,6 +536,7 @@ function main() {
 }
 
 export {
+  enumerateDesktopFiles,
   isSessionEligibleForCleanup,
   parseTelegramResponse,
 };
