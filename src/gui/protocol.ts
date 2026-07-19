@@ -6,6 +6,7 @@ export const GUI_ALLOWED_ATTACHMENT_MIME_TYPES = [
   "image/png",
   "image/gif",
   "image/webp",
+  "image/svg+xml",
   "application/pdf",
   "text/plain",
   "application/zip",
@@ -77,6 +78,7 @@ export interface GuiTextEntity {
 export interface GuiAttachment {
   kind: "image" | "document";
   name: string;
+  filenameSource: "telegram" | "sanitized" | "generated";
   mimeType: string;
   size: number;
   width?: number;
@@ -368,14 +370,22 @@ function normalizeEntities(rawEntities: unknown, text: string): GuiTextEntity[] 
   return accepted;
 }
 
-function safeIncomingFilename(value: unknown, fallback: string): string {
-  if (typeof value !== "string") return fallback;
-  let result = value.normalize("NFC")
+function incomingFilename(value: unknown, fallback: string): {
+  name: string;
+  filenameSource: GuiAttachment["filenameSource"];
+} {
+  if (typeof value !== "string") return { name: fallback, filenameSource: "generated" };
+  const normalized = value.normalize("NFC");
+  let result = normalized
     .replace(/[\/\\\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, "_")
     .trim();
-  if (!result || result === "." || result === "..") result = fallback;
+  if (!result || result === "." || result === "..") return { name: fallback, filenameSource: "sanitized" };
   while (Buffer.byteLength(result, "utf8") > 255) result = result.slice(0, -1);
-  return result || fallback;
+  if (!result) return { name: fallback, filenameSource: "sanitized" };
+  return {
+    name: result,
+    filenameSource: result === normalized ? "telegram" : "sanitized"
+  };
 }
 
 function photoDimensions(photo: Record<string, unknown>): {
@@ -418,10 +428,11 @@ function normalizeAttachment(mediaValue: unknown, messageId: number): GuiAttachm
     const photo = record(media["photo"]);
     if (photo?.["className"] !== "Photo") return null;
     const dimensions = photoDimensions(photo);
-    if (dimensions.size < 1 || dimensions.size > GUI_MAX_ATTACHMENT_BYTES) return null;
+    if (!Number.isSafeInteger(dimensions.size) || dimensions.size < 1) return null;
     return {
       kind: "image",
       name: `photo-${messageId}.jpg`,
+      filenameSource: "generated",
       mimeType: "image/jpeg",
       ...dimensions
     };
@@ -434,7 +445,6 @@ function normalizeAttachment(mediaValue: unknown, messageId: number): GuiAttachm
     document?.["className"] !== "Document"
     || size === null
     || size < 1
-    || size > GUI_MAX_ATTACHMENT_BYTES
     || typeof rawMimeType !== "string"
   ) return null;
   const mimeType = ATTACHMENT_MIME_TYPES.has(rawMimeType) ? rawMimeType : "application/octet-stream";
@@ -445,9 +455,11 @@ function normalizeAttachment(mediaValue: unknown, messageId: number): GuiAttachm
     .find((attribute) => attribute?.["className"] === "DocumentAttributeImageSize");
   const width = integer(dimensionAttribute?.["w"]);
   const height = integer(dimensionAttribute?.["h"]);
+  const filename = incomingFilename(filenameAttribute?.["fileName"], `document-${messageId}.bin`);
+  const inlineImage = ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mimeType);
   return {
-    kind: "document",
-    name: safeIncomingFilename(filenameAttribute?.["fileName"], `document-${messageId}.bin`),
+    kind: inlineImage ? "image" : "document",
+    ...filename,
     mimeType,
     size,
     ...(width !== null && width > 0 ? { width } : {}),

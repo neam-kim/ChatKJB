@@ -1,5 +1,8 @@
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type {
   GuiAuthState,
   GuiMessage,
@@ -10,14 +13,17 @@ import type {
 } from "../src/gui/protocol.js";
 import {
   GUI_MAX_PAGE_LIMIT,
+  GUI_PREMIUM_UPLOAD_BYTES,
+  GUI_STANDARD_UPLOAD_BYTES,
+  hasUploadStorageHeadroom,
   startGuiServer,
   type GuiServerClient,
   type GuiServerDiagnostic,
   type GuiServerHandle
 } from "../src/gui/server.js";
 import {
-  GUI_MAX_UPLOAD_BYTES,
   HistoryInvalidatedError,
+  ReadConfirmationPendingError,
   type MessagePage,
   type TelegramUploadInput,
   type TopicPage
@@ -85,6 +91,7 @@ class FakeGuiServerClient implements GuiServerClient {
   readonly findGeneralReplyPanel = vi.fn(async () => this.generalPanel);
   readonly sendText = vi.fn(async (_topicId: number, _text: string) => undefined);
   readonly sendFile = vi.fn(async (_topicId: number, _input: TelegramUploadInput) => undefined);
+  readonly uploadLimitBytes = vi.fn(() => GUI_STANDARD_UPLOAD_BYTES);
   readonly downloadAttachment = vi.fn<GuiServerClient["downloadAttachment"]>(async (_token: string) => ({
     kind: "image" as const,
     name: "safe image.jpg",
@@ -233,6 +240,7 @@ async function startFixture(options: {
   diagnostics?: GuiServerDiagnostic[];
   now?: () => number;
   mutationTimeoutMs?: number;
+  timeoutOverrides?: Parameters<typeof startGuiServer>[0]["timeoutOverrides"];
 } = {}): Promise<{ handle: GuiServerHandle; client: FakeGuiServerClient; diagnostics: GuiServerDiagnostic[]; }> {
   const client = options.client ?? new FakeGuiServerClient();
   const diagnostics = options.diagnostics ?? [];
@@ -240,6 +248,7 @@ async function startFixture(options: {
     client,
     ...(options.now ? { now: options.now } : {}),
     ...(options.mutationTimeoutMs ? { mutationTimeoutMs: options.mutationTimeoutMs } : {}),
+    ...(options.timeoutOverrides ? { timeoutOverrides: options.timeoutOverrides } : {}),
     onDiagnostic: (diagnostic) => diagnostics.push(diagnostic)
   });
   handles.push(handle);
@@ -287,6 +296,39 @@ async function rawRequest(
   });
 }
 
+async function stalledRawRequest(
+  target: string,
+  headers: Record<string, string | number>,
+  prefix: Uint8Array
+): Promise<RawResponse> {
+  const url = new URL(target);
+  return await new Promise<RawResponse>((resolve, reject) => {
+    let settled = false;
+    const request = httpRequest({
+      hostname: url.hostname,
+      port: Number(url.port),
+      path: `${url.pathname}${url.search}`,
+      method: "POST",
+      headers
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => {
+        settled = true;
+        resolve({
+          status: response.statusCode ?? 0,
+          headers: response.headers,
+          body: Buffer.concat(chunks).toString("utf8")
+        });
+      });
+    });
+    request.once("error", (error) => {
+      if (!settled) reject(error);
+    });
+    request.write(prefix);
+  });
+}
+
 async function waitForStreamCount(origin: string, expected: number): Promise<void> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const response = await fetch(`${origin}/healthz`);
@@ -310,6 +352,42 @@ function message(id: number, text: string, editedAt: number | null = null): GuiM
 }
 
 describe("GUI loopback server bootstrap and web trust boundary", () => {
+  it("requires exact declared bytes plus 256 MiB disk headroom without allocating the upload", () => {
+    const required = BigInt(GUI_PREMIUM_UPLOAD_BYTES) + 256n * 1024n * 1024n;
+    expect(hasUploadStorageHeadroom(required, GUI_PREMIUM_UPLOAD_BYTES)).toBe(true);
+    expect(hasUploadStorageHeadroom(required - 1n, GUI_PREMIUM_UPLOAD_BYTES)).toBe(false);
+    expect(hasUploadStorageHeadroom(required, 0)).toBe(false);
+  });
+
+  it("reclaims only dead-owner and old initialization upload roots", async () => {
+    const deadRoot = mkdtempSync(join(tmpdir(), "chatkjb-gui-uploads-2147483647-"));
+    const liveRoot = mkdtempSync(join(tmpdir(), `chatkjb-gui-uploads-${process.pid}-`));
+    const oldPartial = mkdtempSync(join(tmpdir(), "chatkjb-gui-uploads-2147483646-"));
+    const malformedRoot = mkdtempSync(join(tmpdir(), "chatkjb-gui-uploads-2147483645-"));
+    const symlinkTarget = mkdtempSync(join(tmpdir(), "chatkjb-gui-upload-target-"));
+    const symlinkRoot = join(tmpdir(), `chatkjb-gui-uploads-2147483644-symlink${process.pid}`);
+    writeFileSync(join(deadRoot, "owner.json"), JSON.stringify({ version: 1, pid: 2_147_483_647, startedAt: 1 }));
+    writeFileSync(join(deadRoot, "payload"), "orphan");
+    writeFileSync(join(liveRoot, "owner.json"), JSON.stringify({ version: 1, pid: process.pid, startedAt: Date.now() }));
+    writeFileSync(join(oldPartial, ".owner.tmp"), "partial");
+    const old = new Date(Date.now() - 25 * 60 * 60_000);
+    utimesSync(oldPartial, old, old);
+    writeFileSync(join(malformedRoot, "owner.json"), "not-json");
+    symlinkSync(symlinkTarget, symlinkRoot);
+    try {
+      await startFixture();
+      expect(existsSync(deadRoot)).toBe(false);
+      expect(existsSync(oldPartial)).toBe(false);
+      expect(existsSync(liveRoot)).toBe(true);
+      expect(existsSync(malformedRoot)).toBe(true);
+      expect(existsSync(symlinkRoot)).toBe(true);
+    } finally {
+      for (const path of [deadRoot, liveRoot, oldPartial, malformedRoot, symlinkRoot, symlinkTarget]) {
+        rmSync(path, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("serves only the allowlisted no-store web application assets", async () => {
     const { handle } = await startFixture();
     const session = await authenticate(handle);
@@ -664,6 +742,7 @@ describe("GUI REST DTO and input boundaries", () => {
       attachment: {
         kind: "image",
         name: "safe.jpg",
+        filenameSource: "telegram",
         mimeType: "image/jpeg",
         size: 123,
         width: 20,
@@ -724,6 +803,7 @@ describe("GUI REST DTO and input boundaries", () => {
       attachment: {
         kind: "image",
         name: "safe.jpg",
+        filenameSource: "telegram",
         mimeType: "image/jpeg",
         size: 123,
         width: 20,
@@ -741,6 +821,52 @@ describe("GUI REST DTO and input boundaries", () => {
       { offsetDate: 100, offsetId: 90, offsetTopic: 42 },
       1
     );
+  });
+
+  it("keeps oversized Telegram attachment metadata but strips an invalid oversized download token", async () => {
+    const client = new FakeGuiServerClient();
+    client.messagesPage = {
+      messages: [
+        {
+          ...message(94, "large attachment"),
+          attachment: {
+            kind: "document",
+            name: "archive.zip",
+            filenameSource: "telegram",
+            mimeType: "application/zip",
+            size: 20 * 1024 * 1024 + 1
+          }
+        },
+        {
+          ...message(95, "invalid authority"),
+          attachment: {
+            kind: "document",
+            name: "invalid.zip",
+            filenameSource: "telegram",
+            mimeType: "application/zip",
+            size: 20 * 1024 * 1024 + 1,
+            token: "C".repeat(43)
+          }
+        }
+      ],
+      nextCursor: null
+    };
+    const { handle } = await startFixture({ client });
+    const session = await authenticate(handle);
+    const response = await fetch(`${handle.origin}/api/topics/1/messages`, {
+      headers: readHeaders(handle.origin, session)
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { messages: GuiMessage[]; };
+    expect(body.messages[0]?.attachment).toEqual({
+      kind: "document",
+      name: "archive.zip",
+      filenameSource: "telegram",
+      mimeType: "application/zip",
+      size: 20 * 1024 * 1024 + 1
+    });
+    expect(body.messages[1]?.attachment).toBeUndefined();
   });
 
   it("rejects strict text, page, cursor, callback, and generic-scope injection before client calls", async () => {
@@ -846,9 +972,20 @@ describe("GUI REST DTO and input boundaries", () => {
   });
 
   it("streams a validated binary upload without accepting a path or unsupported metadata", async () => {
-    const { handle, client } = await startFixture();
-    const session = await authenticate(handle);
     const bytes = Uint8Array.from([0x25, 0x50, 0x44, 0x46, 0x00, 0xff]);
+    const client = new FakeGuiServerClient();
+    client.uploadLimitBytes.mockReturnValue(bytes.byteLength);
+    let observedPath = "";
+    client.sendFile.mockImplementationOnce(async (_topicId, input) => {
+      observedPath = input.path;
+      expect(input.size).toBe(bytes.byteLength);
+      expect(input.signal).toBeInstanceOf(AbortSignal);
+      expect(Buffer.from(readFileSync(input.path))).toEqual(Buffer.from(bytes));
+      expect(statSync(dirname(input.path)).mode & 0o777).toBe(0o700);
+      expect(statSync(input.path).mode & 0o777).toBe(0o600);
+    });
+    const { handle } = await startFixture({ client });
+    const session = await authenticate(handle);
     const filename = "검증 보고서.pdf";
     const caption = "safe caption";
     const uploadUrl = `${handle.origin}/api/topics/42/files`;
@@ -872,8 +1009,12 @@ describe("GUI REST DTO and input boundaries", () => {
     expect(input.name).toBe(filename);
     expect(input.mimeType).toBe("application/pdf");
     expect(input.caption).toBe(caption);
-    expect(Buffer.from(input.bytes)).toEqual(Buffer.from(bytes));
-    expect(Object.keys(input).sort()).toEqual(["bytes", "caption", "mimeType", "name"]);
+    expect(input.size).toBe(bytes.byteLength);
+    expect(input.path).toBe(observedPath);
+    expect(Object.keys(input).sort()).toEqual([
+      "caption", "mimeType", "name", "onFileReleased", "onProgress", "path", "signal", "size"
+    ]);
+    expect(existsSync(observedPath)).toBe(false);
 
     client.sendFile.mockClear();
     for (const invalid of [
@@ -909,6 +1050,7 @@ describe("GUI REST DTO and input boundaries", () => {
     expect(malformedFilename.status).toBe(400);
     expect(client.sendFile).not.toHaveBeenCalled();
 
+    client.uploadLimitBytes.mockReturnValue(bytes.byteLength);
     const oversized = await rawRequest(uploadUrl, {
       method: "POST",
       headers: {
@@ -917,30 +1059,39 @@ describe("GUI REST DTO and input boundaries", () => {
         "X-ChatKJB-CSRF": session.csrf,
         "Content-Type": "application/pdf",
         "X-ChatKJB-File-Name": base64Url("safe.pdf"),
-        "Content-Length": GUI_MAX_UPLOAD_BYTES + 1
+        "Content-Length": bytes.byteLength + 1
       }
     });
     expect(oversized.status).toBe(413);
     expectRawSecurityHeaders(oversized.headers);
     expect(client.sendFile).not.toHaveBeenCalled();
 
-    const exactBytes = new Uint8Array(GUI_MAX_UPLOAD_BYTES);
-    const exact = await fetch(uploadUrl, {
-      method: "POST",
-      headers: {
-        Origin: handle.origin,
-        Cookie: session.cookie,
-        "X-ChatKJB-CSRF": session.csrf,
-        "Content-Type": "application/pdf",
-        "X-ChatKJB-File-Name": base64Url("exact-100-mib.pdf")
-      },
-      body: exactBytes
-    });
-    expect(exact.status).toBe(204);
-    expect(client.sendFile).toHaveBeenCalledOnce();
-    expect(client.sendFile.mock.calls[0]?.[1].bytes.byteLength).toBe(GUI_MAX_UPLOAD_BYTES);
-    client.sendFile.mockClear();
+  });
 
+  it("publishes the exact standard and Premium Telegram account upload ceilings", async () => {
+    const standardClient = new FakeGuiServerClient();
+    standardClient.uploadLimitBytes.mockReturnValue(GUI_STANDARD_UPLOAD_BYTES);
+    const { handle: standard } = await startFixture({ client: standardClient });
+    const standardSession = await authenticate(standard);
+    const standardResponse = await fetch(`${standard.origin}/api/session`, {
+      headers: readHeaders(standard.origin, standardSession)
+    });
+    expect((await standardResponse.json()).limits.uploadBytes).toBe(2_097_152_000);
+
+    const premiumClient = new FakeGuiServerClient();
+    premiumClient.uploadLimitBytes.mockReturnValue(GUI_PREMIUM_UPLOAD_BYTES);
+    const { handle: premium } = await startFixture({ client: premiumClient });
+    const premiumSession = await authenticate(premium);
+    const premiumResponse = await fetch(`${premium.origin}/api/session`, {
+      headers: readHeaders(premium.origin, premiumSession)
+    });
+    expect((await premiumResponse.json()).limits.uploadBytes).toBe(4_194_304_000);
+
+    premiumClient.uploadLimitBytes.mockReturnValue(GUI_PREMIUM_UPLOAD_BYTES + 1);
+    const invalidResponse = await fetch(`${premium.origin}/api/session`, {
+      headers: readHeaders(premium.origin, premiumSession)
+    });
+    expect((await invalidResponse.json()).limits.uploadBytes).toBe(GUI_STANDARD_UPLOAD_BYTES);
   });
 
   it("allows one upload at a time and releases the slot after success and failure", async () => {
@@ -979,6 +1130,218 @@ describe("GUI REST DTO and input boundaries", () => {
     expect(client.sendFile).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps a private spooled path until cancellation settles and removes it on close", async () => {
+    const client = new FakeGuiServerClient();
+    let observedPath = "";
+    let observedSignal: AbortSignal | undefined;
+    let releaseCalls = 0;
+    client.sendFile.mockImplementationOnce(async (_topicId, input) => {
+      observedPath = input.path;
+      observedSignal = input.signal;
+      expect(existsSync(input.path)).toBe(true);
+      await new Promise<void>((_resolve, reject) => {
+        input.signal.addEventListener("abort", async () => {
+          await input.onFileReleased?.();
+          await input.onFileReleased?.();
+          releaseCalls += 1;
+          reject(new Error("cancelled"));
+        }, { once: true });
+      });
+    });
+    const { handle } = await startFixture({ client });
+    const session = await authenticate(handle);
+    const uploading = fetch(`${handle.origin}/api/topics/42/files`, {
+      method: "POST",
+      headers: {
+        Origin: handle.origin,
+        Cookie: session.cookie,
+        "X-ChatKJB-CSRF": session.csrf,
+        "Content-Type": "text/plain",
+        "X-ChatKJB-File-Name": base64Url("cancel.txt")
+      },
+      body: Uint8Array.from([1, 2, 3])
+    });
+    const uploadingSettled = uploading.catch(() => undefined);
+    await vi.waitFor(() => expect(client.sendFile).toHaveBeenCalledOnce());
+    expect(existsSync(observedPath)).toBe(true);
+
+    await handle.close();
+    await uploadingSettled;
+    expect(observedSignal?.aborted).toBe(true);
+    expect(releaseCalls).toBe(1);
+    expect(existsSync(observedPath)).toBe(false);
+  });
+
+  it("bounds stalled ordinary and file request bodies with separate inactivity timers", async () => {
+    const { handle } = await startFixture({
+      timeoutOverrides: {
+        ordinaryBodyInactivityMs: 30,
+        ordinaryBodyAbsoluteMs: 100,
+        uploadBodyInactivityMs: 60,
+        uploadBodyAbsoluteMs: 150
+      }
+    });
+    const session = await authenticate(handle);
+    const ordinary = await stalledRawRequest(`${handle.origin}/api/topics/42/messages`, {
+      Origin: handle.origin,
+      Cookie: session.cookie,
+      "X-ChatKJB-CSRF": session.csrf,
+      "Content-Type": "application/json",
+      "Content-Length": 20
+    }, Buffer.from("{"));
+    expect(ordinary.status).toBe(408);
+    expect(JSON.parse(ordinary.body)).toEqual({ error: { code: "REQUEST_BODY_TIMEOUT" } });
+
+    const file = await stalledRawRequest(`${handle.origin}/api/topics/42/files`, {
+      Origin: handle.origin,
+      Cookie: session.cookie,
+      "X-ChatKJB-CSRF": session.csrf,
+      "Content-Type": "text/plain",
+      "X-ChatKJB-File-Name": base64Url("stalled.txt"),
+      "Content-Length": 5
+    }, Uint8Array.of(1));
+    expect(file.status).toBe(408);
+    expect(JSON.parse(file.body)).toEqual({ error: { code: "UPLOAD_BODY_TIMEOUT" } });
+  });
+
+  it("aborts a stalled Telegram upload on progress inactivity and releases its path", async () => {
+    const client = new FakeGuiServerClient();
+    let observedPath = "";
+    client.sendFile.mockImplementationOnce(async (_topicId, input) => {
+      observedPath = input.path;
+      await new Promise<void>((_resolve, reject) => {
+        input.signal.addEventListener("abort", async () => {
+          await input.onFileReleased?.();
+          reject(new Error("progress timeout"));
+        }, { once: true });
+      });
+    });
+    const { handle } = await startFixture({
+      client,
+      timeoutOverrides: {
+        uploadProgressInactivityMs: 40,
+        uploadOperationAbsoluteMs: 150
+      }
+    });
+    const session = await authenticate(handle);
+    const response = await fetch(`${handle.origin}/api/topics/42/files`, {
+      method: "POST",
+      headers: {
+        Origin: handle.origin,
+        Cookie: session.cookie,
+        "X-ChatKJB-CSRF": session.csrf,
+        "Content-Type": "text/plain",
+        "X-ChatKJB-File-Name": base64Url("progress.txt")
+      },
+      body: Uint8Array.of(1, 2, 3)
+    });
+    expect(response.status).toBe(504);
+    expect(await response.json()).toEqual({ error: { code: "UPLOAD_PROGRESS_TIMEOUT" } });
+    expect(existsSync(observedPath)).toBe(false);
+  });
+
+  it("aborts and cleans a Telegram upload when the authenticated web session expires", async () => {
+    let clock = 1_000;
+    const client = new FakeGuiServerClient();
+    let observedPath = "";
+    client.sendFile.mockImplementationOnce(async (_topicId, input) => {
+      observedPath = input.path;
+      await new Promise<void>((_resolve, reject) => {
+        input.signal.addEventListener("abort", async () => {
+          await input.onFileReleased?.();
+          reject(new Error("session expired"));
+        }, { once: true });
+      });
+    });
+    const { handle } = await startFixture({ client, now: () => clock });
+    const session = await authenticate(handle);
+    const uploading = fetch(`${handle.origin}/api/topics/42/files`, {
+      method: "POST",
+      headers: {
+        Origin: handle.origin,
+        Cookie: session.cookie,
+        "X-ChatKJB-CSRF": session.csrf,
+        "Content-Type": "text/plain",
+        "X-ChatKJB-File-Name": base64Url("expired.txt")
+      },
+      body: Uint8Array.of(1, 2, 3)
+    });
+    const uploadingSettled = uploading.then(async (response) => ({
+      status: response.status,
+      body: await response.json()
+    }));
+    await vi.waitFor(() => expect(client.sendFile).toHaveBeenCalledOnce());
+    expect(existsSync(observedPath)).toBe(true);
+
+    clock += 12 * 60 * 60 * 1_000;
+    handle.publishUpdate({ type: "reconcile_required" });
+    const result = await uploadingSettled;
+    expect(result).toEqual({ status: 401, body: { error: { code: "SESSION_EXPIRED" } } });
+    expect(existsSync(observedPath)).toBe(false);
+  });
+
+  it("propagates an HTTP peer disconnect through the same upload cancellation state", async () => {
+    const client = new FakeGuiServerClient();
+    let observedPath = "";
+    let uploadReleased = false;
+    client.sendFile.mockImplementationOnce(async (_topicId, input) => {
+      observedPath = input.path;
+      await new Promise<void>((_resolve, reject) => {
+        input.signal.addEventListener("abort", async () => {
+          await input.onFileReleased?.();
+          uploadReleased = true;
+          reject(new Error("peer disconnected"));
+        }, { once: true });
+      });
+    });
+    const { handle } = await startFixture({ client });
+    const session = await authenticate(handle);
+    const controller = new AbortController();
+    const uploading = fetch(`${handle.origin}/api/topics/42/files`, {
+      method: "POST",
+      headers: {
+        Origin: handle.origin,
+        Cookie: session.cookie,
+        "X-ChatKJB-CSRF": session.csrf,
+        "Content-Type": "text/plain",
+        "X-ChatKJB-File-Name": base64Url("peer-close.txt")
+      },
+      body: Uint8Array.of(1, 2, 3),
+      signal: controller.signal
+    });
+    const uploadingSettled = uploading.catch(() => undefined);
+    await vi.waitFor(() => expect(client.sendFile).toHaveBeenCalledOnce());
+    expect(existsSync(observedPath)).toBe(true);
+
+    controller.abort();
+    await uploadingSettled;
+    await vi.waitFor(() => expect(uploadReleased).toBe(true));
+    expect(existsSync(observedPath)).toBe(false);
+  });
+
+  it("cancels a partial spool on server shutdown without starting Telegram send", async () => {
+    const client = new FakeGuiServerClient();
+    const { handle } = await startFixture({ client });
+    const session = await authenticate(handle);
+    const stalled = stalledRawRequest(`${handle.origin}/api/topics/42/files`, {
+      Origin: handle.origin,
+      Cookie: session.cookie,
+      "X-ChatKJB-CSRF": session.csrf,
+      "Content-Type": "text/plain",
+      "X-ChatKJB-File-Name": base64Url("partial.txt"),
+      "Content-Length": 10
+    }, Uint8Array.of(1));
+    const stalledSettled = stalled.catch(() => undefined);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 30));
+    expect(client.sendFile).not.toHaveBeenCalled();
+    expect(readdirSync(tmpdir()).some((name) => name.startsWith(`chatkjb-gui-uploads-${process.pid}-`))).toBe(true);
+
+    await handle.close();
+    await stalledSettled;
+    expect(client.sendFile).not.toHaveBeenCalled();
+    expect(readdirSync(tmpdir()).some((name) => name.startsWith(`chatkjb-gui-uploads-${process.pid}-`))).toBe(false);
+  });
+
   it("projects only history authority invalidation as a stable 409 response", async () => {
     const client = new FakeGuiServerClient();
     const { handle, diagnostics } = await startFixture({ client });
@@ -1000,6 +1363,37 @@ describe("GUI REST DTO and input boundaries", () => {
     expect(await failed.json()).toEqual({ error: { code: "TELEGRAM_OPERATION_FAILED" } });
     expect(diagnostics).toEqual([
       { type: "request_rejected", code: "HISTORY_INVALIDATED" },
+      { type: "upstream_failure", code: "TELEGRAM_OPERATION_FAILED" },
+      { type: "request_rejected", code: "TELEGRAM_OPERATION_FAILED" }
+    ]);
+  });
+
+  it("projects only stale read receipt exhaustion as retryable confirmation pending", async () => {
+    const client = new FakeGuiServerClient();
+    const { handle, diagnostics } = await startFixture({ client });
+    const session = await authenticate(handle);
+    const readUrl = `${handle.origin}/api/topics/42/read`;
+
+    client.markRead.mockRejectedValueOnce(new ReadConfirmationPendingError());
+    const pending = await fetch(readUrl, {
+      method: "POST",
+      headers: jsonHeaders(handle.origin, session),
+      body: JSON.stringify({ maxMessageId: 92 })
+    });
+    expect(pending.status).toBe(503);
+    expect(await pending.json()).toEqual({ error: { code: "READ_CONFIRMATION_PENDING" } });
+
+    client.markRead.mockRejectedValueOnce(new Error("permanent read failure"));
+    const failed = await fetch(readUrl, {
+      method: "POST",
+      headers: jsonHeaders(handle.origin, session),
+      body: JSON.stringify({ maxMessageId: 92 })
+    });
+    expect(failed.status).toBe(502);
+    expect(await failed.json()).toEqual({ error: { code: "TELEGRAM_OPERATION_FAILED" } });
+    expect(diagnostics).toEqual([
+      { type: "upstream_failure", code: "READ_CONFIRMATION_PENDING" },
+      { type: "request_rejected", code: "READ_CONFIRMATION_PENDING" },
       { type: "upstream_failure", code: "TELEGRAM_OPERATION_FAILED" },
       { type: "request_rejected", code: "TELEGRAM_OPERATION_FAILED" }
     ]);

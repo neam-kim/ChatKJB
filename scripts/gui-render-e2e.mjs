@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startGuiServer } from "../dist/gui/server.js";
-import { HistoryInvalidatedError } from "../dist/gui/telegram-user-client.js";
+import { HistoryInvalidatedError, ReadConfirmationPendingError } from "../dist/gui/telegram-user-client.js";
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const evidenceDir = join(
@@ -20,6 +20,7 @@ const evidenceDir = join(
 const chromeExecutable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const imageTokens = ["I", "J", "K"].map((value) => value.repeat(43));
 const documentToken = "D".repeat(43);
+const attachmentPreviewLimit = 20 * 1024 * 1024;
 const tinyPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64"
@@ -50,7 +51,7 @@ class FixtureClient {
     ...Array.from({ length: 160 }, (_, index) => topic(1_000 + index, `보관 토픽 ${index + 1}`))
   ];
   messages = [];
-  calls = { panel: 0, text: 0, texts: [], file: 0, callback: 0, read: 0, topics: 0, history: 0, downloadActive: 0, downloadMax: 0 };
+  calls = { panel: 0, text: 0, texts: [], file: 0, fileInputs: [], callback: 0, read: 0, readTargets: [], readActive: 0, readMax: 0, topics: 0, history: 0, downloadActive: 0, downloadMax: 0 };
   delayPanel = true;
   panelPending = false;
   releasePanel = null;
@@ -60,13 +61,22 @@ class FixtureClient {
   delayNextTopicPage = false;
   topicPagePending = false;
   releaseTopicPage = null;
+  delayNextTopicSnapshot = false;
+  topicSnapshotCaptured = false;
+  releaseTopicSnapshot = null;
   invalidateNextTopicPage = false;
   topicInvalidations = 0;
   failTopics = false;
   delayNextRead = false;
   readPending = false;
+  readConfirmationPending = false;
+  readAccepted = false;
   releaseRead = null;
   failReads = false;
+  pendingReadFailures = 0;
+  delayNextFile = false;
+  filePending = false;
+  releaseFile = null;
 
   constructor() {
     this.generalPanel = {
@@ -96,6 +106,7 @@ class FixtureClient {
       attachment: {
         kind: "image",
         name: "terminal-pixel.png",
+        filenameSource: "telegram",
         mimeType: "image/png",
         size: tinyPng.byteLength,
         width: 320,
@@ -104,22 +115,53 @@ class FixtureClient {
       }
     }));
     this.messages.push(fixtureMessage(295, "두 번째 이미지 첨부", {
-      attachment: { kind: "image", name: "terminal-two.png", mimeType: "image/png", size: tinyPng.byteLength, width: 160, height: 90, token: imageTokens[1] }
+      attachment: { kind: "image", name: "terminal-two.png", filenameSource: "telegram", mimeType: "image/png", size: tinyPng.byteLength, width: 160, height: 90, token: imageTokens[1] }
     }));
     this.messages.push(fixtureMessage(296, "세 번째 이미지 첨부", {
-      attachment: { kind: "image", name: "terminal-three.png", mimeType: "image/png", size: tinyPng.byteLength, width: 160, height: 90, token: imageTokens[2] }
+      attachment: { kind: "image", name: "terminal-three.png", filenameSource: "telegram", mimeType: "image/png", size: tinyPng.byteLength, width: 160, height: 90, token: imageTokens[2] }
     }));
     this.messages.push(fixtureMessage(294, "문서와 callback", {
       attachment: {
         kind: "document",
         name: "ChatKJB terminal fixture.txt",
+        filenameSource: "telegram",
         mimeType: "text/plain",
         size: 16,
         token: documentToken
       },
       buttons: [[{ kind: "callback", text: "검증 동작", callbackData: Buffer.from("fixture").toString("base64url") }]]
     }));
-    this.topics.find((candidate) => candidate.id === 42).topMessageId = 296;
+    this.messages.push(fixtureMessage(297, "정리된 이름의 큰 문서", {
+      outgoing: false,
+      attachment: {
+        kind: "document",
+        name: "secret-report.pdf",
+        filenameSource: "sanitized",
+        mimeType: "application/pdf",
+        size: attachmentPreviewLimit + 1
+      }
+    }));
+    this.messages.push(fixtureMessage(298, "원본 이름 없는 큰 사진", {
+      outgoing: false,
+      attachment: {
+        kind: "image",
+        name: "photo-298.jpg",
+        filenameSource: "generated",
+        mimeType: "image/jpeg",
+        size: attachmentPreviewLimit + 1
+      }
+    }));
+    this.messages.push(fixtureMessage(299, "SVG 문서", {
+      outgoing: false,
+      attachment: {
+        kind: "document",
+        name: "graphic.svg",
+        filenameSource: "telegram",
+        mimeType: "image/svg+xml",
+        size: 128
+      }
+    }));
+    this.topics.find((candidate) => candidate.id === 42).topMessageId = 299;
   }
 
   async beginQrLogin() {}
@@ -153,10 +195,18 @@ class FixtureClient {
       this.releaseTopicPage = null;
     }
     const end = Math.min(this.topics.length, start + 100);
-    return {
-      topics: this.topics.slice(start, end),
+    const response = {
+      topics: this.topics.slice(start, end).map((candidate) => ({ ...candidate })),
       nextCursor: end < this.topics.length ? { offsetDate: 0, offsetId: 0, offsetTopic: end } : null
     };
+    if (start === 0 && this.delayNextTopicSnapshot) {
+      this.delayNextTopicSnapshot = false;
+      this.topicSnapshotCaptured = true;
+      await new Promise((resolveWait) => { this.releaseTopicSnapshot = resolveWait; });
+      this.topicSnapshotCaptured = false;
+      this.releaseTopicSnapshot = null;
+    }
+    return response;
   }
   async listMessages(topicId, cursor) {
     this.calls.history += 1;
@@ -182,7 +232,27 @@ class FixtureClient {
     this.calls.text += 1;
     this.calls.texts.push({ topicId, text });
   }
-  async sendFile() { this.calls.file += 1; }
+  uploadLimitBytes() { return 4_194_304_000; }
+  async sendFile(topicId, input) {
+    this.calls.file += 1;
+    this.calls.fileInputs.push({
+      topicId,
+      name: input.name,
+      mimeType: input.mimeType,
+      caption: input.caption,
+      size: input.size,
+      bytes: readFileSync(input.path, "utf8")
+    });
+    input.onProgress?.(0.5);
+    if (this.delayNextFile) {
+      this.delayNextFile = false;
+      this.filePending = true;
+      await new Promise((resolveWait) => { this.releaseFile = resolveWait; });
+      this.filePending = false;
+      this.releaseFile = null;
+    }
+    await input.onFileReleased?.();
+  }
   async downloadAttachment(token) {
     if (imageTokens.includes(token)) {
       this.calls.downloadActive += 1;
@@ -204,18 +274,32 @@ class FixtureClient {
   async pressCallback() { this.calls.callback += 1; }
   async markRead(topicId, maxMessageId) {
     this.calls.read += 1;
-    if (this.delayNextRead) {
-      this.delayNextRead = false;
-      this.readPending = true;
-      await new Promise((resolveWait) => { this.releaseRead = resolveWait; });
-      this.readPending = false;
-      this.releaseRead = null;
+    this.calls.readTargets.push(maxMessageId);
+    this.calls.readActive += 1;
+    this.calls.readMax = Math.max(this.calls.readMax, this.calls.readActive);
+    try {
+      if (this.delayNextRead) {
+        this.delayNextRead = false;
+        this.readPending = true;
+        this.readConfirmationPending = true;
+        await new Promise((resolveWait) => { this.releaseRead = resolveWait; });
+        this.readPending = false;
+        this.readConfirmationPending = false;
+        this.releaseRead = null;
+      }
+      const target = this.topics.find((candidate) => candidate.id === topicId);
+      if (target && target.topMessageId <= maxMessageId) target.unreadCount = 0;
+      this.readAccepted = true;
+      if (this.pendingReadFailures > 0) {
+        this.pendingReadFailures -= 1;
+        throw new ReadConfirmationPendingError();
+      }
+      if (this.failReads) {
+        throw new Error("fixture read failure");
+      }
+    } finally {
+      this.calls.readActive -= 1;
     }
-    if (this.failReads) {
-      throw new Error("fixture read failure");
-    }
-    const target = this.topics.find((candidate) => candidate.id === topicId);
-    if (target && target.topMessageId <= maxMessageId) target.unreadCount = 0;
   }
   async setTyping() {}
   async logOut() {}
@@ -558,10 +642,12 @@ async function main() {
       return true;
     })()`);
     await waitFor(() => client.calls.text === 1, "General panel text send");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('#message-input').value === 'composer preserved' && document.activeElement?.id === 'message-input'"
+    ), "General panel composer preservation");
     if (
       client.calls.texts[0]?.topicId !== 1
       || client.calls.texts[0]?.text !== "⚙️ 새 세션 기본값"
-      || !await evaluate("document.querySelector('#message-input').value === 'composer preserved' && document.activeElement?.id === 'message-input'")
     ) throw new Error(`General panel command did not preserve its text/topic/composer: ${JSON.stringify(client.calls.texts)}`);
     process.stdout.write("G003 renderer: topics loaded\n");
     await evaluate("document.querySelector('[data-topic-id=\"42\"]')?.focus(); true");
@@ -580,6 +666,99 @@ async function main() {
       if (client.calls.downloadMax > 2 || client.calls.downloadMax < 2) {
         throw new Error(`Image download concurrency was ${client.calls.downloadMax}, expected exactly 2`);
       }
+      const attachmentContract = await evaluate(`(() => {
+        const row = (id) => document.querySelector('[data-message-id="' + id + '"]');
+        const text = (node, selector) => node?.querySelector(selector)?.textContent || '';
+        const image = row(293);
+        const documentRow = row(294);
+        const sanitized = row(297);
+        const generated = row(298);
+        const svg = row(299);
+        const documentMetadata = documentRow?.querySelector('.attachment-metadata');
+        if (documentMetadata) documentMetadata.dataset.fixtureIdentity = 'stable';
+        return {
+          imageCaption: text(image, '.message-text'),
+          imageName: text(image, '.attachment-name'),
+          imageDetails: text(image, '.attachment-details'),
+          imageStatus: text(image, '.attachment-status'),
+          imageCount: image?.querySelectorAll('.attachment img').length || 0,
+          documentCaption: text(documentRow, '.message-text'),
+          documentName: text(documentRow, '.attachment-name'),
+          documentDetails: text(documentRow, '.attachment-details'),
+          documentStatus: text(documentRow, '.attachment-status'),
+          sanitizedName: text(sanitized, '.attachment-name'),
+          sanitizedDetails: text(sanitized, '.attachment-details'),
+          sanitizedStatus: text(sanitized, '.attachment-status'),
+          sanitizedActions: sanitized?.querySelector('.attachment-action')?.childElementCount || 0,
+          generatedName: text(generated, '.attachment-name'),
+          generatedDetails: text(generated, '.attachment-details'),
+          generatedStatus: text(generated, '.attachment-status'),
+          generatedVisibleText: generated?.textContent || '',
+          generatedImages: generated?.querySelectorAll('.attachment img').length || 0,
+          svgImages: svg?.querySelectorAll('.attachment img').length || 0,
+          svgStatus: text(svg, '.attachment-status')
+        };
+      })()`);
+      if (
+        attachmentContract.imageCaption !== "이미지 첨부"
+        || attachmentContract.imageName !== "terminal-pixel.png"
+        || !attachmentContract.imageDetails.includes("Telegram 원본 파일명 · PNG 이미지 · image/png")
+        || attachmentContract.imageStatus !== "미리보기 준비됨"
+        || attachmentContract.imageCount !== 1
+        || attachmentContract.documentCaption !== "문서와 callback"
+        || attachmentContract.documentName !== "ChatKJB terminal fixture.txt"
+        || !attachmentContract.documentDetails.includes("Telegram 원본 파일명 · 텍스트 문서 · text/plain · 16 B")
+        || attachmentContract.documentStatus !== "다운로드 준비 가능"
+        || attachmentContract.sanitizedName !== "secret-report.pdf"
+        || !attachmentContract.sanitizedDetails.includes("안전하게 정리된 파일명 · PDF 문서 · application/pdf · 20.0 MiB")
+        || attachmentContract.sanitizedStatus !== "20.0 MiB 다운로드 한도 초과 · 파일 정보만 표시"
+        || attachmentContract.sanitizedActions !== 0
+        || attachmentContract.generatedName !== "사진"
+        || !attachmentContract.generatedDetails.includes("Telegram 사진 · 원본 파일명 없음 · JPEG 이미지 · image/jpeg · 20.0 MiB")
+        || attachmentContract.generatedStatus !== "20.0 MiB 다운로드 한도 초과 · 파일 정보만 표시"
+        || attachmentContract.generatedVisibleText.includes("photo-298.jpg")
+        || attachmentContract.generatedImages !== 0
+        || attachmentContract.svgImages !== 0
+        || attachmentContract.svgStatus !== "이 첨부를 현재 다운로드할 수 없습니다."
+      ) throw new Error(`Attachment identity contract failed: ${JSON.stringify(attachmentContract)}`);
+      await evaluate("document.querySelector('[data-message-id=\"294\"] .attachment-button').click(); true");
+      await waitFor(async () => await evaluate(
+        `(() => {
+          const row = document.querySelector('[data-message-id="294"]');
+          return row?.querySelector('.attachment-metadata')?.dataset.fixtureIdentity === 'stable'
+            && row?.querySelector('.attachment-status')?.textContent === '다운로드 준비됨'
+            && row?.querySelector('.attachment-action a')?.textContent === 'ChatKJB terminal fixture.txt 다운로드'
+            && row?.querySelector('.message-text')?.textContent === '문서와 callback';
+        })()`
+      ), "stable document metadata after download preparation");
+
+      const immediateFile = fixtureMessage(300, "즉시 표시되는 발신 파일", {
+        outgoing: true,
+        attachment: {
+          kind: "document",
+          name: "sent-result.txt",
+          filenameSource: "telegram",
+          mimeType: "text/plain",
+          size: 7
+        }
+      });
+      client.messages.push(immediateFile);
+      const activeTopic = client.topics.find((candidate) => candidate.id === 42);
+      activeTopic.topMessageId = immediateFile.id;
+      server.publishUpdate({ type: "message_upsert", message: immediateFile });
+      server.publishUpdate({ type: "message_upsert", message: immediateFile });
+      await waitFor(async () => await evaluate(
+        `document.querySelectorAll('[data-message-id="300"]').length === 1
+          && document.querySelector('[data-message-id="300"] .message-text')?.textContent === '즉시 표시되는 발신 파일'
+          && document.querySelector('[data-message-id="300"] .attachment-name')?.textContent === 'sent-result.txt'`
+      ), "deduplicated immediate outgoing file");
+      const historyBeforeFileReconcile = client.calls.history;
+      server.publishUpdate({ type: "reconcile_required" });
+      await waitFor(() => client.calls.history > historyBeforeFileReconcile, "outgoing file history convergence");
+      if (!await evaluate("document.querySelectorAll('[data-message-id=\"300\"]').length === 1")) {
+        throw new Error("Immediate outgoing file duplicated after history convergence");
+      }
+      process.stdout.write("G002 renderer: stable attachment identity, safe fallback labels, and outgoing dedupe passed\n");
       await waitFor(async () => await evaluate(
         "document.querySelector('[data-topic-id=\"42\"] .topic-count') === null"
       ), "selected topic unread clear");
@@ -752,12 +931,102 @@ async function main() {
     ), "cached topic unread clear");
     await evaluate("document.querySelector('[data-topic-id=\"42\"]')?.click(); true");
     await waitFor(async () => await evaluate("document.querySelector('#topic-title')?.textContent === '반응형 터미널'"), "return after cached topic read");
+    await evaluate(`(() => {
+      const viewport = document.querySelector('#message-viewport');
+      viewport.scrollTop = viewport.scrollHeight;
+      return true;
+    })()`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
     process.stdout.write("G001 renderer: inactive, duplicate, edit, outgoing, and cached read passed\n");
+
+    const staleTopic = client.topics.find((candidate) => candidate.id === 42);
+    const readsBeforeBurst = client.calls.read;
+    const burstTargetsBefore = client.calls.readTargets.length;
+    client.delayNextRead = true;
+    for (let id = 470; id <= 478; id += 1) {
+      const incoming = fixtureMessage(id, `하단 읽음 단일-flight burst ${id}`, { outgoing: false });
+      client.messages.push(incoming);
+      staleTopic.topMessageId = incoming.id;
+      staleTopic.unreadCount = id - 469;
+      server.publishUpdate({ type: "message_upsert", message: incoming });
+      if (id === 470) await waitFor(() => client.readPending, "burst first delayed read marker");
+    }
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"42\"] .topic-count')?.textContent === '9'"
+    ), "burst unread accumulation");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 450));
+    if (client.calls.read !== readsBeforeBurst + 1 || client.calls.readMax !== 1) {
+      throw new Error(`Burst created concurrent reads before release: ${JSON.stringify(client.calls)}`);
+    }
+    const releaseBurstFirst = client.releaseRead;
+    client.delayNextRead = true;
+    releaseBurstFirst?.();
+    await waitFor(
+      () => client.calls.read === readsBeforeBurst + 2 && client.readPending,
+      "burst latest-target follow-up"
+    );
+    if (
+      client.calls.readMax !== 1
+      || !await evaluate("document.querySelector('[data-topic-id=\"42\"] .topic-count')?.textContent === '9'")
+    ) throw new Error("Old burst read success cleared unread state or overlapped its follow-up");
+    client.releaseRead?.();
+    await waitFor(() => !client.readPending, "burst latest-target completion");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"42\"] .topic-count') === null"
+    ), "burst final unread clear");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 450));
+    const burstTargets = client.calls.readTargets.slice(burstTargetsBefore);
+    if (
+      client.calls.read !== readsBeforeBurst + 2
+      || client.calls.readMax !== 1
+      || JSON.stringify(burstTargets) !== JSON.stringify([470, 478])
+    ) throw new Error(`Burst did not converge through exactly first/latest targets: ${JSON.stringify({ burstTargets, calls: client.calls })}`);
+    process.stdout.write("G001 renderer: 9-message burst stayed single-flight and converged first/latest exactly once\n");
+
+    const authoritativeTarget = fixtureMessage(480, "authoritative snapshot이 pending retry를 종료하는 메시지", { outgoing: false });
+    client.messages.push(authoritativeTarget);
+    staleTopic.topMessageId = authoritativeTarget.id;
+    staleTopic.unreadCount = 1;
+    client.pendingReadFailures = 1;
+    const readsBeforeAuthoritative = client.calls.read;
+    server.publishUpdate({ type: "message_upsert", message: authoritativeTarget });
+    await waitFor(() => client.calls.read === readsBeforeAuthoritative + 1, "authoritative target pending read");
+    const topicsBeforeAuthoritative = client.calls.topics;
+    server.publishUpdate({ type: "reconcile_required" });
+    await waitFor(() => client.calls.topics > topicsBeforeAuthoritative, "authoritative unread-zero snapshot");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"42\"] .topic-count') === null"
+    ), "authoritative snapshot unread clear");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 900));
+    if (client.calls.read !== readsBeforeAuthoritative + 1) {
+      throw new Error("Authoritative unread-zero snapshot did not retire the scheduled target-A retry");
+    }
+
+    const independentTarget = fixtureMessage(481, "새 target이 독립된 세 번의 retry budget을 쓰는 메시지", { outgoing: false });
+    client.messages.push(independentTarget);
+    staleTopic.topMessageId = independentTarget.id;
+    staleTopic.unreadCount = 1;
+    client.pendingReadFailures = 3;
+    const readsBeforeIndependent = client.calls.read;
+    const independentTargetsBefore = client.calls.readTargets.length;
+    server.publishUpdate({ type: "message_upsert", message: independentTarget });
+    await waitFor(
+      () => client.calls.read === readsBeforeIndependent + 4,
+      "independent target full retry budget",
+      12_000
+    );
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"42\"] .topic-count') === null"
+    ), "independent target final unread clear");
+    const independentTargets = client.calls.readTargets.slice(independentTargetsBefore);
+    if (JSON.stringify(independentTargets) !== JSON.stringify([481, 481, 481, 481])) {
+      throw new Error(`Independent target did not receive initial plus all three retries: ${JSON.stringify(independentTargets)}`);
+    }
+    process.stdout.write("G001 renderer: authoritative target-A retirement preserved target-B full retry budget\n");
 
     client.delayNextRead = true;
     const staleFirst = fixtureMessage(500, "읽음 요청과 경쟁하는 첫 메시지");
     client.messages.push(staleFirst);
-    const staleTopic = client.topics.find((candidate) => candidate.id === 42);
     staleTopic.topMessageId = staleFirst.id;
     staleTopic.unreadCount = 1;
     server.publishUpdate({ type: "message_upsert", message: staleFirst });
@@ -783,7 +1052,7 @@ async function main() {
       throw new Error("A stale read completion cleared newer unread messages");
     }
     client.delayNextRead = true;
-    client.failReads = true;
+    client.pendingReadFailures = 1;
     const readsBeforeFailure = client.calls.read;
     await evaluate(`(() => {
       const viewport = document.querySelector('#message-viewport');
@@ -792,23 +1061,31 @@ async function main() {
     })()`);
     await waitFor(() => client.readPending && client.calls.read > readsBeforeFailure, "failed read marker");
     client.releaseRead?.();
-    await waitFor(() => !client.readPending, "failed read completion");
+    await waitFor(() => !client.readPending, "pending read completion");
     await new Promise((resolveWait) => setTimeout(resolveWait, 40));
     if (!await evaluate("document.querySelector('[data-topic-id=\"42\"] .topic-count')?.textContent === '2'")) {
-      throw new Error("A failed read marker cleared unread messages");
+      throw new Error("A pending read marker cleared unread messages before confirmation");
     }
-    client.failReads = false;
-    const readsBeforeRetry = client.calls.read;
-    await evaluate(`(() => {
-      const viewport = document.querySelector('#message-viewport');
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight - 100);
-      viewport.scrollTop = viewport.scrollHeight;
-      return true;
-    })()`);
-    await waitFor(() => client.calls.read > readsBeforeRetry, "read retry");
+    await waitFor(() => client.calls.read > readsBeforeFailure + 1, "automatic read retry without scroll");
     await waitFor(async () => await evaluate(
       "document.querySelector('[data-topic-id=\"42\"] .topic-count') === null"
-    ), "read retry unread clear");
+    ), "automatic read retry unread clear");
+
+    client.failReads = true;
+    const permanentIncoming = fixtureMessage(503, "영구 읽음 오류는 자동 재시도하지 않는 메시지");
+    client.messages.push(permanentIncoming);
+    staleTopic.topMessageId = permanentIncoming.id;
+    staleTopic.unreadCount = 1;
+    const readsBeforePermanent = client.calls.read;
+    server.publishUpdate({ type: "message_upsert", message: permanentIncoming });
+    await waitFor(() => client.calls.read > readsBeforePermanent, "permanent failed read marker");
+    const readsAfterPermanent = client.calls.read;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 900));
+    const permanentBadge = await evaluate("document.querySelector('[data-topic-id=\"42\"] .topic-count')?.textContent || ''");
+    if (client.calls.read !== readsAfterPermanent || permanentBadge !== "1") {
+      throw new Error(`A permanent read failure retried automatically or cleared unread state: ${JSON.stringify({ readsAfterPermanent, readsNow: client.calls.read, permanentBadge })}`);
+    }
+    client.failReads = false;
     client.delayNextRead = true;
     const reconcileReadMessage = fixtureMessage(504, "토픽 재조정과 경쟁하는 읽음 메시지", { outgoing: false });
     client.messages.push(reconcileReadMessage);
@@ -827,7 +1104,69 @@ async function main() {
     await waitFor(async () => await evaluate(
       "document.querySelector('[data-topic-id=\"42\"] .topic-count') === null"
     ), "reconciled read clear");
-    process.stdout.write("G001 renderer: stale, failed, and reconcile-raced read markers passed\n");
+    process.stdout.write("G001 renderer: stale, pending-auto-retry, permanent-failure, and reconcile-raced read markers passed\n");
+
+    await evaluate(`(() => {
+      const viewport = document.querySelector('#message-viewport');
+      viewport.scrollTop = Math.floor(viewport.scrollHeight * .45);
+      return true;
+    })()`);
+    const snapshotFirst = fixtureMessage(506, "낡은 토픽 스냅샷보다 먼저 읽을 메시지 1", { outgoing: false });
+    const snapshotSecond = fixtureMessage(507, "낡은 토픽 스냅샷보다 먼저 읽을 메시지 2", { outgoing: false });
+    client.messages.push(snapshotFirst, snapshotSecond);
+    staleTopic.topMessageId = snapshotSecond.id;
+    staleTopic.unreadCount = 2;
+    server.publishUpdate({ type: "message_upsert", message: snapshotFirst });
+    server.publishUpdate({ type: "message_upsert", message: snapshotSecond });
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"42\"] .topic-count')?.textContent === '2'"
+    ), "pre-snapshot unread badge");
+
+    client.readAccepted = false;
+    client.delayNextTopicSnapshot = true;
+    const topicsBeforeSnapshotRace = client.calls.topics;
+    const historyBeforeSnapshotRace = client.calls.history;
+    server.publishUpdate({ type: "reconcile_required" });
+    await waitFor(() => client.topicSnapshotCaptured, "captured stale topic snapshot");
+    await evaluate(`(() => {
+      const viewport = document.querySelector('#message-viewport');
+      viewport.scrollTop = viewport.scrollHeight;
+      return true;
+    })()`);
+    await waitFor(() => client.readAccepted && staleTopic.unreadCount === 0, "read accepted during topic snapshot barrier");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"42\"] .topic-count') === null"
+    ), "authoritative read badge clear");
+
+    client.delayNextRead = true;
+    client.releaseTopicSnapshot?.();
+    await waitFor(() => client.calls.topics >= topicsBeforeSnapshotRace + 4, "stale topic snapshot retry");
+    await waitFor(() => client.calls.history > historyBeforeSnapshotRace, "fresh topic snapshot reconciliation");
+    if (!await evaluate("document.querySelector('[data-topic-id=\"42\"] .topic-count') === null")) {
+      throw new Error("A stale topic snapshot resurrected an already-read badge");
+    }
+
+    client.readAccepted = false;
+    await evaluate(`(() => {
+      const viewport = document.querySelector('#message-viewport');
+      viewport.scrollTop = viewport.scrollHeight;
+      return true;
+    })()`);
+    const postSnapshotIncoming = fixtureMessage(508, "낡은 스냅샷 폐기 뒤의 새 메시지", { outgoing: false });
+    client.messages.push(postSnapshotIncoming);
+    staleTopic.topMessageId = postSnapshotIncoming.id;
+    staleTopic.unreadCount = 1;
+    server.publishUpdate({ type: "message_upsert", message: postSnapshotIncoming });
+    await waitFor(() => client.readConfirmationPending, "post-snapshot read confirmation pending");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"42\"] .topic-count')?.textContent === '1'"
+    ), "post-snapshot unread retained pending confirmation");
+    client.releaseRead?.();
+    await waitFor(() => client.readAccepted && !client.readConfirmationPending, "post-snapshot read accepted");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"42\"] .topic-count') === null"
+    ), "post-snapshot unread clear");
+    process.stdout.write("G002 renderer: stale topic snapshot retry and read confirmation passed\n");
 
     client.delayNextHistory = true;
     process.stdout.write("G003 renderer: older race armed\n");
@@ -1036,6 +1375,11 @@ async function main() {
       throw new Error("Keyboard attachment removal did not clear the selection and restore focus");
     }
     await evaluate(`(() => {
+      window.__fileArrayBufferCalls = 0;
+      File.prototype.arrayBuffer = () => {
+        window.__fileArrayBufferCalls += 1;
+        throw new Error('File.arrayBuffer must not be used for upload');
+      };
       const transfer = new DataTransfer();
       transfer.items.add(new File(['fixture'], 'fixture.txt', { type: 'text/plain' }));
       const input = document.querySelector('#file-input');
@@ -1059,9 +1403,25 @@ async function main() {
       message.focus();
       return true;
     })()`);
+    client.delayNextFile = true;
     await pressKey("Enter");
-    await waitFor(() => client.calls.file === 1, "file send");
-    process.stdout.write("G003 renderer: keyboard actions passed\n");
+    await waitFor(() => client.filePending, "streaming file send pending");
+    if (!await evaluate(
+      "window.__fileArrayBufferCalls === 0 && document.querySelector('#selected-file-label').textContent.includes('전송 중')"
+    )) throw new Error("Browser upload buffered the File or hid its in-progress identity");
+    client.releaseFile?.();
+    await waitFor(async () => await evaluate("document.querySelector('#selected-file').hidden"), "streaming file send completion");
+    const sentFile = client.calls.fileInputs[0];
+    if (
+      client.calls.file !== 1
+      || sentFile?.topicId !== 42
+      || sentFile?.name !== "fixture.txt"
+      || sentFile?.mimeType !== "text/plain"
+      || sentFile?.caption !== "fixture caption"
+      || sentFile?.size !== 7
+      || sentFile?.bytes !== "fixture"
+    ) throw new Error(`Browser File streaming contract failed: ${JSON.stringify(client.calls.fileInputs)}`);
+    process.stdout.write("G003 renderer: keyboard actions and direct File body passed\n");
 
     const finalMetrics = await evaluate(`({
       messageRows: document.querySelectorAll('.message-row').length,
@@ -1089,6 +1449,7 @@ async function main() {
     client.releaseTopicPage?.();
     client.releaseRead?.();
     client.releasePanel?.();
+    client.releaseFile?.();
     cdp?.close();
     await server.close();
     chrome.kill("SIGTERM");

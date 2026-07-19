@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +12,8 @@ import {
 import {
   GUI_ALLOWED_UPLOAD_MIME_TYPES,
   GUI_MAX_UPLOAD_BYTES,
+  MAX_SUPPORTED_UPLOAD_PARTS,
+  ReadConfirmationPendingError,
   TelegramUserClient,
   validateTelegramUploadMetadata,
   type ResolvedForumPeer,
@@ -77,6 +79,52 @@ function topicResult() {
   };
 }
 
+function topicReadReceipt(input: {
+  topicId: number;
+  topMessageId: number;
+  readInboxMaxId: number;
+  unreadCount: number;
+}): unknown {
+  return {
+    topics: [{
+      className: "ForumTopic",
+      id: input.topicId,
+      topMessage: input.topMessageId,
+      readInboxMaxId: input.readInboxMaxId,
+      unreadCount: input.unreadCount
+    }]
+  };
+}
+
+function appConfig(defaultParts = 4_000, premiumParts = 8_000): unknown {
+  return {
+    className: "help.AppConfig",
+    config: {
+      className: "JsonObject",
+      value: [
+        {
+          className: "JsonObjectValue",
+          key: "upload_max_fileparts_default",
+          value: { className: "JsonNumber", value: defaultParts }
+        },
+        {
+          className: "JsonObjectValue",
+          key: "upload_max_fileparts_premium",
+          value: { className: "JsonNumber", value: premiumParts }
+        }
+      ]
+    }
+  };
+}
+
+function temporaryUpload(bytes: Uint8Array): string {
+  const directory = mkdtempSync(join(tmpdir(), "chatkjb-gui-upload-client-"));
+  directories.push(directory);
+  const path = join(directory, "payload");
+  writeFileSync(path, bytes, { mode: 0o600 });
+  return path;
+}
+
 function rawMessage(input: {
   id: number;
   text: string;
@@ -87,6 +135,7 @@ function rawMessage(input: {
   replyMarkup?: unknown;
   entities?: unknown[];
   media?: unknown;
+  outgoing?: boolean;
 }) {
   return {
     className: "Message",
@@ -100,6 +149,7 @@ function rawMessage(input: {
     ...(input.editDate === undefined ? {} : { editDate: input.editDate }),
     ...(input.entities === undefined ? {} : { entities: input.entities }),
     ...(input.media === undefined ? {} : { media: input.media }),
+    ...(input.outgoing === undefined ? {} : { out: input.outgoing }),
     ...(input.replyMarkup !== undefined
       ? { replyMarkup: input.replyMarkup }
       : input.callback
@@ -121,7 +171,7 @@ function rawMessage(input: {
 
 class FakeAdapter implements TelegramUserAdapter {
   authorized = true;
-  identity: TelegramUserIdentity = { id: "123456", bot: false };
+  identity: TelegramUserIdentity = { id: "123456", bot: false, premium: false };
   resolved: ResolvedForumPeer = { peer: { fixed: true }, forum: true, megagroup: true };
   savedSession = "saved-user-session";
   rawHandler: ((update: unknown) => void) | null = null;
@@ -136,8 +186,18 @@ class FakeAdapter implements TelegramUserAdapter {
   });
   readonly checkAuthorization = vi.fn(async () => this.authorized);
   readonly getMe = vi.fn(async () => this.identity);
+  readonly getAppConfig = vi.fn(async () => appConfig());
   readonly resolveForumPeer = vi.fn(async () => this.resolved);
   readonly getForumTopics = vi.fn(async () => this.forumTopics);
+  readonly getForumTopicsById = vi.fn(async (_peer: unknown, topicIds: readonly number[]): Promise<unknown> => ({
+    topics: topicIds.map((topicId) => ({
+      className: "ForumTopic",
+      id: topicId,
+      topMessage: topicId === GENERAL_TOPIC_ID ? 10 : 92,
+      readInboxMaxId: topicId === GENERAL_TOPIC_ID ? 10 : 92,
+      unreadCount: 0
+    }))
+  }));
   readonly getGeneralHistory = vi.fn(async (
     _peer: unknown,
     _cursor: HistoryCursor,
@@ -152,6 +212,7 @@ class FakeAdapter implements TelegramUserAdapter {
     _peer: unknown,
     _input: Parameters<TelegramUserAdapter["sendFile"]>[1]
   ) => ({}));
+  readonly interruptUploadTransport = vi.fn(async () => undefined);
   readonly downloadMedia = vi.fn(async () => Uint8Array.from([1, 2, 3]));
   readonly pressCallback = vi.fn(async () => ({ message: "ok" }));
   readonly markGeneralRead = vi.fn(async () => undefined);
@@ -410,8 +471,8 @@ describe("TelegramUserClient authorization", () => {
 
   it("fails closed for a bot, a different account, and a non-forum target", async () => {
     for (const mutate of [
-      (adapter: FakeAdapter) => { adapter.identity = { id: "123456", bot: true }; },
-      (adapter: FakeAdapter) => { adapter.identity = { id: "999999", bot: false }; },
+      (adapter: FakeAdapter) => { adapter.identity = { id: "123456", bot: true, premium: false }; },
+      (adapter: FakeAdapter) => { adapter.identity = { id: "999999", bot: false, premium: false }; },
       (adapter: FakeAdapter) => { adapter.resolved = { peer: {}, forum: false, megagroup: true }; }
     ]) {
       const adapter = new FakeAdapter();
@@ -613,7 +674,7 @@ describe("TelegramUserClient authorization", () => {
     const sessionPath = temporarySessionPath();
     await writeTelegramSession(sessionPath, "rejected-session");
     const adapter = new FakeAdapter();
-    adapter.identity = { id: "999999", bot: false };
+    adapter.identity = { id: "999999", bot: false, premium: false };
     const { client } = setup(adapter, { sessionPath });
 
     await expect(client.start()).rejects.toThrow(/not authorized/);
@@ -628,7 +689,7 @@ describe("TelegramUserClient authorization", () => {
       const sessionPath = temporarySessionPath();
       await writeTelegramSession(sessionPath, "rejected-session");
       const adapter = new FakeAdapter();
-      adapter.identity = { id: "999999", bot: false };
+      adapter.identity = { id: "999999", bot: false, premium: false };
       if (failure === "exception") {
         adapter.logOut.mockImplementationOnce(async () => {
           adapter.savedSession = "";
@@ -652,7 +713,7 @@ describe("TelegramUserClient authorization", () => {
   it("does not publish raw updates before account and forum scope authorization", async () => {
     const updates: GuiTelegramUpdate[] = [];
     const adapter = new FakeAdapter();
-    adapter.identity = { id: "999999", bot: false };
+    adapter.identity = { id: "999999", bot: false, premium: false };
     adapter.onConnect = () => {
       adapter.emit({
         className: "UpdateNewChannelMessage",
@@ -739,6 +800,7 @@ describe("TelegramUserClient forum scope and actions", () => {
     expect(normalized?.attachment).toMatchObject({
       kind: "image",
       name: "photo-92.jpg",
+      filenameSource: "generated",
       mimeType: "image/jpeg",
       size: 2048,
       width: 800,
@@ -761,6 +823,94 @@ describe("TelegramUserClient forum scope and actions", () => {
       undefined
     );
     await expect(client.downloadAttachment("A".repeat(43))).rejects.toThrow(/attachment/);
+    await client.stop();
+  });
+
+  it("preserves attachment identity independent from the bounded download token", async () => {
+    const adapter = new FakeAdapter();
+    adapter.topicHistory = {
+      messages: [
+        rawMessage({
+          id: 101,
+          text: "safe raster document",
+          topicId: 42,
+          media: {
+            className: "MessageMediaDocument",
+            document: {
+              className: "Document",
+              id: "101",
+              size: 4096,
+              mimeType: "image/png",
+              attributes: [
+                { className: "DocumentAttributeFilename", fileName: "diagram.png" },
+                { className: "DocumentAttributeImageSize", w: 640, h: 480 }
+              ]
+            }
+          }
+        }),
+        rawMessage({
+          id: 102,
+          text: "sanitized",
+          topicId: 42,
+          media: {
+            className: "MessageMediaDocument",
+            document: {
+              className: "Document",
+              id: "102",
+              size: 20 * 1024 * 1024 + 1,
+              mimeType: "application/pdf",
+              attributes: [{ className: "DocumentAttributeFilename", fileName: "../secret\u202ereport.pdf" }]
+            }
+          }
+        }),
+        rawMessage({
+          id: 103,
+          text: "missing name",
+          topicId: 42,
+          media: {
+            className: "MessageMediaDocument",
+            document: {
+              className: "Document",
+              id: "103",
+              size: 512,
+              mimeType: "application/octet-stream",
+              attributes: []
+            }
+          }
+        })
+      ]
+    };
+    const { client } = setup(adapter);
+    await client.start();
+    await client.listTopics();
+
+    const messages = (await client.listMessages(42)).messages;
+    expect(messages[0]?.attachment).toMatchObject({
+      kind: "image",
+      name: "diagram.png",
+      filenameSource: "telegram",
+      mimeType: "image/png",
+      size: 4096,
+      width: 640,
+      height: 480
+    });
+    expect(messages[0]?.attachment?.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(messages[1]?.attachment).toEqual({
+      kind: "document",
+      name: ".._secret_report.pdf",
+      filenameSource: "sanitized",
+      mimeType: "application/pdf",
+      size: 20 * 1024 * 1024 + 1
+    });
+    expect(JSON.stringify(messages[1])).not.toContain("../secret");
+    expect(messages[2]?.attachment).toMatchObject({
+      kind: "document",
+      name: "document-103.bin",
+      filenameSource: "generated",
+      mimeType: "application/octet-stream",
+      size: 512
+    });
+    expect(messages[2]?.attachment?.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     await client.stop();
   });
 
@@ -1211,47 +1361,177 @@ describe("TelegramUserClient forum scope and actions", () => {
     ]);
     expect(adapter.markGeneralRead).toHaveBeenCalledWith(adapter.resolved.peer, 10);
     expect(adapter.markTopicRead).toHaveBeenCalledWith(adapter.resolved.peer, 42, 92);
+    expect(adapter.getForumTopicsById.mock.calls).toEqual([
+      [adapter.resolved.peer, [GENERAL_TOPIC_ID]],
+      [adapter.resolved.peer, [42]]
+    ]);
     expect(adapter.setTyping).toHaveBeenCalledWith(adapter.resolved.peer, 42, true);
     await client.stop();
   });
 
-  it("builds byte-only General and forum topic file requests", async () => {
+  it("waits for an authoritative exact-topic read receipt before resolving", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, adapter } = setup();
+      await client.start();
+      await client.listTopics();
+      adapter.getForumTopicsById
+        .mockResolvedValueOnce(topicReadReceipt({
+          topicId: 42,
+          topMessageId: 92,
+          readInboxMaxId: 90,
+          unreadCount: 2
+        }))
+        .mockResolvedValueOnce(topicReadReceipt({
+          topicId: 42,
+          topMessageId: 92,
+          readInboxMaxId: 92,
+          unreadCount: 0
+        }));
+
+      let resolved = false;
+      const reading = client.markRead(42, 92).then(() => { resolved = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(adapter.markTopicRead).toHaveBeenCalledOnce();
+      expect(adapter.getForumTopicsById).toHaveBeenCalledOnce();
+      expect(resolved).toBe(false);
+
+      await vi.runAllTimersAsync();
+      await reading;
+      expect(adapter.getForumTopicsById).toHaveBeenCalledTimes(2);
+      expect(resolved).toBe(true);
+      await client.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("classifies only four stale exact-topic read receipts as confirmation pending", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, adapter } = setup();
+      await client.start();
+      await client.listTopics();
+      adapter.getForumTopicsById.mockResolvedValue(topicReadReceipt({
+        topicId: 42,
+        topMessageId: 92,
+        readInboxMaxId: 90,
+        unreadCount: 2
+      }));
+
+      const reading = client.markRead(42, 92);
+      const rejection = expect(reading).rejects.toMatchObject({
+        name: "ReadConfirmationPendingError",
+        code: "READ_CONFIRMATION_PENDING"
+      });
+      await vi.runAllTimersAsync();
+      await rejection;
+      expect(adapter.getForumTopicsById).toHaveBeenCalledTimes(4);
+      expect(ReadConfirmationPendingError).toBeTypeOf("function");
+      await client.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("accepts outgoing-top and newer-message confirmation boundaries", async () => {
+    const { client, adapter } = setup();
+    await client.start();
+    await client.listTopics();
+    adapter.getForumTopicsById
+      .mockResolvedValueOnce(topicReadReceipt({
+        topicId: 42,
+        topMessageId: 92,
+        readInboxMaxId: 90,
+        unreadCount: 0
+      }))
+      .mockResolvedValueOnce(topicReadReceipt({
+        topicId: 42,
+        topMessageId: 94,
+        readInboxMaxId: 92,
+        unreadCount: 1
+      }));
+
+    await expect(client.markRead(42, 92)).resolves.toBeUndefined();
+    await expect(client.markRead(42, 92)).resolves.toBeUndefined();
+    expect(adapter.getForumTopicsById).toHaveBeenCalledTimes(2);
+    await client.stop();
+  });
+
+  it("rejects missing or malformed exact-topic read receipts", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const invalid of [
+        { topics: [] },
+        topicReadReceipt({ topicId: 42, topMessageId: 92, readInboxMaxId: 93, unreadCount: 0 }),
+        topicReadReceipt({ topicId: 42, topMessageId: 92, readInboxMaxId: 92, unreadCount: -1 })
+      ]) {
+        const { client, adapter } = setup();
+        await client.start();
+        await client.listTopics();
+        adapter.getForumTopicsById.mockResolvedValue(invalid);
+        const reading = client.markRead(42, 92);
+        const rejection = expect(reading).rejects.not.toBeInstanceOf(ReadConfirmationPendingError);
+        await vi.runAllTimersAsync();
+        await rejection;
+        await client.stop();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("builds path-only General and forum topic file requests", async () => {
     const { client, adapter } = setup();
     await client.start();
     await client.listTopics();
     const imageBytes = Uint8Array.from([0xff, 0xd8, 0xff]);
     const documentBytes = Uint8Array.from([0x25, 0x50, 0x44, 0x46]);
     const svgBytes = new TextEncoder().encode("<svg xmlns=\"http://www.w3.org/2000/svg\"/>");
+    const imagePath = temporaryUpload(imageBytes);
+    const documentPath = temporaryUpload(documentBytes);
+    const svgPath = temporaryUpload(svgBytes);
+    const signals = [new AbortController(), new AbortController(), new AbortController()];
 
     await client.sendFile(GENERAL_TOPIC_ID, {
       name: "photo.jpg",
       mimeType: "image/jpeg",
-      bytes: imageBytes,
+      path: imagePath,
+      size: imageBytes.byteLength,
+      signal: signals[0]!.signal,
       caption: "photo"
     });
     await client.sendFile(42, {
       name: "report.pdf",
       mimeType: "application/pdf",
-      bytes: documentBytes
+      path: documentPath,
+      size: documentBytes.byteLength,
+      signal: signals[1]!.signal
     });
     await client.sendFile(42, {
       name: "diagram.svg",
       mimeType: "image/svg+xml",
-      bytes: svgBytes
+      path: svgPath,
+      size: svgBytes.byteLength,
+      signal: signals[2]!.signal
     });
 
     expect(adapter.sendFile.mock.calls).toEqual([
       [adapter.resolved.peer, {
         name: "photo.jpg",
         mimeType: "image/jpeg",
-        bytes: imageBytes,
+        path: imagePath,
+        size: imageBytes.byteLength,
+        signal: signals[0]!.signal,
         caption: "photo",
-        forceDocument: false
+        forceDocument: true
       }],
       [adapter.resolved.peer, {
         name: "report.pdf",
         mimeType: "application/pdf",
-        bytes: documentBytes,
+        path: documentPath,
+        size: documentBytes.byteLength,
+        signal: signals[1]!.signal,
         forceDocument: true,
         replyToMessageId: 42,
         topMessageId: 42
@@ -1259,12 +1539,103 @@ describe("TelegramUserClient forum scope and actions", () => {
       [adapter.resolved.peer, {
         name: "diagram.svg",
         mimeType: "image/svg+xml",
-        bytes: svgBytes,
+        path: svgPath,
+        size: svgBytes.byteLength,
+        signal: signals[2]!.signal,
         forceDocument: true,
         replyToMessageId: 42,
         topMessageId: 42
       }]
     ]);
+    await client.stop();
+  });
+
+  it("publishes only an exact outgoing sent file and ignores unsafe return shapes", async () => {
+    const updates: GuiTelegramUpdate[] = [];
+    const { client, adapter } = setup(undefined, { onUpdate: (update) => updates.push(update) });
+    await client.start();
+    await client.listTopics();
+    updates.length = 0;
+    const sent = rawMessage({
+      id: 104,
+      text: "caption",
+      topicId: 42,
+      outgoing: true,
+      media: {
+        className: "MessageMediaDocument",
+        document: {
+          className: "Document",
+          id: "104",
+          size: 4,
+          mimeType: "application/pdf",
+          attributes: [{ className: "DocumentAttributeFilename", fileName: "report.pdf" }]
+        }
+      }
+    });
+    const sentMedia = (id: string, size: number) => ({
+      className: "MessageMediaDocument",
+      document: {
+        className: "Document",
+        id,
+        size,
+        mimeType: "application/pdf",
+        attributes: [{ className: "DocumentAttributeFilename", fileName: "report.pdf" }]
+      }
+    });
+    adapter.sendFile
+      .mockResolvedValueOnce(sent)
+      .mockResolvedValueOnce({ className: "Updates" })
+      .mockResolvedValueOnce(rawMessage({ id: 105, text: "incoming", topicId: 42, outgoing: false, media: sentMedia("105", 1) }))
+      .mockResolvedValueOnce(rawMessage({ id: 106, text: "text only", topicId: 42, outgoing: true }))
+      .mockResolvedValueOnce(rawMessage({ id: 107, text: "wrong size", topicId: 42, outgoing: true, media: sentMedia("107", 2) }))
+      .mockResolvedValueOnce(rawMessage({ id: 108, text: "wrong topic", topicId: 77, outgoing: true, media: sentMedia("108", 1) }))
+      .mockResolvedValueOnce(rawMessage({ id: 109, text: "wrong chat", channelId: 999, topicId: 42, outgoing: true, media: sentMedia("109", 1) }));
+    const firstPath = temporaryUpload(Uint8Array.of(1, 2, 3, 4));
+    const oneBytePath = temporaryUpload(Uint8Array.of(1));
+
+    await expect(client.sendFile(42, {
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      path: firstPath,
+      size: 4,
+      signal: new AbortController().signal,
+      caption: "caption"
+    })).resolves.toBeUndefined();
+    expect(updates).toEqual([{
+      type: "message_upsert",
+      message: expect.objectContaining({
+        id: 104,
+        topicId: 42,
+        text: "caption",
+        outgoing: true,
+        attachment: expect.objectContaining({
+          kind: "document",
+          name: "report.pdf",
+          filenameSource: "telegram",
+          token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/)
+        })
+      })
+    }]);
+
+    for (const name of ["invalid-shape.pdf", "incoming.pdf", "text-only.pdf", "wrong-size.pdf", "wrong-topic.pdf", "wrong-chat.pdf"]) {
+      await expect(client.sendFile(42, {
+        name,
+        mimeType: "application/pdf",
+        path: oneBytePath,
+        size: 1,
+        signal: new AbortController().signal
+      })).resolves.toBeUndefined();
+    }
+    expect(updates).toHaveLength(1);
+
+    adapter.topicHistory = { messages: [sent] };
+    adapter.emit({ className: "UpdateNewChannelMessage", message: sent });
+    expect(updates).toHaveLength(2);
+    const immediate = updates[0]?.type === "message_upsert" ? updates[0].message : null;
+    const native = updates[1]?.type === "message_upsert" ? updates[1].message : null;
+    expect(native).toEqual(immediate);
+    const history = await client.listMessages(42);
+    expect(history.messages).toEqual([immediate]);
     await client.stop();
   });
 
@@ -1297,27 +1668,462 @@ describe("TelegramUserClient forum scope and actions", () => {
       .toThrow(/caption/);
   });
 
+  it("selects strict runtime standard and Premium upload part limits with bounded fallback", async () => {
+    const inheritedAuthority = appConfig(3_000, 7_000) as { config: unknown; };
+    const inheritedConfig = Object.create({
+      className: "help.AppConfig",
+      config: inheritedAuthority.config
+    });
+    const cases: Array<{
+      premium: unknown;
+      config: unknown;
+      expected: number;
+    }> = [
+      { premium: false, config: appConfig(3_000, 7_000), expected: 3_000 * 512 * 1024 },
+      { premium: true, config: appConfig(3_000, 7_000), expected: 7_000 * 512 * 1024 },
+      { premium: true, config: appConfig(4_000, 8_000), expected: 4_194_304_000 },
+      { premium: true, config: appConfig(4_000, 8_001), expected: 4_194_304_000 },
+      { premium: false, config: appConfig(7_000, 3_000), expected: 2_097_152_000 },
+      { premium: "yes", config: appConfig(3_000, 7_000), expected: 3_000 * 512 * 1024 },
+      { premium: true, config: { className: "help.AppConfigNotModified" }, expected: 4_194_304_000 },
+      { premium: true, config: inheritedConfig, expected: 4_194_304_000 },
+      { premium: false, config: appConfig(2_147_483_647, 2_147_483_647), expected: 2_097_152_000 }
+    ];
+    for (const fixture of cases) {
+      const adapter = new FakeAdapter();
+      adapter.identity = { id: "123456", bot: false, premium: fixture.premium } as TelegramUserIdentity;
+      adapter.getAppConfig.mockResolvedValue(fixture.config);
+      const { client } = setup(adapter);
+      await client.start();
+      expect(client.uploadLimitBytes()).toBe(fixture.expected);
+      await client.stop();
+      expect(client.uploadLimitBytes()).toBe(2_097_152_000);
+    }
+
+    const missingDefault = new FakeAdapter();
+    missingDefault.identity.premium = true;
+    missingDefault.getAppConfig.mockResolvedValue({
+      className: "help.AppConfig",
+      config: {
+        className: "JsonObject",
+        value: [{
+          className: "JsonObjectValue",
+          key: "upload_max_fileparts_premium",
+          value: { className: "JsonNumber", value: 6_000 }
+        }]
+      }
+    });
+    const { client: missingClient } = setup(missingDefault);
+    await missingClient.start();
+    expect(missingClient.uploadLimitBytes()).toBe(6_000 * 512 * 1024);
+    await missingClient.stop();
+
+    const unavailable = new FakeAdapter();
+    unavailable.identity.premium = true;
+    unavailable.getAppConfig.mockRejectedValue(new Error("unavailable"));
+    const { client: unavailableClient } = setup(unavailable);
+    await unavailableClient.start();
+    expect(unavailableClient.uploadLimitBytes()).toBe(4_194_304_000);
+    await unavailableClient.stop();
+  });
+
+  it("accepts the exact 8000-part Premium boundary without allocating a GiB heap buffer", async () => {
+    const adapter = new FakeAdapter();
+    adapter.identity.premium = true;
+    const { client } = setup(adapter);
+    await client.start();
+    await client.listTopics();
+    const path = temporaryUpload(Uint8Array.of(0));
+    truncateSync(path, GUI_MAX_UPLOAD_BYTES);
+
+    await expect(client.sendFile(GENERAL_TOPIC_ID, {
+      name: "large.bin",
+      mimeType: "application/octet-stream",
+      path,
+      size: GUI_MAX_UPLOAD_BYTES,
+      signal: new AbortController().signal
+    })).resolves.toBeUndefined();
+    expect(adapter.sendFile).toHaveBeenCalledWith(adapter.resolved.peer, expect.objectContaining({
+      path,
+      size: GUI_MAX_UPLOAD_BYTES,
+      forceDocument: true
+    }));
+    await client.stop();
+  });
+
+  it("releases the file after abort settlement and interrupts only after the 15-second grace", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: string[] = [];
+      const adapter = new FakeAdapter();
+      let rejectSend!: (error: Error) => void;
+      adapter.sendFile.mockImplementationOnce(async () => await new Promise<never>((_resolve, reject) => {
+        rejectSend = reject;
+      }));
+      adapter.interruptUploadTransport.mockImplementationOnce(async () => {
+        events.push("interrupt");
+        rejectSend(new Error("transport interrupted"));
+      });
+      const { client } = setup(adapter);
+      await client.start();
+      await client.listTopics();
+      adapter.connect.mockImplementation(async () => {
+        events.push("recovery-connect");
+      });
+      const controller = new AbortController();
+      const path = temporaryUpload(Uint8Array.of(1));
+      const sending = client.sendFile(42, {
+        name: "cancel.txt",
+        mimeType: "text/plain",
+        path,
+        size: 1,
+        signal: controller.signal,
+        onFileReleased: () => { events.push("release"); }
+      });
+      const rejected = expect(sending).rejects.toThrow(/transport interrupted/);
+      await vi.waitFor(() => expect(adapter.sendFile).toHaveBeenCalledOnce());
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(adapter.interruptUploadTransport).not.toHaveBeenCalled();
+      expect(events).toEqual([]);
+      expect(existsSync(path)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+
+      await rejected;
+      expect(events.slice(0, 3)).toEqual(["interrupt", "release", "recovery-connect"]);
+      expect(adapter.interruptUploadTransport).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases the file but bounds a hanging interrupt hook before reconnecting", async () => {
+    vi.useFakeTimers();
+    try {
+      const adapter = new FakeAdapter();
+      let rejectSend!: (error: Error) => void;
+      adapter.sendFile.mockImplementationOnce(async () => await new Promise<never>((_resolve, reject) => {
+        rejectSend = reject;
+      }));
+      adapter.interruptUploadTransport.mockImplementationOnce(async () => {
+        rejectSend(new Error("transport interrupted"));
+        await new Promise<never>(() => undefined);
+      });
+      const { client } = setup(adapter);
+      await client.start();
+      await client.listTopics();
+      const controller = new AbortController();
+      const path = temporaryUpload(Uint8Array.of(1));
+      let releases = 0;
+      const sending = client.sendFile(42, {
+        name: "hung-interrupt.txt",
+        mimeType: "text/plain",
+        path,
+        size: 1,
+        signal: controller.signal,
+        onFileReleased: () => { releases += 1; }
+      });
+      const rejected = expect(sending).rejects.toThrow(/recovery failed/);
+      await vi.waitFor(() => expect(adapter.sendFile).toHaveBeenCalledOnce());
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(releases).toBe(1);
+      expect(adapter.connect).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+      await rejected;
+      expect(releases).toBe(1);
+      expect(adapter.connect).toHaveBeenCalledOnce();
+      expect(adapter.interruptUploadTransport).toHaveBeenCalledOnce();
+      expect(adapter.disconnect).toHaveBeenCalled();
+      await client.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not interrupt when the adapter honors cancellation during the grace period", async () => {
+    const adapter = new FakeAdapter();
+    adapter.sendFile.mockImplementationOnce(async (_peer, request) => await new Promise<never>((_resolve, reject) => {
+      request.signal.addEventListener("abort", () => reject(new Error("cancelled by signal")), { once: true });
+    }));
+    const { client } = setup(adapter);
+    await client.start();
+    await client.listTopics();
+    const controller = new AbortController();
+    let releases = 0;
+    const sending = client.sendFile(42, {
+      name: "cooperative.txt",
+      mimeType: "text/plain",
+      path: temporaryUpload(Uint8Array.of(1)),
+      size: 1,
+      signal: controller.signal,
+      onFileReleased: () => { releases += 1; }
+    });
+    const rejected = expect(sending).rejects.toThrow(/cancelled by signal/);
+    await vi.waitFor(() => expect(adapter.sendFile).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await rejected;
+    expect(adapter.interruptUploadTransport).not.toHaveBeenCalled();
+    expect(releases).toBe(1);
+    await client.stop();
+  });
+
+  it("bounds post-interrupt recovery to two minutes and enters error state", async () => {
+    vi.useFakeTimers();
+    try {
+      const states: GuiAuthState[] = [];
+      const adapter = new FakeAdapter();
+      let rejectSend!: (error: Error) => void;
+      adapter.sendFile.mockImplementationOnce(async () => await new Promise<never>((_resolve, reject) => {
+        rejectSend = reject;
+      }));
+      adapter.interruptUploadTransport.mockImplementationOnce(async () => {
+        rejectSend(new Error("transport interrupted"));
+      });
+      const { client } = setup(adapter, { onAuthState: (state) => states.push(state) });
+      await client.start();
+      await client.listTopics();
+      adapter.connect.mockImplementation(async () => await new Promise<never>(() => undefined));
+      const controller = new AbortController();
+      const path = temporaryUpload(Uint8Array.of(1));
+      let releases = 0;
+      const sending = client.sendFile(42, {
+        name: "timeout.txt",
+        mimeType: "text/plain",
+        path,
+        size: 1,
+        signal: controller.signal,
+        onFileReleased: () => { releases += 1; }
+      });
+      const rejected = expect(sending).rejects.toThrow(/recovery failed/);
+      await vi.waitFor(() => expect(adapter.sendFile).toHaveBeenCalledOnce());
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(releases).toBe(1);
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+
+      await rejected;
+      expect(states.map((state) => state.state)).toContain("reconnecting");
+      expect(states.at(-1)?.state).toBe("error");
+      expect(adapter.disconnect).toHaveBeenCalled();
+      expect(releases).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["checkAuthorization", "getMe", "getAppConfig", "resolveForumPeer", "catchUp"] as const)(
+    "bounds a hanging recovery %s stage to the same two-minute deadline",
+    async (stage) => {
+      vi.useFakeTimers();
+      try {
+        const adapter = new FakeAdapter();
+        let rejectSend!: (error: Error) => void;
+        adapter.sendFile.mockImplementationOnce(async () => await new Promise<never>((_resolve, reject) => {
+          rejectSend = reject;
+        }));
+        adapter.interruptUploadTransport.mockImplementationOnce(async () => {
+          rejectSend(new Error("transport interrupted"));
+        });
+        const { client } = setup(adapter);
+        await client.start();
+        await client.listTopics();
+        adapter[stage].mockImplementation(async () => await new Promise<never>(() => undefined));
+        const controller = new AbortController();
+        const path = temporaryUpload(Uint8Array.of(1));
+        let releases = 0;
+        const sending = client.sendFile(42, {
+          name: `${stage}.txt`,
+          mimeType: "text/plain",
+          path,
+          size: 1,
+          signal: controller.signal,
+          onFileReleased: () => { releases += 1; }
+        });
+        const rejected = expect(sending).rejects.toThrow(/recovery failed/);
+        await vi.waitFor(() => expect(adapter.sendFile).toHaveBeenCalledOnce());
+        controller.abort();
+        await vi.advanceTimersByTimeAsync(15_000);
+        await vi.advanceTimersByTimeAsync(2 * 60_000);
+
+        await rejected;
+        expect(releases).toBe(1);
+        expect(adapter.disconnect).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it.each([
+    ["connect", "checkAuthorization"],
+    ["checkAuthorization", "getMe"],
+    ["getMe", "getAppConfig"],
+    ["getAppConfig", "resolveForumPeer"],
+    ["resolveForumPeer", "catchUp"],
+    ["catchUp", null]
+  ] as const)(
+    "does not continue after a late recovery %s stage settles past its deadline",
+    async (stage, nextStage) => {
+      vi.useFakeTimers();
+      try {
+        const adapter = new FakeAdapter();
+        let rejectSend!: (error: Error) => void;
+        adapter.sendFile.mockImplementationOnce(async () => await new Promise<never>((_resolve, reject) => {
+          rejectSend = reject;
+        }));
+        adapter.interruptUploadTransport.mockImplementationOnce(async () => {
+          rejectSend(new Error("transport interrupted"));
+        });
+        const states: GuiAuthState[] = [];
+        const { client } = setup(adapter, { onAuthState: (state) => states.push(state) });
+        await client.start();
+        await client.listTopics();
+        const stageCallsBefore = adapter[stage].mock.calls.length;
+        const nextCallsBefore = nextStage === null ? 0 : adapter[nextStage].mock.calls.length;
+        let resolveStage!: () => void;
+        adapter[stage].mockImplementation(async () => await new Promise<never>((resolve) => {
+          resolveStage = resolve as unknown as () => void;
+        }));
+        const controller = new AbortController();
+        const path = temporaryUpload(Uint8Array.of(1));
+        const sending = client.sendFile(42, {
+          name: `late-${stage}.txt`,
+          mimeType: "text/plain",
+          path,
+          size: 1,
+          signal: controller.signal
+        });
+        const rejected = expect(sending).rejects.toThrow(/recovery failed/);
+        await vi.waitFor(() => expect(adapter.sendFile).toHaveBeenCalledOnce());
+        controller.abort();
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(adapter[stage].mock.calls.length).toBe(stageCallsBefore + 1);
+        await vi.advanceTimersByTimeAsync(2 * 60_000);
+        await rejected;
+        expect(states.at(-1)?.state).toBe("error");
+        const disconnectsAtDeadline = adapter.disconnect.mock.calls.length;
+
+        resolveStage();
+        await vi.advanceTimersByTimeAsync(0);
+        if (nextStage !== null) expect(adapter[nextStage].mock.calls.length).toBe(nextCallsBefore);
+        expect(adapter.disconnect.mock.calls.length).toBeGreaterThan(disconnectsAtDeadline);
+        expect(states.at(-1)?.state).toBe("error");
+        await client.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it("fails recovery closed when Telegram authorization is lost", async () => {
+    vi.useFakeTimers();
+    try {
+      const states: GuiAuthState[] = [];
+      const adapter = new FakeAdapter();
+      let rejectSend!: (error: Error) => void;
+      adapter.sendFile.mockImplementationOnce(async () => await new Promise<never>((_resolve, reject) => {
+        rejectSend = reject;
+      }));
+      adapter.interruptUploadTransport.mockImplementationOnce(async () => {
+        rejectSend(new Error("transport interrupted"));
+      });
+      const { client } = setup(adapter, { onAuthState: (state) => states.push(state) });
+      await client.start();
+      await client.listTopics();
+      adapter.checkAuthorization.mockResolvedValueOnce(false);
+      const controller = new AbortController();
+      const path = temporaryUpload(Uint8Array.of(1));
+      let releases = 0;
+      const sending = client.sendFile(42, {
+        name: "authorization-lost.txt",
+        mimeType: "text/plain",
+        path,
+        size: 1,
+        signal: controller.signal,
+        onFileReleased: () => { releases += 1; }
+      });
+      const rejected = expect(sending).rejects.toThrow(/recovery failed/);
+      await vi.waitFor(() => expect(adapter.sendFile).toHaveBeenCalledOnce());
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      await rejected;
+      expect(releases).toBe(1);
+      expect(states.at(-1)?.state).toBe("error");
+      await client.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a hanging recovery immediately when lifecycle close begins", async () => {
+    vi.useFakeTimers();
+    try {
+      const adapter = new FakeAdapter();
+      let rejectSend!: (error: Error) => void;
+      adapter.sendFile.mockImplementationOnce(async () => await new Promise<never>((_resolve, reject) => {
+        rejectSend = reject;
+      }));
+      adapter.interruptUploadTransport.mockImplementationOnce(async () => {
+        rejectSend(new Error("transport interrupted"));
+      });
+      const { client } = setup(adapter);
+      await client.start();
+      await client.listTopics();
+      adapter.connect.mockImplementation(async () => await new Promise<never>(() => undefined));
+      const controller = new AbortController();
+      const path = temporaryUpload(Uint8Array.of(1));
+      const sending = client.sendFile(42, {
+        name: "closing.txt",
+        mimeType: "text/plain",
+        path,
+        size: 1,
+        signal: controller.signal
+      });
+      const rejected = expect(sending).rejects.toThrow(/recovery failed/);
+      await vi.waitFor(() => expect(adapter.sendFile).toHaveBeenCalledOnce());
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.waitFor(() => expect(adapter.connect).toHaveBeenCalled());
+
+      await client.stop();
+      await rejected;
+      expect(adapter.disconnect).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects empty, oversized, malformed, and authority-bearing uploads before adapter use", async () => {
     const { client, adapter } = setup();
     await client.start();
     await client.listTopics();
+    const path = temporaryUpload(Uint8Array.of(1));
     const base: TelegramUploadInput = {
       name: "safe.txt",
       mimeType: "text/plain",
-      bytes: Uint8Array.of(1)
+      path,
+      size: 1,
+      signal: new AbortController().signal
     };
-    expect(GUI_MAX_UPLOAD_BYTES).toBe(100 * 1024 * 1024);
-    const oversizedBytes = Object.create(Uint8Array.prototype) as Uint8Array;
-    Object.defineProperty(oversizedBytes, "byteLength", { value: GUI_MAX_UPLOAD_BYTES + 1 });
+    expect(MAX_SUPPORTED_UPLOAD_PARTS).toBe(8_000);
+    expect(GUI_MAX_UPLOAD_BYTES).toBe(4_194_304_000);
+    expect(client.uploadLimitBytes()).toBe(2_097_152_000);
 
     const invalidInputs: unknown[] = [
-      { ...base, bytes: new Uint8Array() },
-      { ...base, bytes: oversizedBytes },
-      { ...base, bytes: "not-bytes" },
+      { ...base, size: 0 },
+      { ...base, size: client.uploadLimitBytes() + 1 },
+      { ...base, size: 2 },
+      { ...base, path: "relative/payload" },
+      { ...base, path: join(tmpdir(), "missing-chatkjb-upload") },
+      { ...base, signal: {} },
       { ...base, name: "../escape.txt" },
       { ...base, mimeType: "text/html" },
       { ...base, caption: "x".repeat(1025) },
-      ...["path", "url", "chat", "peer", "reply"].map((field) => ({ ...base, [field]: "forbidden" }))
+      { ...base, bytes: Uint8Array.of(1) },
+      ...["url", "chat", "peer", "reply"].map((field) => ({ ...base, [field]: "forbidden" }))
     ];
 
     for (const input of invalidInputs) {
@@ -1325,10 +2131,7 @@ describe("TelegramUserClient forum scope and actions", () => {
     }
     expect(adapter.sendFile).not.toHaveBeenCalled();
 
-    await expect(client.sendFile(GENERAL_TOPIC_ID, {
-      ...base,
-      bytes: new Uint8Array(GUI_MAX_UPLOAD_BYTES)
-    })).resolves.toBeUndefined();
+    await expect(client.sendFile(GENERAL_TOPIC_ID, base)).resolves.toBeUndefined();
     expect(adapter.sendFile).toHaveBeenCalledOnce();
     await client.stop();
   });

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error The browser module is copied verbatim and intentionally has no Node declaration file.
-import { formatBytes, GENERAL_PANEL_FALLBACK_ROWS, isAllowedUploadFile, parseEventId, shouldApplyGeneralPanelMessage, shouldSubmitComposerKey } from "../src/gui/web/app.js";
+import { attachmentProvenanceLabel, attachmentTypeLabel, formatBytes, GENERAL_PANEL_FALLBACK_ROWS, isAllowedUploadFile, parseEventId, shouldApplyGeneralPanelMessage, shouldSubmitComposerKey, topicSnapshotGenerationIsCurrent } from "../src/gui/web/app.js";
 
 const webDirectory = resolve(import.meta.dirname, "..", "src", "gui", "web");
 
@@ -39,10 +39,28 @@ describe("GUI web interaction helpers", () => {
     expect(formatBytes(100)).toBe("100 B");
     expect(formatBytes(1024)).toBe("1.0 KiB");
     expect(formatBytes(1024 * 1024)).toBe("1.0 MiB");
+    expect(formatBytes(4_194_304_000)).toBe("3.91 GiB");
   });
 
-  it("accepts the 100 MiB browser upload boundary and rejects one byte over", () => {
-    const limit = 100 * 1024 * 1024;
+  it("labels Telegram, sanitized, and generated attachment identity without exposing fallback names", () => {
+    expect(attachmentProvenanceLabel({ kind: "document", filenameSource: "telegram" }))
+      .toBe("Telegram 원본 파일명");
+    expect(attachmentProvenanceLabel({ kind: "document", filenameSource: "sanitized" }))
+      .toBe("안전하게 정리된 파일명");
+    expect(attachmentProvenanceLabel({ kind: "image", filenameSource: "generated" }))
+      .toBe("Telegram 사진 · 원본 파일명 없음");
+    expect(attachmentProvenanceLabel({ kind: "document", filenameSource: "generated" }))
+      .toBe("Telegram 문서 · 원본 파일명 없음");
+    expect(attachmentTypeLabel({ kind: "image", mimeType: "image/webp" }))
+      .toBe("WebP 이미지 · image/webp");
+    expect(attachmentTypeLabel({ kind: "document", mimeType: "application/x-custom" }))
+      .toBe("문서 · application/x-custom");
+    const script = readFileSync(resolve(webDirectory, "app.js"), "utf8");
+    expect(script).toMatch(/filenameSource === "generated"[\s\S]*?"문서 다운로드"/);
+  });
+
+  it("accepts the Telegram Premium browser boundary and rejects one byte over", () => {
+    const limit = 4_194_304_000;
     expect(isAllowedUploadFile({ type: "image/svg+xml", size: limit }, limit)).toBe(true);
     expect(isAllowedUploadFile({ type: "image/svg+xml", size: limit + 1 }, limit)).toBe(false);
     expect(isAllowedUploadFile({ type: "text/html", size: 1 }, limit)).toBe(false);
@@ -61,6 +79,15 @@ describe("GUI web interaction helpers", () => {
     expect(shouldApplyGeneralPanelMessage(42, 41)).toBe(false);
     expect(shouldApplyGeneralPanelMessage(42, 0)).toBe(false);
     expect(shouldApplyGeneralPanelMessage(42, Number.NaN)).toBe(false);
+  });
+
+  it("accepts only identical safe topic snapshot generations", () => {
+    expect(topicSnapshotGenerationIsCurrent(0, 0)).toBe(true);
+    expect(topicSnapshotGenerationIsCurrent(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)).toBe(true);
+    expect(topicSnapshotGenerationIsCurrent(0, 1)).toBe(false);
+    expect(topicSnapshotGenerationIsCurrent(1, 0)).toBe(false);
+    expect(topicSnapshotGenerationIsCurrent(Number.MAX_SAFE_INTEGER + 1, Number.MAX_SAFE_INTEGER + 1)).toBe(false);
+    expect(topicSnapshotGenerationIsCurrent(Number.NaN, Number.NaN)).toBe(false);
   });
 });
 
@@ -82,6 +109,13 @@ describe("GUI web static security and responsive contract", () => {
       "serviceWorker",
       "console."
     ]) expect(script).not.toContain(forbidden);
+    for (const required of [
+      "attachment-metadata",
+      "attachment-action",
+      "안전하게 정리된 파일명",
+      "원본 파일명 없음",
+      "다운로드 한도 초과 · 파일 정보만 표시"
+    ]) expect(script).toContain(required);
     expect(script).toContain("document.createTextNode");
     expect(script).toContain("textContent");
     expect(script).toContain("noopener noreferrer");
@@ -89,6 +123,9 @@ describe("GUI web static security and responsive contract", () => {
     expect(html).not.toContain('autocomplete="current-password"');
     expect(html).toContain("image/svg+xml");
     expect(script).toContain("formatBytes(state.limits.uploadBytes)");
+    expect(script).not.toContain("file.arrayBuffer(");
+    expect(script).toMatch(/body:\s*file,/);
+    expect(script).toContain("전송 중");
   });
 
   it("keeps message rows full-width, normal text wrapping, and horizontal overflow on pre only", () => {
@@ -133,16 +170,36 @@ describe("GUI web static security and responsive contract", () => {
     expect(css).toMatch(/\.general-panel\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
   });
 
-  it("tracks topic read state by message id and never clears unread state on request failure", () => {
+  it("retries only pending read confirmations and cancels stale read work", () => {
     const script = readFileSync(resolve(webDirectory, "app.js"), "utf8");
     expect(script).toContain("latestUnreadMessageId");
     expect(script).toContain("inFlightTarget");
+    expect(script).toContain("const READ_CONFIRMATION_RETRY_DELAYS_MS = [750, 2000, 5000]");
+    expect(script).toContain('errorCode(error) === "READ_CONFIRMATION_PENDING"');
+    expect(script).toContain("pendingTarget");
+    expect(script).toContain("requestAbort");
+    expect(script).toContain("failedTarget");
+    expect(script).toContain("retryTarget");
+    expect(script).toContain("retireConfirmedReadState");
+    expect(script).toContain("cancelReadConfirmation");
+    expect(script).toContain("cancelAllReadConfirmations");
     // 읽음 해제 판정은 단조 증가하는 메시지 id로만 한다. 세대(generation) 일치를
     // 조건으로 두면 스트리밍 중 확인 요청이 매번 무효화되어 배지가 남는다.
-    expect(script).toContain("read.latestUnreadMessageId <= max");
+    expect(script).toContain("read.latestUnreadMessageId <= target");
     expect(script).not.toMatch(/read\.unreadGeneration === unreadGeneration/);
-    // 요청이 실패하면 읽음 상태를 건드리지 않는다.
-    expect(script).toMatch(/catch \{\s*\/\/ Read markers are best effort[\s\S]*?finally/);
+    // 영구 실패는 자동 재시도하지 않고, pending 전용 응답만 제한적으로 재시도한다.
+    expect(script).toMatch(/catch \(error\)[\s\S]*?READ_CONFIRMATION_PENDING[\s\S]*?scheduleReadConfirmationRetry/);
+    const coalescingStart = script.indexOf("if (read.inFlightTarget > 0)");
+    const coalescingEnd = script.indexOf("read.pendingTarget = Math.max(read.pendingTarget, max)", coalescingStart);
+    const coalescingBlock = script.slice(coalescingStart, coalescingEnd);
+    expect(coalescingBlock).toMatch(/max > Math\.max\(read\.inFlightTarget, read\.pendingTarget\)[\s\S]*?read\.pendingTarget = max/);
+    expect(coalescingBlock).not.toContain("abort()");
+    expect(script).toMatch(/READ_CONFIRMATION_PENDING[\s\S]*?read\.pendingTarget > target[\s\S]*?followUp = true;[\s\S]*?scheduleReadConfirmationRetry/);
+    expect(script).toContain("if (read.pendingTarget <= target) read.pendingTarget = 0");
+    expect(script).toMatch(/topic\.unreadCount > 0[\s\S]*?read\.highWater = Math\.max\(read\.highWater, topic\.topMessageId\);[\s\S]*?retireConfirmedReadState\(read, read\.highWater\)/);
+    expect(script).toMatch(/read\.highWater >= max[\s\S]*?retireConfirmedReadState\(read, read\.highWater\);[\s\S]*?return;/);
+    expect(script).toMatch(/selectTopic[\s\S]*?cancelReadConfirmation/);
+    expect(script).toMatch(/addEventListener\("pagehide"[\s\S]*?cancelAllReadConfirmations/);
     expect(script).toContain("const isNewIncoming = !existingMessage && !wasKnownByTopic && message.outgoing !== true");
   });
 
@@ -175,6 +232,9 @@ describe("GUI web static security and responsive contract", () => {
     const script = readFileSync(resolve(webDirectory, "app.js"), "utf8");
     expect(script).toContain("const topics = new Map();");
     expect(script).toContain("state.topics = topics;");
+    expect(script).toContain("topicReadGeneration: 0");
+    expect(script).toMatch(/for \(let attempt[\s\S]*?const topicReadGeneration = state\.topicReadGeneration;[\s\S]*?await requestJson[\s\S]*?topicSnapshotGenerationIsCurrent\(topicReadGeneration, state\.topicReadGeneration\)[\s\S]*?state\.topics = topics;/);
+    expect(script).toMatch(/await postJson\(`\/api\/topics\/\$\{topicId\}\/read`[\s\S]*?state\.topicReadGeneration \+= 1;[\s\S]*?read\.highWater/);
     expect(script).toContain('errorCode(error) !== "HISTORY_INVALIDATED"');
     expect(script).toContain("40 * state.reconcileInvalidations");
     expect(script).toContain("state.reconcileInvalidations < TOPIC_INVALIDATION_RETRIES");

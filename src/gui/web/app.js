@@ -18,6 +18,7 @@ const MAX_HISTORY_PAGES = 5;
 const MAX_CACHED_BLOBS = 32;
 const MAX_CACHED_BLOB_BYTES = 128 * 1024 * 1024;
 const TOPIC_INVALIDATION_RETRIES = 3;
+const READ_CONFIRMATION_RETRY_DELAYS_MS = [750, 2000, 5000];
 const GENERAL_TOPIC_ID = 1;
 export const GENERAL_PANEL_FALLBACK_ROWS = Object.freeze([
   Object.freeze(["⚙️ 새 세션 기본값", "🧠 모델"]),
@@ -29,6 +30,12 @@ export function shouldApplyGeneralPanelMessage(currentMessageId, candidateMessag
   return Number.isSafeInteger(candidateMessageId)
     && candidateMessageId > 0
     && candidateMessageId >= currentMessageId;
+}
+
+export function topicSnapshotGenerationIsCurrent(start, current) {
+  return Number.isSafeInteger(start)
+    && Number.isSafeInteger(current)
+    && start === current;
 }
 
 export function shouldSubmitComposerKey(event, composing) {
@@ -52,7 +59,36 @@ export function formatBytes(value) {
   if (!Number.isFinite(value) || value < 0) return "크기 미상";
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+}
+
+const ATTACHMENT_TYPE_LABELS = Object.freeze({
+  "image/jpeg": "JPEG 이미지",
+  "image/png": "PNG 이미지",
+  "image/gif": "GIF 이미지",
+  "image/webp": "WebP 이미지",
+  "image/svg+xml": "SVG 문서",
+  "application/pdf": "PDF 문서",
+  "text/plain": "텍스트 문서",
+  "application/zip": "ZIP 압축 파일",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "Word 문서",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel 문서",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PowerPoint 문서",
+  "application/octet-stream": "일반 파일"
+});
+
+export function attachmentTypeLabel(attachment) {
+  const mimeType = typeof attachment?.mimeType === "string" ? attachment.mimeType : "application/octet-stream";
+  return `${ATTACHMENT_TYPE_LABELS[mimeType] || (attachment?.kind === "image" ? "이미지" : "문서")} · ${mimeType}`;
+}
+
+export function attachmentProvenanceLabel(attachment) {
+  if (attachment?.filenameSource === "sanitized") return "안전하게 정리된 파일명";
+  if (attachment?.filenameSource === "generated") {
+    return `Telegram ${attachment?.kind === "image" ? "사진" : "문서"} · 원본 파일명 없음`;
+  }
+  return "Telegram 원본 파일명";
 }
 
 export function isAllowedUploadFile(file, uploadBytes) {
@@ -105,14 +141,17 @@ function startApplication() {
     lastEventId: "",
     lastSequence: -1,
     connection: "connecting",
-    limits: { uploadBytes: 100 * 1024 * 1024, attachmentBytes: 20 * 1024 * 1024 },
+    limits: { uploadBytes: 2_097_152_000, attachmentBytes: 20 * 1024 * 1024 },
     topics: new Map(),
     activeTopicId: null,
     histories: new Map(),
     historyAbort: null,
     olderAbort: null,
     selectionGeneration: 0,
+    topicReadGeneration: 0,
     selectedFile: null,
+    uploadAbort: null,
+    limitsRefreshActive: false,
     composing: false,
     busy: false,
     reconciling: false,
@@ -181,10 +220,40 @@ function startApplication() {
     return await (await request(path, options, includeCsrf)).json();
   }
 
-  function postJson(path, body) {
+  function applySessionLimits(limits) {
+    if (!limits || typeof limits !== "object") return;
+    const uploadBytes = Number(limits.uploadBytes);
+    if (Number.isSafeInteger(uploadBytes) && uploadBytes >= 1 && uploadBytes <= 4_194_304_000) {
+      state.limits.uploadBytes = uploadBytes;
+    }
+    const attachmentBytes = Number(limits.attachmentBytes);
+    if (Number.isSafeInteger(attachmentBytes) && attachmentBytes >= 1 && attachmentBytes <= 20 * 1024 * 1024) {
+      state.limits.attachmentBytes = attachmentBytes;
+    }
+  }
+
+  async function refreshSessionLimits() {
+    if (!state.csrf || state.limitsRefreshActive) return;
+    state.limitsRefreshActive = true;
+    try {
+      const session = await requestJson("/api/session", {}, false);
+      applySessionLimits(session?.limits);
+      if (state.selectedFile && !isAllowedUploadFile(state.selectedFile, state.limits.uploadBytes)) {
+        showAlert(`현재 Telegram 계정의 ${formatBytes(state.limits.uploadBytes)} 상한을 초과하여 선택을 해제했습니다.`);
+        setSelectedFile(null);
+      }
+    } catch {
+      // Keep the conservative standard-account limit until the next ready event.
+    } finally {
+      state.limitsRefreshActive = false;
+    }
+  }
+
+  function postJson(path, body, options = {}) {
     return request(path, {
+      ...options,
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...options.headers, "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
   }
@@ -206,6 +275,7 @@ function startApplication() {
 
   function setConnection(connection, code = "") {
     state.connection = connection;
+    if (connection !== "ready") cancelAllReadConfirmations();
     const labels = {
       ready: "온라인",
       connecting: "연결 중",
@@ -301,10 +371,78 @@ function startApplication() {
   function readStateFor(topicId) {
     let read = state.readStates.get(topicId);
     if (!read) {
-      read = { latestKnownMessageId: 0, latestUnreadMessageId: 0, unreadGeneration: 0, inFlightTarget: 0, highWater: 0 };
+      read = {
+        latestKnownMessageId: 0,
+        latestUnreadMessageId: 0,
+        unreadGeneration: 0,
+        inFlightTarget: 0,
+        pendingTarget: 0,
+        retryAttempt: 0,
+        retryTimer: 0,
+        retryTarget: 0,
+        requestAbort: null,
+        failedTarget: 0,
+        highWater: 0
+      };
       state.readStates.set(topicId, read);
     }
     return read;
+  }
+
+  function clearReadConfirmationRetry(read) {
+    window.clearTimeout(read.retryTimer);
+    read.retryTimer = 0;
+    read.retryAttempt = 0;
+    read.retryTarget = 0;
+  }
+
+  function retireConfirmedReadState(read, confirmedTarget) {
+    if (!Number.isSafeInteger(confirmedTarget) || confirmedTarget < 1) return;
+    if (read.retryTarget > 0 && read.retryTarget <= confirmedTarget) {
+      clearReadConfirmationRetry(read);
+    }
+    if (read.pendingTarget > 0 && read.pendingTarget <= confirmedTarget) read.pendingTarget = 0;
+    if (read.failedTarget > 0 && read.failedTarget <= confirmedTarget) read.failedTarget = 0;
+  }
+
+  function cancelReadConfirmation(topicId) {
+    const read = state.readStates.get(topicId);
+    if (!read) return;
+    clearReadConfirmationRetry(read);
+    read.pendingTarget = 0;
+    read.failedTarget = 0;
+    read.requestAbort?.abort();
+    read.requestAbort = null;
+    read.inFlightTarget = 0;
+  }
+
+  function cancelAllReadConfirmations() {
+    for (const topicId of state.readStates.keys()) cancelReadConfirmation(topicId);
+    window.clearTimeout(state.markReadTimer);
+    state.markReadTimer = undefined;
+  }
+
+  function scheduleReadConfirmationRetry(topicId, read, target) {
+    if (read.retryAttempt >= READ_CONFIRMATION_RETRY_DELAYS_MS.length) {
+      clearReadConfirmationRetry(read);
+      read.pendingTarget = 0;
+      read.failedTarget = Math.max(read.failedTarget, target);
+      return;
+    }
+    const delay = READ_CONFIRMATION_RETRY_DELAYS_MS[read.retryAttempt];
+    read.retryAttempt += 1;
+    read.retryTarget = target;
+    read.pendingTarget = Math.max(read.pendingTarget, target);
+    window.clearTimeout(read.retryTimer);
+    read.retryTimer = window.setTimeout(() => {
+      read.retryTimer = 0;
+      if (state.connection !== "ready" || state.activeTopicId !== topicId || !isNearBottom()) {
+        clearReadConfirmationRetry(read);
+        read.pendingTarget = 0;
+        return;
+      }
+      void markCurrentRead();
+    }, delay);
   }
 
   function updateTopicBadge(topicId) {
@@ -570,14 +708,11 @@ function startApplication() {
     return await request(`/api/attachments/${encodeURIComponent(token)}`, { signal });
   }
 
-  async function loadImage(message, attachmentElement) {
+  async function loadImage(message, attachmentElement, actionRegion, status) {
     revokeMessageMedia(message.id);
     const controller = new AbortController();
     state.mediaControllers.set(message.id, controller);
-    const loading = document.createElement("span");
-    loading.className = "attachment-size";
-    loading.textContent = "이미지 불러오는 중…";
-    attachmentElement.append(loading);
+    status.textContent = "이미지 불러오는 중…";
     try {
       const blob = await withMediaSlot(controller.signal, async () => {
         const response = await fetchAttachment(message, controller.signal);
@@ -607,7 +742,8 @@ function startApplication() {
         adopted = true;
         const follow = isNearBottom();
         const anchor = follow ? null : captureAnchor();
-        attachmentElement.replaceChildren(image);
+        actionRegion.replaceChildren(image);
+        status.textContent = "미리보기 준비됨";
         if (follow) elements.viewport.scrollTop = elements.viewport.scrollHeight;
         else restoreAnchor(anchor);
       } finally {
@@ -615,15 +751,16 @@ function startApplication() {
       }
     } catch (error) {
       if (controller.signal.aborted) return;
-      loading.textContent = `이미지를 불러올 수 없습니다 · ${errorCode(error)}`;
+      status.textContent = `이미지를 불러올 수 없습니다 · ${errorCode(error)}`;
     } finally {
       if (state.mediaControllers.get(message.id) === controller) state.mediaControllers.delete(message.id);
     }
   }
 
-  async function prepareDocument(message, attachmentElement, button) {
+  async function prepareDocument(message, attachmentElement, actionRegion, status, button) {
     button.disabled = true;
     button.setAttribute("aria-busy", "true");
+    status.textContent = "문서 준비 중…";
     const controller = new AbortController();
     state.mediaControllers.get(message.id)?.abort();
     state.mediaControllers.set(message.id, controller);
@@ -647,11 +784,17 @@ function startApplication() {
       const link = document.createElement("a");
       link.href = objectUrl;
       link.download = message.attachment.name;
-      link.textContent = `${message.attachment.name} 다운로드`;
-      attachmentElement.replaceChildren(link);
+      link.textContent = message.attachment.filenameSource === "generated"
+        ? "문서 다운로드"
+        : `${message.attachment.name} 다운로드`;
+      actionRegion.replaceChildren(link);
+      status.textContent = "다운로드 준비됨";
       link.focus();
     } catch (error) {
-      if (!controller.signal.aborted) showAlert(`문서를 준비하지 못했습니다 · ${errorCode(error)}`);
+      if (!controller.signal.aborted) {
+        status.textContent = `문서를 준비하지 못했습니다 · ${errorCode(error)}`;
+        showAlert(`문서를 준비하지 못했습니다 · ${errorCode(error)}`);
+      }
       button.disabled = false;
       button.removeAttribute("aria-busy");
     } finally {
@@ -661,20 +804,39 @@ function startApplication() {
 
   function renderAttachment(message, body) {
     const attachment = message.attachment;
-    if (!attachment || typeof attachment.token !== "string") return;
+    if (!attachment) return;
     const element = document.createElement("div");
     element.className = "attachment";
+    const metadata = document.createElement("div");
+    metadata.className = "attachment-metadata";
+    const name = document.createElement("strong");
+    name.className = "attachment-name";
+    name.textContent = attachment.filenameSource === "generated"
+      ? (attachment.kind === "image" ? "사진" : "문서")
+      : attachment.name;
+    const details = document.createElement("span");
+    details.className = "attachment-details";
+    details.textContent = `${attachmentProvenanceLabel(attachment)} · ${attachmentTypeLabel(attachment)} · ${formatBytes(attachment.size)}`;
+    const status = document.createElement("span");
+    status.className = "attachment-status";
+    status.setAttribute("role", "status");
+    metadata.append(name, details, status);
+    const actionRegion = document.createElement("div");
+    actionRegion.className = "attachment-action";
+    element.append(metadata, actionRegion);
+    body.append(element);
+    if (typeof attachment.token !== "string") {
+      status.textContent = attachment.size > state.limits.attachmentBytes
+        ? `${formatBytes(state.limits.attachmentBytes)} 다운로드 한도 초과 · 파일 정보만 표시`
+        : "이 첨부를 현재 다운로드할 수 없습니다.";
+      return;
+    }
     if (attachment.kind === "image") {
       if (state.mediaControllers.size + state.blobUrls.size >= MAX_CACHED_BLOBS) {
-        const bounded = document.createElement("span");
-        bounded.className = "attachment-size";
-        bounded.textContent = "이 화면의 이미지 자동 로딩 한도에 도달했습니다.";
-        element.append(bounded);
-        body.append(element);
+        status.textContent = "이 화면의 이미지 자동 로딩 한도에 도달했습니다.";
         return;
       }
-      body.append(element);
-      void loadImage(message, element);
+      void loadImage(message, element, actionRegion, status);
       return;
     }
     const button = document.createElement("button");
@@ -683,16 +845,12 @@ function startApplication() {
     const icon = document.createElement("span");
     icon.setAttribute("aria-hidden", "true");
     icon.textContent = "▤";
-    const name = document.createElement("span");
-    name.className = "attachment-name";
-    name.textContent = attachment.name;
-    const size = document.createElement("span");
-    size.className = "attachment-size";
-    size.textContent = formatBytes(attachment.size);
-    button.append(icon, name, size);
-    button.addEventListener("click", () => void prepareDocument(message, element, button));
-    element.append(button);
-    body.append(element);
+    const label = document.createElement("span");
+    label.textContent = "다운로드 준비";
+    button.append(icon, label);
+    button.addEventListener("click", () => void prepareDocument(message, element, actionRegion, status, button));
+    actionRegion.append(button);
+    status.textContent = "다운로드 준비 가능";
   }
 
   function renderButtons(message, body) {
@@ -950,6 +1108,7 @@ function startApplication() {
     elements.topicList.setAttribute("aria-busy", "true");
     try {
       for (let attempt = 0; attempt <= TOPIC_INVALIDATION_RETRIES; attempt += 1) {
+        const topicReadGeneration = state.topicReadGeneration;
         const topics = new Map();
         let cursor = null;
         let pages = 0;
@@ -967,6 +1126,9 @@ function startApplication() {
             pages += 1;
           } while (cursor && pages < 100);
           if (cursor) throw apiError("TOPIC_PAGE_LIMIT");
+          if (!topicSnapshotGenerationIsCurrent(topicReadGeneration, state.topicReadGeneration)) {
+            throw apiError("HISTORY_INVALIDATED");
+          }
           const previousTopics = state.topics;
           state.topics = topics;
           for (const topic of topics.values()) {
@@ -981,10 +1143,14 @@ function startApplication() {
             } else {
               read.latestUnreadMessageId = 0;
               read.highWater = Math.max(read.highWater, topic.topMessageId);
+              retireConfirmedReadState(read, read.highWater);
             }
           }
           for (const topicId of [...state.readStates.keys()]) {
-            if (!topics.has(topicId)) state.readStates.delete(topicId);
+            if (!topics.has(topicId)) {
+              cancelReadConfirmation(topicId);
+              state.readStates.delete(topicId);
+            }
           }
           return;
         } catch (error) {
@@ -1030,6 +1196,9 @@ function startApplication() {
 
   async function selectTopic(topicId, force = false) {
     if (!state.topics.has(topicId)) return;
+    if (state.activeTopicId !== null && state.activeTopicId !== topicId) {
+      cancelReadConfirmation(state.activeTopicId);
+    }
     if (state.activeTopicId !== null) historyFor(state.activeTopicId).scrollTop = elements.viewport.scrollTop;
     state.activeTopicId = topicId;
     state.selectionGeneration += 1;
@@ -1114,27 +1283,56 @@ function startApplication() {
   }
 
   async function markCurrentRead() {
-    if (state.activeTopicId === null || !isNearBottom()) return;
+    if (state.activeTopicId === null || state.connection !== "ready") return;
     const topicId = state.activeTopicId;
+    if (!isNearBottom()) {
+      cancelReadConfirmation(topicId);
+      return;
+    }
     const messages = sortedMessages(historyFor(topicId));
     const max = messages.at(-1)?.id;
     if (!max) return;
     const read = readStateFor(topicId);
     read.latestKnownMessageId = Math.max(read.latestKnownMessageId, max);
     const topic = state.topics.get(topicId);
-    if (read.inFlightTarget >= max) return;
-    if (read.highWater >= max && (!topic || topic.unreadCount <= 0)) return;
-    read.inFlightTarget = max;
+    if (read.highWater >= max && (!topic || topic.unreadCount <= 0)) {
+      retireConfirmedReadState(read, read.highWater);
+      return;
+    }
+    if (read.failedTarget >= max) return;
+    if (read.failedTarget > 0) read.failedTarget = 0;
+    if (read.retryTimer) {
+      if (read.pendingTarget >= max) return;
+      clearReadConfirmationRetry(read);
+    }
+    if (read.inFlightTarget > 0) {
+      if (max > Math.max(read.inFlightTarget, read.pendingTarget)) {
+        clearReadConfirmationRetry(read);
+        read.pendingTarget = max;
+      }
+      return;
+    }
+    read.pendingTarget = Math.max(read.pendingTarget, max);
+    const target = read.pendingTarget;
+    read.pendingTarget = 0;
+    const controller = new AbortController();
+    read.inFlightTarget = target;
+    read.requestAbort = controller;
     let followUp = false;
     try {
-      await postJson(`/api/topics/${topicId}/read`, { maxMessageId: max });
-      read.highWater = Math.max(read.highWater, max);
+      await postJson(`/api/topics/${topicId}/read`, { maxMessageId: target }, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      clearReadConfirmationRetry(read);
+      read.failedTarget = 0;
+      if (read.pendingTarget <= target) read.pendingTarget = 0;
+      state.topicReadGeneration += 1;
+      read.highWater = Math.max(read.highWater, target);
       // 이전에는 unreadGeneration이 그대로일 때만 배지를 지웠다. 봇이 진행 상황을
       // 연속으로 보내면 확인 요청이 오가는 사이에 세대가 매번 바뀌어, 다 읽은 뒤에도
       // 배지가 사라지지 않았다. 세대 조건을 없애고, 단조 증가하는 메시지 id만으로
       // 판정한다. 확인 지점보다 새 메시지가 남아 있으면 배지는 그대로 두고 후속
       // 확인을 예약한다(낡은 확인이 새 메시지를 지우지 않도록).
-      if (read.latestUnreadMessageId <= max) {
+      if (read.latestUnreadMessageId <= target) {
         read.latestUnreadMessageId = 0;
         const currentTopic = state.topics.get(topicId);
         if (currentTopic) {
@@ -1142,12 +1340,42 @@ function startApplication() {
           updateTopicBadge(topicId);
         }
       } else if (state.activeTopicId === topicId && isNearBottom()) {
+        read.pendingTarget = Math.max(read.pendingTarget, read.latestUnreadMessageId);
         followUp = true;
       }
-    } catch {
-      // Read markers are best effort and are never retried automatically.
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (
+        errorCode(error) === "READ_CONFIRMATION_PENDING"
+        && state.connection === "ready"
+        && state.activeTopicId === topicId
+        && isNearBottom()
+      ) {
+        if (read.pendingTarget > target) {
+          clearReadConfirmationRetry(read);
+          followUp = true;
+        } else {
+          scheduleReadConfirmationRetry(topicId, read, target);
+        }
+      } else {
+        // 영구 오류는 자동 재전송하지 않고 읽지 않음 배지를 그대로 둔다.
+        const failedTarget = Math.max(target, read.pendingTarget);
+        clearReadConfirmationRetry(read);
+        read.pendingTarget = 0;
+        read.failedTarget = Math.max(read.failedTarget, failedTarget);
+      }
     } finally {
-      if (read.inFlightTarget === max) read.inFlightTarget = 0;
+      if (read.requestAbort === controller) {
+        read.requestAbort = null;
+        read.inFlightTarget = 0;
+        if (
+          read.pendingTarget > 0
+          && !read.retryTimer
+          && state.connection === "ready"
+          && state.activeTopicId === topicId
+          && isNearBottom()
+        ) followUp = true;
+      }
       if (followUp) void markCurrentRead();
     }
   }
@@ -1256,12 +1484,16 @@ function startApplication() {
     }
     if (data.type === "auth_state" && data.auth && typeof data.auth.state === "string") {
       setConnection(data.auth.state, data.auth.errorCode || "");
-      if (data.auth.state === "ready" && state.topics.size === 0) void reconcile();
+      if (data.auth.state === "ready") {
+        void refreshSessionLimits();
+        if (state.topics.size === 0) void reconcile();
+      }
     } else if (data.type === "message_upsert") {
       applyMessageUpsert(data.message);
     } else if (data.type === "message_delete") {
       applyMessageDelete(data.topicId, data.messageIds);
     } else if (data.type === "topic_delete") {
+      cancelReadConfirmation(data.topicId);
       state.topics.delete(data.topicId);
       state.histories.delete(data.topicId);
       renderTopics();
@@ -1354,7 +1586,7 @@ function startApplication() {
       return;
     }
     state.selectedFile = file;
-    elements.selectedFileLabel.textContent = `첨부: ${file.name} · ${formatBytes(file.size)} · 전송 전까지 메모리에만 유지`;
+    elements.selectedFileLabel.textContent = `첨부: ${file.name} · ${formatBytes(file.size)} · 전송 대기`;
     elements.selectedFile.hidden = false;
   }
 
@@ -1389,6 +1621,9 @@ function startApplication() {
     try {
       if (file) {
         const mimeType = file.type || "application/octet-stream";
+        const controller = new AbortController();
+        state.uploadAbort = controller;
+        elements.selectedFileLabel.textContent = `첨부: ${file.name} · ${formatBytes(file.size)} · 전송 중`;
         const headers = {
           "Content-Type": mimeType,
           "X-ChatKJB-File-Name": utf8Base64Url(file.name)
@@ -1397,7 +1632,8 @@ function startApplication() {
         await request(`/api/topics/${state.activeTopicId}/files`, {
           method: "POST",
           headers,
-          body: await file.arrayBuffer()
+          body: file,
+          signal: controller.signal
         });
         setSelectedFile(null);
       } else {
@@ -1407,8 +1643,12 @@ function startApplication() {
       elements.messageInput.style.height = "auto";
       await setTyping(false);
     } catch (error) {
+      if (state.selectedFile) {
+        elements.selectedFileLabel.textContent = `첨부: ${state.selectedFile.name} · ${formatBytes(state.selectedFile.size)} · 전송 대기`;
+      }
       showAlert(`전송하지 못했습니다. 자동 재전송하지 않습니다 · ${errorCode(error)}`);
     } finally {
+      state.uploadAbort = null;
       state.busy = false;
       elements.composer.removeAttribute("aria-busy");
       setConnection(state.connection);
@@ -1453,6 +1693,8 @@ function startApplication() {
     value: async () => {
       if (state.nativeLogout) return false;
       state.nativeLogout = true;
+      state.uploadAbort?.abort();
+      cancelAllReadConfirmations();
       try {
         await request("/api/logout", { method: "POST" });
         state.csrf = "";
@@ -1485,6 +1727,7 @@ function startApplication() {
     if (state.activeTopicId !== null) historyFor(state.activeTopicId).scrollTop = elements.viewport.scrollTop;
     elements.jumpLatest.hidden = isNearBottom();
     if (isNearBottom()) scheduleMarkCurrentRead();
+    else if (state.activeTopicId !== null) cancelReadConfirmation(state.activeTopicId);
   }, { passive: true });
   elements.generalPanel.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-command]");
@@ -1552,6 +1795,8 @@ function startApplication() {
     }
   });
   window.addEventListener("pagehide", () => {
+    state.uploadAbort?.abort();
+    cancelAllReadConfirmations();
     state.historyAbort?.abort();
     window.clearTimeout(state.reconcileRetryTimer);
     clearRenderedMedia();
@@ -1565,7 +1810,7 @@ function startApplication() {
       if (typeof session.csrfToken !== "string" || typeof session.eventEpoch !== "string") throw apiError("SESSION_INVALID");
       state.csrf = session.csrfToken;
       state.epoch = session.eventEpoch;
-      state.limits = { ...state.limits, ...(session.limits || {}) };
+      applySessionLimits(session.limits);
       setConnection(session.connection || "connecting");
       if (session.connection === "ready") await reconcile();
       void consumeEventStream();

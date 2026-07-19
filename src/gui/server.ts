@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { chmod, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, open, readFile, readdir, rename, rm, statfs } from "node:fs/promises";
 import {
   createServer,
   type IncomingMessage,
@@ -30,8 +30,8 @@ import {
   type TopicCursor
 } from "./protocol.js";
 import {
-  GUI_MAX_UPLOAD_BYTES,
   HistoryInvalidatedError,
+  ReadConfirmationPendingError,
   validateTelegramUploadMetadata,
   type MessagePage,
   type TelegramAttachmentDownload,
@@ -47,6 +47,8 @@ export const GUI_DEFAULT_PAGE_LIMIT = 50;
 export const GUI_MAX_PAGE_LIMIT = 100;
 export const GUI_MAX_ATTACHMENT_DOWNLOADS = 2;
 export const GUI_ATTACHMENT_DOWNLOAD_TIMEOUT_MS = 30_000;
+export const GUI_STANDARD_UPLOAD_BYTES = 4_000 * 512 * 1024;
+export const GUI_PREMIUM_UPLOAD_BYTES = 8_000 * 512 * 1024;
 
 const CAPABILITY_TTL_MS = 60_000;
 const SESSION_TTL_SECONDS = 12 * 60 * 60;
@@ -61,6 +63,22 @@ const MAX_IN_FLIGHT_MUTATIONS = 8;
 // 이 상한이 없으면 멈춘 호출이 슬롯을 영구히 붙잡아, MAX_IN_FLIGHT_MUTATIONS번
 // 누적되는 순간부터 앱을 다시 켜기 전까지 모든 전송이 MUTATION_RATE_LIMITED로 막힌다.
 const MUTATION_TIMEOUT_MS = 30_000;
+const ORDINARY_BODY_INACTIVITY_MS = 30_000;
+const ORDINARY_BODY_ABSOLUTE_MS = 2 * 60_000;
+const UPLOAD_BODY_INACTIVITY_MS = 60_000;
+const UPLOAD_BODY_ABSOLUTE_MS = 30 * 60_000;
+const UPLOAD_PROGRESS_INACTIVITY_MS = 10 * 60_000;
+const UPLOAD_OPERATION_ABSOLUTE_MS = 24 * 60 * 60_000;
+const UPLOAD_STORAGE_HEADROOM_BYTES = 256n * 1024n * 1024n;
+const UPLOAD_ROOT_PREFIX = "chatkjb-gui-uploads-";
+const INITIALIZATION_ORPHAN_AGE_MS = 24 * 60 * 60_000;
+
+export function hasUploadStorageHeadroom(availableBytes: bigint, declaredBytes: number): boolean {
+  return availableBytes >= 0n
+    && Number.isSafeInteger(declaredBytes)
+    && declaredBytes >= 1
+    && availableBytes >= BigInt(declaredBytes) + UPLOAD_STORAGE_HEADROOM_BYTES;
+}
 const MAX_URL_BYTES = 2_048;
 const HEARTBEAT_MS = 15_000;
 const PUBLIC_AUTH_STATES = new Set<GuiAuthState["state"]>([
@@ -114,6 +132,7 @@ export interface GuiServerClient {
   findGeneralReplyPanel(): Promise<GuiReplyPanel | null>;
   sendText(topicId: number, text: string): Promise<void>;
   sendFile(topicId: number, input: TelegramUploadInput): Promise<void>;
+  uploadLimitBytes?(): number;
   downloadAttachment(token: string, signal?: AbortSignal): Promise<TelegramAttachmentDownload>;
   pressCallback(messageId: number, callbackData: string): Promise<unknown>;
   markRead(topicId: number, maxMessageId: number): Promise<void>;
@@ -139,6 +158,14 @@ export interface GuiServerOptions {
   };
   // Telegram 호출이 응답하지 않을 때 동시 실행 슬롯을 되돌려주는 상한.
   mutationTimeoutMs?: number;
+  timeoutOverrides?: Partial<{
+    ordinaryBodyInactivityMs: number;
+    ordinaryBodyAbsoluteMs: number;
+    uploadBodyInactivityMs: number;
+    uploadBodyAbsoluteMs: number;
+    uploadProgressInactivityMs: number;
+    uploadOperationAbsoluteMs: number;
+  }>;
   onDiagnostic?: (diagnostic: GuiServerDiagnostic) => void;
 }
 
@@ -289,7 +316,14 @@ function assertNoContentEncoding(request: IncomingMessage): void {
   }
 }
 
-async function readBody(request: IncomingMessage, limit: number): Promise<Buffer> {
+async function readBody(
+  request: IncomingMessage,
+  limit: number,
+  timeouts: { inactivityMs: number; absoluteMs: number; } = {
+    inactivityMs: ORDINARY_BODY_INACTIVITY_MS,
+    absoluteMs: ORDINARY_BODY_ABSOLUTE_MS
+  }
+): Promise<Buffer> {
   assertNoContentEncoding(request);
   const contentLength = singleHeader(request, "content-length", false);
   if (contentLength !== null) {
@@ -297,21 +331,70 @@ async function readBody(request: IncomingMessage, limit: number): Promise<Buffer
       throw new HttpFailure(413, "BODY_TOO_LARGE");
     }
   }
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const value of request) {
-    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
-    size += chunk.length;
-    if (size > limit) throw new HttpFailure(413, "BODY_TOO_LARGE");
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks, size);
+  return await new Promise<Buffer>((resolveBody, rejectBody) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    let inactivityTimer: ReturnType<typeof setTimeout>;
+    const absoluteTimer = setTimeout(
+      () => fail(new HttpFailure(408, "REQUEST_BODY_TIMEOUT", { Connection: "close" })),
+      timeouts.absoluteMs
+    );
+    const cleanup = () => {
+      clearTimeout(inactivityTimer);
+      clearTimeout(absoluteTimer);
+      request.off("data", onData);
+      request.off("end", onEnd);
+      request.off("aborted", onAborted);
+      request.off("error", onError);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      request.pause();
+      rejectBody(error);
+    };
+    const resetInactivity = () => {
+      clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(
+        () => fail(new HttpFailure(408, "REQUEST_BODY_TIMEOUT", { Connection: "close" })),
+        timeouts.inactivityMs
+      );
+    };
+    const onData = (value: Buffer | Uint8Array | string) => {
+      resetInactivity();
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      size += chunk.length;
+      if (size > limit) {
+        fail(new HttpFailure(413, "BODY_TOO_LARGE", { Connection: "close" }));
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolveBody(Buffer.concat(chunks, size));
+    };
+    const onAborted = () => fail(new HttpFailure(400, "REQUEST_BODY_ABORTED"));
+    const onError = (error: Error) => fail(error);
+    request.on("data", onData);
+    request.once("end", onEnd);
+    request.once("aborted", onAborted);
+    request.once("error", onError);
+    resetInactivity();
+  });
 }
 
-async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(
+  request: IncomingMessage,
+  timeouts?: { inactivityMs: number; absoluteMs: number; }
+): Promise<Record<string, unknown>> {
   const contentType = singleHeader(request, "content-type");
   if (contentType !== "application/json") throw new HttpFailure(415, "JSON_CONTENT_TYPE_REQUIRED");
-  const body = await readBody(request, GUI_MAX_JSON_BYTES);
+  const body = await readBody(request, GUI_MAX_JSON_BYTES, timeouts);
   if (body.length === 0) throw new HttpFailure(400, "JSON_BODY_REQUIRED");
   let parsed: unknown;
   try {
@@ -409,13 +492,16 @@ function publicAttachment(attachment: GuiAttachment): GuiAttachment | null {
     || Buffer.byteLength(attachment.name, "utf8") < 1
     || Buffer.byteLength(attachment.name, "utf8") > 255
     || /[\/\\\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(attachment.name)
+    || !["telegram", "sanitized", "generated"].includes(attachment.filenameSource)
     || typeof attachment.mimeType !== "string"
     || !ATTACHMENT_MIME_TYPES.has(attachment.mimeType)
     || !Number.isSafeInteger(attachment.size)
     || attachment.size < 1
-    || attachment.size > GUI_MAX_ATTACHMENT_BYTES
-    || typeof attachment.token !== "string"
-    || !/^[A-Za-z0-9_-]{43}$/.test(attachment.token)
+    || (attachment.token !== undefined && (
+      attachment.size > GUI_MAX_ATTACHMENT_BYTES
+      || typeof attachment.token !== "string"
+      || !/^[A-Za-z0-9_-]{43}$/.test(attachment.token)
+    ))
     || (attachment.kind === "image" && !INLINE_IMAGE_MIME_TYPES.has(attachment.mimeType))
   ) return null;
   const width = Number.isSafeInteger(attachment.width) && Number(attachment.width) > 0
@@ -427,9 +513,10 @@ function publicAttachment(attachment: GuiAttachment): GuiAttachment | null {
   return {
     kind: attachment.kind,
     name: attachment.name,
+    filenameSource: attachment.filenameSource,
     mimeType: attachment.mimeType,
     size: attachment.size,
-    token: attachment.token,
+    ...(attachment.token ? { token: attachment.token } : {}),
     ...(width ? { width } : {}),
     ...(height ? { height } : {})
   };
@@ -600,6 +687,103 @@ function methodAllowed(method: string, allowed: readonly string[]): void {
   throw new HttpFailure(405, "METHOD_NOT_ALLOWED", { Allow: allowed.join(", ") });
 }
 
+interface UploadOwnerMarker {
+  version: 1;
+  pid: number;
+  startedAt: number;
+}
+
+function strictUploadOwner(value: unknown): UploadOwnerMarker | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).sort().join(",") !== "pid,startedAt,version") return null;
+  if (
+    record["version"] !== 1
+    || typeof record["pid"] !== "number"
+    || !Number.isSafeInteger(record["pid"])
+    || record["pid"] <= 0
+    || typeof record["startedAt"] !== "number"
+    || !Number.isSafeInteger(record["startedAt"])
+    || record["startedAt"] <= 0
+  ) return null;
+  return { version: 1, pid: record["pid"], startedAt: record["startedAt"] };
+}
+
+function processIsDefinitelyDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "ESRCH";
+  }
+}
+
+async function sweepUploadRoots(baseDirectory: string, timestamp: number): Promise<void> {
+  const uid = process.getuid?.();
+  if (!Number.isSafeInteger(uid)) return;
+  let entries;
+  try {
+    entries = await readdir(baseDirectory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.name.startsWith(UPLOAD_ROOT_PREFIX)) continue;
+    if (!/^chatkjb-gui-uploads-\d+-[A-Za-z0-9_-]{6,64}$/.test(entry.name)) continue;
+    const candidate = join(baseDirectory, entry.name);
+    try {
+      const candidateStat = await lstat(candidate);
+      if (!candidateStat.isDirectory() || candidateStat.isSymbolicLink() || candidateStat.uid !== uid) continue;
+      const children = await readdir(candidate);
+      if (!children.includes("owner.json")) {
+        if (
+          timestamp - candidateStat.mtimeMs >= INITIALIZATION_ORPHAN_AGE_MS
+          && (children.length === 0 || (children.length === 1 && children[0] === ".owner.tmp"))
+        ) await rm(candidate, { recursive: true, force: true });
+        continue;
+      }
+      if (children.some((name) => name === ".owner.tmp")) continue;
+      const markerPath = join(candidate, "owner.json");
+      const markerStat = await lstat(markerPath);
+      if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.uid !== uid || markerStat.size > 1_024) continue;
+      const marker = strictUploadOwner(JSON.parse(await readFile(markerPath, "utf8")));
+      if (!marker || !processIsDefinitelyDead(marker.pid)) continue;
+      await rm(candidate, { recursive: true, force: true });
+    } catch {
+      // Any malformed, foreign, racy, or inaccessible candidate is preserved fail-closed.
+    }
+  }
+}
+
+async function createUploadRunRoot(): Promise<string> {
+  const baseDirectory = tmpdir();
+  await sweepUploadRoots(baseDirectory, Date.now());
+  const root = await mkdtemp(join(baseDirectory, `${UPLOAD_ROOT_PREFIX}${process.pid}-`));
+  await chmod(root, 0o700);
+  const temporaryMarker = join(root, ".owner.tmp");
+  const finalMarker = join(root, "owner.json");
+  let markerHandle;
+  try {
+    markerHandle = await open(temporaryMarker, "wx", 0o600);
+    await markerHandle.writeFile(JSON.stringify({ version: 1, pid: process.pid, startedAt: Date.now() }));
+    await markerHandle.sync();
+    await markerHandle.close();
+    markerHandle = undefined;
+    await rename(temporaryMarker, finalMarker);
+    const directoryHandle = await open(root, "r");
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
+    return root;
+  } catch (error) {
+    await markerHandle?.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function startGuiServer(options: GuiServerOptions): Promise<GuiServerHandle> {
   const now = options.now ?? Date.now;
   const capabilityTtlMs = options.capabilityTtlMs ?? CAPABILITY_TTL_MS;
@@ -611,6 +795,26 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
   const rateMutations = options.rateLimit?.mutations ?? RATE_MUTATIONS;
   const rateBackground = options.rateLimit?.background ?? RATE_BACKGROUND;
   const mutationTimeoutMs = options.mutationTimeoutMs ?? MUTATION_TIMEOUT_MS;
+  const timeoutValue = (key: keyof NonNullable<GuiServerOptions["timeoutOverrides"]>, fallback: number) => {
+    const value = options.timeoutOverrides?.[key] ?? fallback;
+    if (!Number.isSafeInteger(value) || value < 10 || value > 7 * 24 * 60 * 60_000) {
+      throw new Error(`${key} must be an integer from 10ms to 7 days`);
+    }
+    return value;
+  };
+  const ordinaryTimeouts = {
+    inactivityMs: timeoutValue("ordinaryBodyInactivityMs", ORDINARY_BODY_INACTIVITY_MS),
+    absoluteMs: timeoutValue("ordinaryBodyAbsoluteMs", ORDINARY_BODY_ABSOLUTE_MS)
+  };
+  const uploadBodyInactivityMs = timeoutValue("uploadBodyInactivityMs", UPLOAD_BODY_INACTIVITY_MS);
+  const uploadBodyAbsoluteMs = timeoutValue("uploadBodyAbsoluteMs", UPLOAD_BODY_ABSOLUTE_MS);
+  const uploadProgressInactivityMs = timeoutValue("uploadProgressInactivityMs", UPLOAD_PROGRESS_INACTIVITY_MS);
+  const uploadOperationAbsoluteMs = timeoutValue("uploadOperationAbsoluteMs", UPLOAD_OPERATION_ABSOLUTE_MS);
+  if (
+    ordinaryTimeouts.absoluteMs < ordinaryTimeouts.inactivityMs
+    || uploadBodyAbsoluteMs < uploadBodyInactivityMs
+    || uploadOperationAbsoluteMs < uploadProgressInactivityMs
+  ) throw new Error("absolute timeouts must not be shorter than their inactivity timeout");
   if (
     !Number.isSafeInteger(mutationTimeoutMs)
     || mutationTimeoutMs < 1_000
@@ -625,6 +829,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
   ] as const) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer`);
   }
+  const uploadRunRoot = await createUploadRunRoot();
 
   let capability: string | null = randomBytes(32).toString("base64url");
   const capabilityExpiresAt = now() + capabilityTtlMs;
@@ -649,6 +854,8 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
   const streams = new Set<ServerResponse>();
   const sockets = new Set<Socket>();
   const activeUploadDirs = new Set<string>();
+  const activeUploadControllers = new Set<AbortController>();
+  const activeUploadSettlements = new Set<Promise<void>>();
   const activeDownloadControllers = new Set<AbortController>();
   const requestTimes: number[] = [];
   const mutationTimes: number[] = [];
@@ -668,6 +875,9 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
     for (const stream of streams) stream.end();
     streams.clear();
     for (const controller of activeDownloadControllers) controller.abort();
+    for (const controller of activeUploadControllers) {
+      controller.abort(new HttpFailure(401, "SESSION_EXPIRED"));
+    }
     return true;
   }
 
@@ -782,6 +992,10 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
         }
         throw error;
       }
+      if (error instanceof ReadConfirmationPendingError) {
+        diagnostic("upstream_failure", "READ_CONFIRMATION_PENDING");
+        throw new HttpFailure(503, "READ_CONFIRMATION_PENDING");
+      }
       diagnostic("upstream_failure", "TELEGRAM_OPERATION_FAILED");
       throw new HttpFailure(502, "TELEGRAM_OPERATION_FAILED");
     } finally {
@@ -795,7 +1009,24 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
     if (csrf) assertCsrf(request);
   }
 
-  async function streamUpload(request: IncomingMessage): Promise<Buffer> {
+  function currentUploadLimit(): number {
+    const candidate = options.client.uploadLimitBytes?.() ?? GUI_STANDARD_UPLOAD_BYTES;
+    return Number.isSafeInteger(candidate) && candidate >= 1 && candidate <= GUI_PREMIUM_UPLOAD_BYTES
+      ? candidate
+      : GUI_STANDARD_UPLOAD_BYTES;
+  }
+
+  async function removeUploadDirectory(directory: string): Promise<void> {
+    if (!activeUploadDirs.has(directory)) return;
+    activeUploadDirs.delete(directory);
+    await rm(directory, { recursive: true, force: true });
+  }
+
+  async function streamUpload(
+    request: IncomingMessage,
+    controller: AbortController,
+    limit: number
+  ): Promise<{ directory: string; path: string; size: number; }> {
     assertNoContentEncoding(request);
     if (rawHeaderValues(request, "transfer-encoding").length > 0) {
       throw new HttpFailure(411, "CONTENT_LENGTH_REQUIRED");
@@ -803,34 +1034,117 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
     const rawLength = singleHeader(request, "content-length");
     if (!rawLength || !/^\d+$/.test(rawLength)) throw new HttpFailure(411, "CONTENT_LENGTH_REQUIRED");
     const declaredLength = Number(rawLength);
-    if (!Number.isSafeInteger(declaredLength) || declaredLength < 1 || declaredLength > GUI_MAX_UPLOAD_BYTES) {
+    if (!Number.isSafeInteger(declaredLength) || declaredLength < 1 || declaredLength > limit) {
       throw new HttpFailure(413, "UPLOAD_SIZE_INVALID");
     }
-    const directory = await mkdtemp(join(tmpdir(), "chatkjb-gui-upload-"));
+    try {
+      const storage = await statfs(uploadRunRoot, { bigint: true });
+      const available = storage.bavail * storage.bsize;
+      if (!hasUploadStorageHeadroom(available, declaredLength)) {
+        throw new HttpFailure(507, "UPLOAD_STORAGE_EXHAUSTED");
+      }
+    } catch (error) {
+      if (error instanceof HttpFailure) throw error;
+      throw new HttpFailure(507, "UPLOAD_STORAGE_EXHAUSTED");
+    }
+    const directory = await mkdtemp(join(uploadRunRoot, "upload-"));
     activeUploadDirs.add(directory);
     await chmod(directory, 0o700);
     const path = join(directory, "payload");
     let handle;
     try {
       handle = await open(path, "wx", 0o600);
-      let received = 0;
-      for await (const value of request) {
-        const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
-        received += chunk.length;
-        if (received > declaredLength || received > GUI_MAX_UPLOAD_BYTES) {
-          throw new HttpFailure(413, "UPLOAD_SIZE_INVALID");
-        }
-        await handle.write(chunk);
-      }
+      const uploadHandle = handle;
+      const received = await new Promise<number>((resolveUpload, rejectUpload) => {
+        let size = 0;
+        let settled = false;
+        let writeChain = Promise.resolve();
+        let inactivityTimer: ReturnType<typeof setTimeout>;
+        const absoluteTimer = setTimeout(
+          () => controller.abort(new HttpFailure(408, "UPLOAD_BODY_TIMEOUT")),
+          uploadBodyAbsoluteMs
+        );
+        const cleanup = () => {
+          clearTimeout(inactivityTimer);
+          clearTimeout(absoluteTimer);
+          request.off("data", onData);
+          request.off("end", onEnd);
+          request.off("aborted", onRequestAborted);
+          request.off("error", onRequestError);
+          controller.signal.removeEventListener("abort", onSignalAbort);
+        };
+        const fail = (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          request.pause();
+          rejectUpload(error);
+        };
+        const resetInactivity = () => {
+          clearTimeout(inactivityTimer);
+          inactivityTimer = setTimeout(
+            () => controller.abort(new HttpFailure(408, "UPLOAD_BODY_TIMEOUT")),
+            uploadBodyInactivityMs
+          );
+        };
+        const writeChunk = async (chunk: Buffer) => {
+          if (controller.signal.aborted) throw controller.signal.reason;
+          size += chunk.length;
+          if (size > declaredLength || size > limit) throw new HttpFailure(413, "UPLOAD_SIZE_INVALID");
+          let offset = 0;
+          while (offset < chunk.length) {
+            const { bytesWritten } = await uploadHandle.write(chunk, offset, chunk.length - offset);
+            if (bytesWritten < 1) throw new Error("Upload spool made no write progress");
+            offset += bytesWritten;
+          }
+          if (controller.signal.aborted) throw controller.signal.reason;
+        };
+        const onData = (value: Buffer | Uint8Array | string) => {
+          if (settled) return;
+          request.pause();
+          resetInactivity();
+          const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+          writeChain = writeChain.then(() => writeChunk(chunk));
+          void writeChain.then(
+            () => { if (!settled) request.resume(); },
+            fail
+          );
+        };
+        const onEnd = () => {
+          clearTimeout(inactivityTimer);
+          void writeChain.then(() => {
+            if (settled) return;
+            if (size !== declaredLength) throw new HttpFailure(400, "UPLOAD_SIZE_MISMATCH");
+            settled = true;
+            cleanup();
+            resolveUpload(size);
+          }).catch(fail);
+        };
+        const onRequestAborted = () => controller.abort(new HttpFailure(499, "UPLOAD_CANCELLED"));
+        const onRequestError = (error: Error) => fail(error);
+        const onSignalAbort = () => fail(controller.signal.reason ?? new HttpFailure(499, "UPLOAD_CANCELLED"));
+        request.on("data", onData);
+        request.once("end", onEnd);
+        request.once("aborted", onRequestAborted);
+        request.once("error", onRequestError);
+        controller.signal.addEventListener("abort", onSignalAbort, { once: true });
+        resetInactivity();
+        if (controller.signal.aborted) onSignalAbort();
+      });
+      if (controller.signal.aborted) throw controller.signal.reason;
       await handle.sync();
+      if (controller.signal.aborted) throw controller.signal.reason;
       await handle.close();
       handle = undefined;
-      if (received !== declaredLength) throw new HttpFailure(400, "UPLOAD_SIZE_MISMATCH");
-      return await readFile(path);
-    } finally {
+      return { directory, path, size: received };
+    } catch (error) {
       await handle?.close().catch(() => undefined);
-      await rm(directory, { recursive: true, force: true });
-      activeUploadDirs.delete(directory);
+      await removeUploadDirectory(directory);
+      if (error instanceof HttpFailure) throw error;
+      if (error instanceof Error && "code" in error && error.code === "ENOSPC") {
+        throw new HttpFailure(507, "UPLOAD_STORAGE_EXHAUSTED");
+      }
+      throw error;
     }
   }
 
@@ -888,7 +1202,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
         limits: {
           textCharacters: 4_096,
           jsonBytes: GUI_MAX_JSON_BYTES,
-          uploadBytes: GUI_MAX_UPLOAD_BYTES,
+          uploadBytes: currentUploadLimit(),
           attachmentBytes: GUI_MAX_ATTACHMENT_BYTES,
           attachmentDownloads: GUI_MAX_ATTACHMENT_DOWNLOADS,
           page: GUI_MAX_PAGE_LIMIT,
@@ -918,7 +1232,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
     if (url.pathname === "/api/auth/qr") {
       methodAllowed(method, ["POST"]);
       assertQuery(url, []);
-      const body = await readBody(request, 0);
+      const body = await readBody(request, 0, ordinaryTimeouts);
       if (body.length !== 0) throw new HttpFailure(400, "AUTH_BODY_NOT_ALLOWED");
       checkRate(true);
       void options.client.beginQrLogin().catch(() => {
@@ -931,7 +1245,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
     if (url.pathname === "/api/auth/password") {
       methodAllowed(method, ["POST"]);
       assertQuery(url, []);
-      const body = parseJsonObject(await readJson(request), ["password"]);
+      const body = parseJsonObject(await readJson(request, ordinaryTimeouts), ["password"]);
       if (typeof body["password"] !== "string" || body["password"].length < 1 || body["password"].length > 512) {
         throw new HttpFailure(400, "INVALID_PASSWORD_INPUT");
       }
@@ -943,7 +1257,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
     if (url.pathname === "/api/auth/cancel") {
       methodAllowed(method, ["POST"]);
       assertQuery(url, []);
-      const body = await readBody(request, 0);
+      const body = await readBody(request, 0, ordinaryTimeouts);
       if (body.length !== 0) throw new HttpFailure(400, "AUTH_BODY_NOT_ALLOWED");
       await mutation(async () => options.client.cancelLogin());
       writeNoContent(response);
@@ -1000,7 +1314,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
       }
       methodAllowed(method, ["GET", "POST"]);
       assertQuery(url, []);
-      const body = parseJsonObject(await readJson(request), ["text"]);
+      const body = parseJsonObject(await readJson(request, ordinaryTimeouts), ["text"]);
       if (typeof body["text"] !== "string" || !body["text"].trim() || body["text"].length > 4_096) {
         throw new HttpFailure(400, "INVALID_MESSAGE_TEXT");
       }
@@ -1036,24 +1350,71 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
       }
       uploadInFlight = true;
       inFlightMutations += 1;
-      try {
-        const uploadBytes = await streamUpload(request);
-        // 전송 경로와 같은 시간 상한을 적용해 멈춘 업로드가 슬롯을 붙잡지 않게 한다.
-        await withMutationTimeout(
-          () => options.client.sendFile(topicId, { ...metadata, bytes: uploadBytes })
+      let resolveUploadSettlement: () => void = () => {};
+      const uploadSettlement = new Promise<void>((resolveSettlement) => {
+        resolveUploadSettlement = resolveSettlement;
+      });
+      activeUploadSettlements.add(uploadSettlement);
+      const controller = new AbortController();
+      activeUploadControllers.add(controller);
+      let progressTimer: ReturnType<typeof setTimeout> | undefined;
+      const absoluteTimer = setTimeout(
+        () => controller.abort(new HttpFailure(504, "UPLOAD_OPERATION_TIMEOUT")),
+        uploadOperationAbsoluteMs
+      );
+      const abortForPeerClose = () => {
+        if (!response.writableEnded) controller.abort(new HttpFailure(499, "UPLOAD_CANCELLED"));
+      };
+      response.once("close", abortForPeerClose);
+      let spooled: { directory: string; path: string; size: number; } | undefined;
+      let releaseTask: Promise<void> | undefined;
+      const releaseFile = () => {
+        if (!spooled) return Promise.resolve();
+        releaseTask ??= removeUploadDirectory(spooled.directory);
+        return releaseTask;
+      };
+      const resetProgressTimer = () => {
+        clearTimeout(progressTimer);
+        progressTimer = setTimeout(
+          () => controller.abort(new HttpFailure(504, "UPLOAD_PROGRESS_TIMEOUT")),
+          uploadProgressInactivityMs
         );
+      };
+      try {
+        spooled = await streamUpload(request, controller, currentUploadLimit());
+        if (controller.signal.aborted) throw controller.signal.reason;
+        resetProgressTimer();
+        await options.client.sendFile(topicId, {
+          ...metadata,
+          path: spooled.path,
+          size: spooled.size,
+          signal: controller.signal,
+          onProgress: resetProgressTimer,
+          onFileReleased: releaseFile
+        });
+        if (controller.signal.aborted) throw controller.signal.reason;
       } catch (error) {
+        if (controller.signal.aborted && controller.signal.reason instanceof HttpFailure) {
+          throw controller.signal.reason;
+        }
         if (error instanceof HttpFailure) {
-          if (error.code === "TELEGRAM_OPERATION_TIMEOUT") {
-            diagnostic("upstream_failure", "TELEGRAM_OPERATION_TIMEOUT");
+          if (["UPLOAD_OPERATION_TIMEOUT", "UPLOAD_PROGRESS_TIMEOUT"].includes(error.code)) {
+            diagnostic("upstream_failure", error.code);
           }
           throw error;
         }
         diagnostic("upstream_failure", "TELEGRAM_OPERATION_FAILED");
         throw new HttpFailure(502, "TELEGRAM_OPERATION_FAILED");
       } finally {
+        clearTimeout(progressTimer);
+        clearTimeout(absoluteTimer);
+        response.off("close", abortForPeerClose);
+        await releaseFile().catch(() => undefined);
+        activeUploadControllers.delete(controller);
         uploadInFlight = false;
         inFlightMutations -= 1;
+        activeUploadSettlements.delete(uploadSettlement);
+        resolveUploadSettlement();
       }
       writeNoContent(response);
       return;
@@ -1119,7 +1480,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
       methodAllowed(method, ["POST"]);
       assertQuery(url, []);
       const messageId = positiveInteger(Number(callbackMatch[1]), "INVALID_MESSAGE_ID");
-      const body = parseJsonObject(await readJson(request), ["callbackData"]);
+      const body = parseJsonObject(await readJson(request, ordinaryTimeouts), ["callbackData"]);
       const callbackData = body["callbackData"];
       if (typeof callbackData !== "string" || !/^[A-Za-z0-9_-]+$/.test(callbackData)) {
         throw new HttpFailure(400, "INVALID_CALLBACK_DATA");
@@ -1142,7 +1503,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
       methodAllowed(method, ["POST"]);
       assertQuery(url, []);
       const topicId = positiveInteger(Number(readMatch[1]), "INVALID_TOPIC_ID");
-      const body = parseJsonObject(await readJson(request), ["maxMessageId"]);
+      const body = parseJsonObject(await readJson(request, ordinaryTimeouts), ["maxMessageId"]);
       const maxMessageId = positiveInteger(body["maxMessageId"], "INVALID_MESSAGE_ID");
       await mutation(() => options.client.markRead(topicId, maxMessageId), true);
       writeNoContent(response);
@@ -1154,7 +1515,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
       methodAllowed(method, ["POST"]);
       assertQuery(url, []);
       const topicId = positiveInteger(Number(typingMatch[1]), "INVALID_TOPIC_ID");
-      const body = parseJsonObject(await readJson(request), ["active"]);
+      const body = parseJsonObject(await readJson(request, ordinaryTimeouts), ["active"]);
       if (typeof body["active"] !== "boolean") throw new HttpFailure(400, "INVALID_TYPING_STATE");
       await mutation(() => options.client.setTyping(topicId, body["active"] as boolean), true);
       writeNoContent(response);
@@ -1164,8 +1525,11 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
     if (url.pathname === "/api/logout") {
       methodAllowed(method, ["POST"]);
       assertQuery(url, []);
-      const body = await readBody(request, 0);
+      const body = await readBody(request, 0, ordinaryTimeouts);
       if (body.length !== 0) throw new HttpFailure(400, "LOGOUT_BODY_NOT_ALLOWED");
+      for (const controller of activeUploadControllers) {
+        controller.abort(new HttpFailure(499, "UPLOAD_CANCELLED"));
+      }
       await mutation(() => options.client.logOut());
       sessionActive = false;
       for (const stream of streams) stream.end();
@@ -1276,7 +1640,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
   });
   server.maxHeadersCount = 64;
   server.headersTimeout = 10_000;
-  server.requestTimeout = 30_000;
+  server.requestTimeout = 0;
   server.keepAliveTimeout = 5_000;
   server.maxRequestsPerSocket = 256;
   server.on("connection", (socket) => {
@@ -1284,17 +1648,23 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
     socket.once("close", () => sockets.delete(socket));
   });
 
-  await new Promise<void>((resolveListen, rejectListen) => {
-    const onError = (error: Error) => rejectListen(error);
-    server.once("error", onError);
-    server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
-      server.off("error", onError);
-      resolveListen();
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      const onError = (error: Error) => rejectListen(error);
+      server.once("error", onError);
+      server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+        server.off("error", onError);
+        resolveListen();
+      });
     });
-  });
+  } catch (error) {
+    await rm(uploadRunRoot, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
   const address = server.address();
   if (!address || typeof address === "string" || address.address !== "127.0.0.1") {
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    await rm(uploadRunRoot, { recursive: true, force: true }).catch(() => undefined);
     throw new Error("GUI server did not bind to an ephemeral IPv4 loopback port");
   }
   expectedHost = `127.0.0.1:${address.port}`;
@@ -1344,6 +1714,9 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
         for (const stream of streams) stream.end();
         streams.clear();
         for (const controller of activeDownloadControllers) controller.abort();
+        for (const controller of activeUploadControllers) {
+          controller.abort(new HttpFailure(499, "UPLOAD_CANCELLED"));
+        }
         server.closeAllConnections();
         await new Promise<void>((resolveClose, rejectClose) => {
           server.close((error) => error ? rejectClose(error) : resolveClose());
@@ -1351,10 +1724,11 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
           if (!(error instanceof Error && error.message.includes("Server is not running"))) throw error;
         });
         for (const socket of sockets) socket.destroy();
+        await Promise.allSettled([...activeUploadSettlements]);
         await Promise.all([...activeUploadDirs].map(async (directory) => {
-          await rm(directory, { recursive: true, force: true });
-          activeUploadDirs.delete(directory);
+          await removeUploadDirectory(directory);
         }));
+        await rm(uploadRunRoot, { recursive: true, force: true });
       })();
       return closeTask;
     }

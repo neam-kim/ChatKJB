@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { lstat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import {
   GENERAL_TOPIC_ID,
   GUI_MAX_ATTACHMENT_BYTES,
@@ -26,8 +28,15 @@ import {
 const MAX_INDEXED_MESSAGES = 10_000;
 const MAX_INDEXED_ATTACHMENTS = 2_048;
 const TELEGRAM_MEDIA_REQUEST_TIMEOUT_MS = 30_000;
+const READ_CONFIRMATION_DELAYS_MS = [0, 100, 300, 900] as const;
+const UPLOAD_CANCEL_GRACE_MS = 15_000;
+const UPLOAD_RECOVERY_TIMEOUT_MS = 2 * 60_000;
+const TELEGRAM_UPLOAD_PART_BYTES = 512 * 1024;
+const DEFAULT_UPLOAD_PARTS = 4_000;
+const PREMIUM_UPLOAD_PARTS = 8_000;
+export const MAX_SUPPORTED_UPLOAD_PARTS = 8_000;
 
-export const GUI_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+export const GUI_MAX_UPLOAD_BYTES = MAX_SUPPORTED_UPLOAD_PARTS * TELEGRAM_UPLOAD_PART_BYTES;
 
 export const GUI_ALLOWED_UPLOAD_MIME_TYPES = [
   "image/jpeg",
@@ -49,8 +58,12 @@ export type TelegramUploadMimeType = typeof GUI_ALLOWED_UPLOAD_MIME_TYPES[number
 export interface TelegramUploadInput {
   name: string;
   mimeType: string;
-  bytes: Uint8Array;
+  path: string;
+  size: number;
+  signal: AbortSignal;
   caption?: string;
+  onProgress?: (progress: number) => void;
+  onFileReleased?: () => void | Promise<void>;
 }
 
 export interface TelegramUploadMetadata {
@@ -60,13 +73,16 @@ export interface TelegramUploadMetadata {
 }
 
 const ALLOWED_UPLOAD_MIME_TYPES = new Set<string>(GUI_ALLOWED_UPLOAD_MIME_TYPES);
-const IMAGE_UPLOAD_MIME_TYPES = new Set<TelegramUploadMimeType>([
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp"
+const UPLOAD_INPUT_KEYS = new Set<PropertyKey>([
+  "name",
+  "mimeType",
+  "path",
+  "size",
+  "signal",
+  "caption",
+  "onProgress",
+  "onFileReleased"
 ]);
-const UPLOAD_INPUT_KEYS = new Set<PropertyKey>(["name", "mimeType", "bytes", "caption"]);
 
 export function validateTelegramUploadMetadata(
   name: unknown,
@@ -94,10 +110,14 @@ export function validateTelegramUploadMetadata(
   };
 }
 
-function validateTelegramUploadInput(input: TelegramUploadInput): TelegramUploadMetadata & {
-  bytes: Uint8Array;
+async function validateTelegramUploadInput(input: TelegramUploadInput, maxBytes: number): Promise<TelegramUploadMetadata & {
+  path: string;
+  size: number;
+  signal: AbortSignal;
   forceDocument: boolean;
-} {
+  onProgress?: (progress: number) => void;
+  onFileReleased?: () => void | Promise<void>;
+}> {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("Telegram upload input must be an object");
   }
@@ -105,22 +125,36 @@ function validateTelegramUploadInput(input: TelegramUploadInput): TelegramUpload
     if (!UPLOAD_INPUT_KEYS.has(key)) throw new Error("Telegram upload input contains an unsupported field");
   }
   const metadata = validateTelegramUploadMetadata(input.name, input.mimeType, input.caption);
-  if (!(input.bytes instanceof Uint8Array)) {
-    throw new Error("Telegram upload bytes must be a Uint8Array");
+  if (typeof input.path !== "string" || !isAbsolute(input.path)) {
+    throw new Error("Telegram upload path must be absolute");
   }
-  if (input.bytes.byteLength < 1 || input.bytes.byteLength > GUI_MAX_UPLOAD_BYTES) {
-    throw new Error(`Telegram upload must contain 1-${GUI_MAX_UPLOAD_BYTES} bytes`);
+  if (!Number.isSafeInteger(input.size) || input.size < 1 || input.size > maxBytes) {
+    throw new Error(`Telegram upload must contain 1-${maxBytes} bytes`);
   }
+  if (!(input.signal instanceof AbortSignal)) throw new Error("Telegram upload signal is invalid");
+  if (input.onProgress !== undefined && typeof input.onProgress !== "function") {
+    throw new Error("Telegram upload progress callback is invalid");
+  }
+  if (input.onFileReleased !== undefined && typeof input.onFileReleased !== "function") {
+    throw new Error("Telegram upload file-release callback is invalid");
+  }
+  const file = await lstat(input.path);
+  if (!file.isFile() || file.size !== input.size) throw new Error("Telegram upload file size is invalid");
   return {
     ...metadata,
-    bytes: input.bytes,
-    forceDocument: !IMAGE_UPLOAD_MIME_TYPES.has(metadata.mimeType)
+    path: input.path,
+    size: input.size,
+    signal: input.signal,
+    forceDocument: true,
+    ...(input.onProgress ? { onProgress: input.onProgress } : {}),
+    ...(input.onFileReleased ? { onFileReleased: input.onFileReleased } : {})
   };
 }
 
 export interface TelegramUserIdentity {
   id: string;
   bot: boolean;
+  premium: boolean;
 }
 
 export interface ResolvedForumPeer {
@@ -148,6 +182,15 @@ export class HistoryInvalidatedError extends Error {
   }
 }
 
+export class ReadConfirmationPendingError extends Error {
+  readonly code = "READ_CONFIRMATION_PENDING";
+
+  constructor() {
+    super("Telegram topic read confirmation is still pending");
+    this.name = "ReadConfirmationPendingError";
+  }
+}
+
 export interface TelegramAttachmentDownload {
   kind: GuiAttachment["kind"];
   name: string;
@@ -167,9 +210,11 @@ export interface TelegramUserAdapter {
   checkAuthorization(): Promise<boolean>;
   signInWithQrCode(callbacks: QrLoginCallbacks): Promise<TelegramUserIdentity>;
   getMe(): Promise<TelegramUserIdentity>;
+  getAppConfig(): Promise<unknown>;
   saveSession(): string;
   resolveForumPeer(chatId: number): Promise<ResolvedForumPeer>;
   getForumTopics(peer: unknown, cursor: TopicCursor, limit: number): Promise<unknown>;
+  getForumTopicsById(peer: unknown, topicIds: readonly number[]): Promise<unknown>;
   getGeneralHistory(peer: unknown, cursor: HistoryCursor, limit: number): Promise<unknown>;
   getTopicHistory(peer: unknown, topicId: number, cursor: HistoryCursor, limit: number): Promise<unknown>;
   sendText(peer: unknown, input: {
@@ -178,11 +223,15 @@ export interface TelegramUserAdapter {
     topMessageId?: number;
   }): Promise<unknown>;
   sendFile(peer: unknown, input: TelegramUploadMetadata & {
-    bytes: Uint8Array;
+    path: string;
+    size: number;
+    signal: AbortSignal;
+    onProgress?: (progress: number) => void;
     forceDocument: boolean;
     replyToMessageId?: number;
     topMessageId?: number;
   }): Promise<unknown>;
+  interruptUploadTransport(): Promise<void>;
   downloadMedia(message: unknown, maxBytes: number, signal?: AbortSignal): Promise<Uint8Array>;
   pressCallback(peer: unknown, messageId: number, data: Uint8Array): Promise<unknown>;
   markGeneralRead(peer: unknown, maxMessageId: number): Promise<void>;
@@ -217,6 +266,12 @@ function abortError(): Error {
   return error;
 }
 
+function uploadAbortError(): Error {
+  const error = new Error("Telegram upload was cancelled");
+  error.name = "AbortError";
+  return error;
+}
+
 async function revokeTelegramSession(adapter: TelegramUserAdapter): Promise<void> {
   if (await adapter.logOut() === false) {
     throw new Error("Telegram server did not revoke the user session");
@@ -237,6 +292,103 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? value as Record<string, unknown> : null;
 }
 
+interface UploadPartLimits {
+  defaultParts: number;
+  premiumParts: number;
+}
+
+const FALLBACK_UPLOAD_PART_LIMITS: UploadPartLimits = {
+  defaultParts: DEFAULT_UPLOAD_PARTS,
+  premiumParts: PREMIUM_UPLOAD_PARTS
+};
+
+function uploadPartLimits(appConfig: unknown): UploadPartLimits {
+  const result = record(appConfig);
+  const config = record(result?.["config"]);
+  if (
+    !result
+    || !Object.hasOwn(result, "className")
+    || !Object.hasOwn(result, "config")
+    || result["className"] !== "help.AppConfig"
+    || !config
+    || !Object.hasOwn(config, "className")
+    || !Object.hasOwn(config, "value")
+    || config["className"] !== "JsonObject"
+  ) {
+    return FALLBACK_UPLOAD_PART_LIMITS;
+  }
+  const entries = Array.isArray(config["value"]) ? config["value"].map(record) : [];
+  let malformed = false;
+  const valueFor = (key: string, fallback: number): number => {
+    const matches = entries.filter((entry) => (
+      entry !== null
+      && Object.hasOwn(entry, "className")
+      && Object.hasOwn(entry, "key")
+      && Object.hasOwn(entry, "value")
+      && entry["className"] === "JsonObjectValue"
+      && entry["key"] === key
+    ));
+    if (matches.length === 0) return fallback;
+    if (matches.length !== 1) {
+      malformed = true;
+      return fallback;
+    }
+    const jsonNumber = record(matches[0]?.["value"]);
+    const value = jsonNumber?.["value"];
+    if (
+      !jsonNumber
+      || !Object.hasOwn(jsonNumber, "className")
+      || !Object.hasOwn(jsonNumber, "value")
+      || jsonNumber["className"] !== "JsonNumber"
+      || typeof value !== "number"
+      || !Number.isInteger(value)
+      || value < 1
+      || value > MAX_SUPPORTED_UPLOAD_PARTS
+    ) {
+      malformed = true;
+      return fallback;
+    }
+    return value;
+  };
+  const limits = {
+    defaultParts: valueFor("upload_max_fileparts_default", DEFAULT_UPLOAD_PARTS),
+    premiumParts: valueFor("upload_max_fileparts_premium", PREMIUM_UPLOAD_PARTS)
+  };
+  if (malformed || limits.defaultParts > limits.premiumParts) return FALLBACK_UPLOAD_PART_LIMITS;
+  return limits;
+}
+
+function nonnegativeSafeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function readReceipt(result: unknown, topicId: number): {
+  topMessageId: number;
+  readInboxMaxId: number;
+  unreadCount: number;
+} | null {
+  const topics = record(result)?.["topics"];
+  if (!Array.isArray(topics)) return null;
+  const topic = topics.map(record).find((candidate) => (
+    candidate?.["className"] === "ForumTopic" && candidate["id"] === topicId
+  ));
+  const topMessageId = nonnegativeSafeInteger(topic?.["topMessage"]);
+  const readInboxMaxId = nonnegativeSafeInteger(topic?.["readInboxMaxId"]);
+  const unreadCount = nonnegativeSafeInteger(topic?.["unreadCount"]);
+  if (
+    topMessageId === null
+    || readInboxMaxId === null
+    || unreadCount === null
+    || readInboxMaxId > topMessageId
+  ) return null;
+  return { topMessageId, readInboxMaxId, unreadCount };
+}
+
+async function waitForReadConfirmation(delayMs: number): Promise<void> {
+  if (delayMs <= 0) return;
+  await new Promise<void>((resolveWait) => setTimeout(resolveWait, delayMs));
+}
+
 export class TelegramUserClient {
   private adapter: TelegramUserAdapter | null = null;
   private peer: unknown = null;
@@ -250,6 +402,7 @@ export class TelegramUserClient {
   private closeFailure: unknown;
   private closeRevocationComplete = false;
   private loginAbort: AbortController | null = null;
+  private uploadRecoveryAbort: AbortController | null = null;
   private passwordResolve: ((password: string) => void) | null = null;
   private passwordReject: ((error: Error) => void) | null = null;
   private topicIds = new Set<number>([GENERAL_TOPIC_ID]);
@@ -259,7 +412,7 @@ export class TelegramUserClient {
     messageId: number;
     revision: string;
     sourceMessage: unknown;
-    metadata: Omit<GuiAttachment, "token" | "size" | "width" | "height">;
+    metadata: Pick<GuiAttachment, "kind" | "name" | "mimeType">;
   }>();
   private readonly attachmentByMessage = new Map<number, { token: string; revision: string; }>();
   private readonly deletedMessageIds = new Set<number>();
@@ -273,6 +426,7 @@ export class TelegramUserClient {
     expectedCursor: TopicCursor | null;
   } | null = null;
   private readonly allowedUserIds: ReadonlySet<string>;
+  private currentUploadLimitBytes = DEFAULT_UPLOAD_PARTS * TELEGRAM_UPLOAD_PART_BYTES;
 
   constructor(private readonly options: TelegramUserClientOptions) {
     positiveInteger(options.apiId, "apiId");
@@ -285,6 +439,10 @@ export class TelegramUserClient {
 
   private authState(state: GuiAuthState): void {
     this.options.onAuthState?.(state);
+  }
+
+  uploadLimitBytes(): number {
+    return this.currentUploadLimitBytes;
   }
 
   start(): Promise<void> {
@@ -468,6 +626,9 @@ export class TelegramUserClient {
       await this.discardUnauthorizedAdapter(adapter);
       throw new Error("Telegram account is not authorized for ChatKJB Terminal");
     }
+    const parts = uploadPartLimits(await adapter.getAppConfig().catch(() => null));
+    const uploadLimitBytes = (identity.premium === true ? parts.premiumParts : parts.defaultParts)
+      * TELEGRAM_UPLOAD_PART_BYTES;
     const resolved = await adapter.resolveForumPeer(this.options.chatId);
     if (!resolved.forum || !resolved.megagroup) {
       throw new Error("Configured Telegram chat is not a forum supergroup");
@@ -478,6 +639,7 @@ export class TelegramUserClient {
     if (signal?.aborted) throw abortError();
     if (this.adapter !== adapter) throw new Error("Telegram authorization was superseded");
     this.peer = resolved.peer;
+    this.currentUploadLimitBytes = uploadLimitBytes;
     this.scopeAuthorized = true;
     this.authState({ state: "ready" });
     this.requestReconciliation();
@@ -617,14 +779,164 @@ export class TelegramUserClient {
 
   async sendFile(topicId: number, input: TelegramUploadInput): Promise<void> {
     this.requireKnownTopic(topicId);
-    const upload = validateTelegramUploadInput(input);
     const adapter = this.requireReadyAdapter();
-    await adapter.sendFile(this.peer, {
-      ...upload,
-      ...(topicId === GENERAL_TOPIC_ID
-        ? {}
-        : { replyToMessageId: topicId, topMessageId: topicId })
+    const upload = await validateTelegramUploadInput(input, this.currentUploadLimitBytes);
+    let released = false;
+    const releaseFile = async () => {
+      if (released) return;
+      released = true;
+      await upload.onFileReleased?.();
+    };
+    if (upload.signal.aborted) {
+      await releaseFile();
+      throw uploadAbortError();
+    }
+    let interrupted = false;
+    let interruptTask: Promise<void> | null = null;
+    const interrupt = () => {
+      interrupted = true;
+      try {
+        interruptTask = adapter.interruptUploadTransport();
+      } catch (error) {
+        interruptTask = Promise.reject(error);
+      }
+      void interruptTask.catch(() => undefined);
+    };
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    const onAbort = () => {
+      graceTimer ??= setTimeout(interrupt, UPLOAD_CANCEL_GRACE_MS);
+    };
+    upload.signal.addEventListener("abort", onAbort, { once: true });
+    if (upload.signal.aborted) onAbort();
+    let sentMessage: unknown;
+    let sendFailure: unknown;
+    try {
+      sentMessage = await adapter.sendFile(this.peer, {
+        name: upload.name,
+        mimeType: upload.mimeType,
+        path: upload.path,
+        size: upload.size,
+        signal: upload.signal,
+        forceDocument: upload.forceDocument,
+        ...(upload.caption !== undefined ? { caption: upload.caption } : {}),
+        ...(upload.onProgress ? { onProgress: upload.onProgress } : {}),
+        ...(topicId === GENERAL_TOPIC_ID
+          ? {}
+          : { replyToMessageId: topicId, topMessageId: topicId })
+      });
+    } catch (error) {
+      sendFailure = error;
+    } finally {
+      if (graceTimer) clearTimeout(graceTimer);
+      upload.signal.removeEventListener("abort", onAbort);
+      await releaseFile();
+    }
+    if (interrupted && !this.lifecycleClosing && this.adapter === adapter) {
+      try {
+        await this.recoverUploadTransport(adapter, interruptTask ?? Promise.resolve());
+      } catch (recoveryError) {
+        if (sendFailure !== undefined) {
+          throw new AggregateError([sendFailure, recoveryError], "Telegram upload cancellation recovery failed");
+        }
+        throw recoveryError;
+      }
+    }
+    if (sendFailure !== undefined) throw sendFailure;
+    if (upload.signal.aborted) throw uploadAbortError();
+    this.publishLiveMessage(sentMessage, {
+      topicId,
+      attachmentSize: upload.size
     });
+  }
+
+  private async recoverUploadTransport(
+    adapter: TelegramUserAdapter,
+    interruptCompletion: Promise<void>
+  ): Promise<void> {
+    this.authState({ state: "reconnecting" });
+    this.clearAuthorizationState();
+    const controller = new AbortController();
+    this.uploadRecoveryAbort?.abort();
+    this.uploadRecoveryAbort = controller;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const recoveryAbortError = () => (
+      controller.signal.reason instanceof Error ? controller.signal.reason : uploadAbortError()
+    );
+    const assertRecoveryAuthority = () => {
+      if (controller.signal.aborted || this.lifecycleClosing || this.adapter !== adapter) {
+        throw recoveryAbortError();
+      }
+    };
+    const recovery = (async () => {
+      try {
+        await interruptCompletion;
+        assertRecoveryAuthority();
+        await adapter.connect();
+        assertRecoveryAuthority();
+        const authorized = await adapter.checkAuthorization();
+        assertRecoveryAuthority();
+        if (!authorized) throw new Error("Telegram upload recovery lost authorization");
+        const identity = await adapter.getMe();
+        assertRecoveryAuthority();
+        if (identity.bot || !this.allowedUserIds.has(identity.id)) {
+          throw new Error("Telegram upload recovery account is not authorized");
+        }
+        const rawConfig = await adapter.getAppConfig().catch(() => null);
+        assertRecoveryAuthority();
+        const parts = uploadPartLimits(rawConfig);
+        const resolved = await adapter.resolveForumPeer(this.options.chatId);
+        assertRecoveryAuthority();
+        if (!resolved.forum || !resolved.megagroup) {
+          throw new Error("Configured Telegram chat is not a forum supergroup");
+        }
+        await adapter.catchUp();
+        assertRecoveryAuthority();
+        return { identity, parts, resolved };
+      } finally {
+        if (controller.signal.aborted || this.lifecycleClosing || this.adapter !== adapter) {
+          void adapter.disconnect().catch(() => undefined);
+        }
+      }
+    })();
+    let rejectLifecycleAbort: ((error: Error) => void) | null = null;
+    const lifecycleAbort = new Promise<never>((_resolve, reject) => {
+      rejectLifecycleAbort = reject;
+    });
+    const onLifecycleAbort = () => rejectLifecycleAbort?.(recoveryAbortError());
+    controller.signal.addEventListener("abort", onLifecycleAbort, { once: true });
+    if (controller.signal.aborted) onLifecycleAbort();
+    timer = setTimeout(
+      () => controller.abort(new Error("Telegram upload recovery timed out")),
+      UPLOAD_RECOVERY_TIMEOUT_MS
+    );
+    try {
+      const result = await Promise.race([
+        recovery,
+        lifecycleAbort
+      ]);
+      assertRecoveryAuthority();
+      this.peer = result.resolved.peer;
+      this.currentUploadLimitBytes = (
+        result.identity.premium === true ? result.parts.premiumParts : result.parts.defaultParts
+      ) * TELEGRAM_UPLOAD_PART_BYTES;
+      this.scopeAuthorized = true;
+      this.authState({ state: "ready" });
+      this.requestReconciliation();
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        controller.abort(error instanceof Error ? error : new Error("Telegram upload recovery failed"));
+      }
+      void adapter.disconnect().catch(() => undefined);
+      this.clearAuthorizationState();
+      if (!this.lifecycleClosing && this.adapter === adapter) {
+        this.authState({ state: "error", errorCode: safeTelegramErrorCode(error) });
+      }
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+      controller.signal.removeEventListener("abort", onLifecycleAbort);
+      if (this.uploadRecoveryAbort === controller) this.uploadRecoveryAbort = null;
+    }
   }
 
   async downloadAttachment(token: string, signal?: AbortSignal): Promise<TelegramAttachmentDownload> {
@@ -656,8 +968,48 @@ export class TelegramUserClient {
     this.requireKnownTopic(topicId);
     positiveInteger(maxMessageId, "maxMessageId");
     const adapter = this.requireReadyAdapter();
-    if (topicId === GENERAL_TOPIC_ID) await adapter.markGeneralRead(this.peer, maxMessageId);
-    else await adapter.markTopicRead(this.peer, topicId, maxMessageId);
+    const peer = this.peer;
+    const authorityEpoch = this.authorityEpoch;
+    if (topicId === GENERAL_TOPIC_ID) await adapter.markGeneralRead(peer, maxMessageId);
+    else await adapter.markTopicRead(peer, topicId, maxMessageId);
+    await this.confirmRead(adapter, peer, authorityEpoch, topicId, maxMessageId);
+  }
+
+  private async confirmRead(
+    adapter: TelegramUserAdapter,
+    peer: unknown,
+    authorityEpoch: number,
+    topicId: number,
+    maxMessageId: number
+  ): Promise<void> {
+    for (const delayMs of READ_CONFIRMATION_DELAYS_MS) {
+      await waitForReadConfirmation(delayMs);
+      this.assertReadAuthority(adapter, peer, authorityEpoch);
+      const result = await adapter.getForumTopicsById(peer, [topicId]);
+      this.assertReadAuthority(adapter, peer, authorityEpoch);
+      const receipt = readReceipt(result, topicId);
+      if (!receipt) throw new Error("Telegram topic read confirmation receipt is invalid");
+      if (
+        (
+          receipt.readInboxMaxId >= maxMessageId
+          || (receipt.unreadCount === 0 && receipt.topMessageId <= maxMessageId)
+        )
+      ) return;
+    }
+    throw new ReadConfirmationPendingError();
+  }
+
+  private assertReadAuthority(
+    adapter: TelegramUserAdapter,
+    peer: unknown,
+    authorityEpoch: number
+  ): void {
+    if (
+      !this.scopeAuthorized
+      || this.adapter !== adapter
+      || this.peer !== peer
+      || this.authorityEpoch !== authorityEpoch
+    ) throw new HistoryInvalidatedError();
   }
 
   async setTyping(topicId: number, active: boolean): Promise<void> {
@@ -679,6 +1031,8 @@ export class TelegramUserClient {
       return Promise.reject(new Error("Telegram user client stop is already in progress; retry logout"));
     }
     this.lifecycleClosing = true;
+    this.uploadRecoveryAbort?.abort();
+    this.uploadRecoveryAbort = null;
     this.closeMode = mode;
     this.closeFailure = undefined;
     this.closeRevocationComplete = false;
@@ -825,22 +1179,40 @@ export class TelegramUserClient {
       this.requestReconciliation();
       return;
     }
-    const normalized = normalizeTelegramMessage(message, this.topicIds);
-    if (!normalized) return;
-    if (!this.topicIds.has(normalized.topicId)) {
-      this.requestReconciliation();
-      return;
+    if (!this.publishLiveMessage(message)) this.requestReconciliation();
+  }
+
+  private publishLiveMessage(
+    sourceMessage: unknown,
+    expectedSentFile?: { topicId: number; attachmentSize: number; }
+  ): boolean {
+    try {
+      if (rawMessageChatId(sourceMessage) !== this.options.chatId) return false;
+      const normalized = normalizeTelegramMessage(sourceMessage, this.topicIds);
+      if (
+        !normalized
+        || !this.topicIds.has(normalized.topicId)
+        || (expectedSentFile !== undefined && (
+          normalized.topicId !== expectedSentFile.topicId
+          || normalized.outgoing !== true
+          || !normalized.attachment
+          || normalized.attachment.size !== expectedSentFile.attachmentSize
+        ))
+      ) return false;
+      this.deletedMessageIds.delete(normalized.id);
+      this.liveMessageRevisions.delete(normalized.id);
+      this.liveMessageRevisions.set(normalized.id, this.attachmentRevision(sourceMessage, normalized));
+      while (this.liveMessageRevisions.size > MAX_INDEXED_MESSAGES) {
+        const oldest = this.liveMessageRevisions.keys().next().value as number | undefined;
+        if (oldest === undefined) break;
+        this.liveMessageRevisions.delete(oldest);
+      }
+      this.indexMessage(normalized, sourceMessage);
+      this.options.onUpdate?.({ type: "message_upsert", message: normalized });
+      return true;
+    } catch {
+      return false;
     }
-    this.deletedMessageIds.delete(normalized.id);
-    this.liveMessageRevisions.delete(normalized.id);
-    this.liveMessageRevisions.set(normalized.id, this.attachmentRevision(message, normalized));
-    while (this.liveMessageRevisions.size > MAX_INDEXED_MESSAGES) {
-      const oldest = this.liveMessageRevisions.keys().next().value as number | undefined;
-      if (oldest === undefined) break;
-      this.liveMessageRevisions.delete(oldest);
-    }
-    this.indexMessage(normalized, message);
-    this.options.onUpdate?.({ type: "message_upsert", message: normalized });
   }
 
   private requestReconciliation(): void {
@@ -865,7 +1237,7 @@ export class TelegramUserClient {
     }
     if (callbacks.size > 0) this.callbackAllowlist.set(message.id, callbacks);
     else this.callbackAllowlist.delete(message.id);
-    if (message.attachment) {
+    if (message.attachment && message.attachment.size <= GUI_MAX_ATTACHMENT_BYTES) {
       const revision = this.attachmentRevision(sourceMessage, message);
       const previous = this.attachmentByMessage.get(message.id);
       let token = previous?.revision === revision ? previous.token : "";
@@ -914,6 +1286,8 @@ export class TelegramUserClient {
       message.editedAt ?? message.sentAt,
       stringId(mediaObject?.["id"]),
       message.attachment?.kind,
+      message.attachment?.name,
+      message.attachment?.filenameSource,
       message.attachment?.mimeType,
       message.attachment?.size
     ].join(":");
@@ -943,6 +1317,7 @@ export class TelegramUserClient {
     this.liveMessageRevisions.clear();
     this.scopeAuthorized = false;
     this.peer = null;
+    this.currentUploadLimitBytes = DEFAULT_UPLOAD_PARTS * TELEGRAM_UPLOAD_PART_BYTES;
     this.topicIds.clear();
     this.topicIds.add(GENERAL_TOPIC_ID);
     this.messageTopics.clear();
@@ -1080,12 +1455,17 @@ async function createTeleprotoUserAdapter(input: {
           onError: callbacks.onError
         }
       );
-      return { id: stringId(user.id), bot: "bot" in user && user.bot === true };
+      return {
+        id: stringId(user.id),
+        bot: "bot" in user && user.bot === true,
+        premium: "premium" in user && user.premium === true
+      };
     },
     async getMe() {
       const user = await client.getMe();
-      return { id: stringId(user.id), bot: user.bot === true };
+      return { id: stringId(user.id), bot: user.bot === true, premium: user.premium === true };
     },
+    getAppConfig: () => client.invoke(new teleproto.Api.help.GetAppConfig({ hash: 0 })),
     saveSession: () => session.save(),
     async resolveForumPeer(chatId) {
       for await (const dialog of client.iterDialogs({})) {
@@ -1106,6 +1486,10 @@ async function createTeleprotoUserAdapter(input: {
       offsetId: cursor.offsetId,
       offsetTopic: cursor.offsetTopic,
       limit
+    })),
+    getForumTopicsById: (peer, topicIds) => client.invoke(new teleproto.Api.messages.GetForumTopicsByID({
+      peer: peer as never,
+      topics: [...topicIds]
     })),
     getGeneralHistory: (peer, cursor, limit) => client.invoke(new teleproto.Api.messages.GetHistory({
       peer: peer as never,
@@ -1145,17 +1529,26 @@ async function createTeleprotoUserAdapter(input: {
     async sendFile(peer, request) {
       const file = new teleproto.client.uploads.CustomFile(
         request.name,
-        request.bytes.byteLength,
-        "",
-        Buffer.from(request.bytes)
+        request.size,
+        request.path
       );
-      await client.sendFile(peer as never, {
+      const progressCallback = (progress: number) => request.onProgress?.(progress);
+      Object.defineProperty(progressCallback, "isCanceled", {
+        configurable: false,
+        enumerable: false,
+        get: () => request.signal.aborted
+      });
+      return await client.sendFile(peer as never, {
         file,
         ...(request.caption !== undefined ? { caption: request.caption } : {}),
         forceDocument: request.forceDocument,
+        progressCallback,
         ...(request.replyToMessageId !== undefined ? { replyTo: request.replyToMessageId } : {}),
         ...(request.topMessageId !== undefined ? { topMsgId: request.topMessageId } : {})
       });
+    },
+    async interruptUploadTransport() {
+      await client.disconnect();
     },
     async downloadMedia(message, maxBytes, signal) {
       const controller = new AbortController();

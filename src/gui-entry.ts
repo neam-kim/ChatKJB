@@ -88,8 +88,10 @@ async function run(): Promise<void> {
     shuttingDown = true;
     if (parentWatch) clearInterval(parentWatch);
     parentWatch = null;
-    await server?.close().catch(() => undefined);
-    await client?.stop().catch(() => undefined);
+    await Promise.all([
+      server?.close().catch(() => undefined),
+      client?.stop().catch(() => undefined)
+    ]);
     if (controlOpen) {
       try {
         closeSync(controlFd);

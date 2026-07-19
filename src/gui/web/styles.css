@@ -260,12 +260,21 @@ a:focus-visible {
 .inline-keyboard a { min-width: 0; max-width: 100%; padding: .45rem .65rem; color: var(--accent); font-size: .72rem; overflow-wrap: anywhere; text-decoration: none; }
 .inline-keyboard a { border: 1px solid var(--line); background: var(--panel-raised); }
 
-.attachment { min-width: 0; margin-top: .75rem; }
+.attachment { display: grid; grid-template-columns: minmax(12rem, 22rem) minmax(0, 1fr); gap: .7rem; align-items: start; min-width: 0; margin-top: .75rem; padding: .7rem; border: 1px solid var(--line); background: var(--panel-raised); }
+.attachment-metadata { display: grid; gap: .22rem; min-width: 0; align-content: start; }
+.attachment-details,
+.attachment-status { color: var(--muted); font-size: .68rem; overflow-wrap: anywhere; }
+.attachment-status { color: var(--faint); }
+.attachment-action { min-width: 0; }
 .attachment img { display: block; max-width: min(100%, 64rem); height: auto; max-height: 65vh; border: 1px solid var(--line); object-fit: contain; background: #06080a; }
 .attachment-button { display: flex; align-items: center; gap: .55rem; max-width: 100%; padding: .55rem .7rem; color: var(--text); }
 .attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-size { color: var(--muted); font-size: .68rem; }
 .attachment a { color: #93c5fd; }
+
+@media (max-width: 48rem) {
+  .attachment { grid-template-columns: minmax(0, 1fr); }
+}
 
 .empty-state { display: grid; place-items: center; align-content: center; min-height: 100%; padding: 3rem; color: var(--faint); text-align: center; }
 .empty-state span { color: var(--accent); font-size: 2rem; }
