@@ -1,6 +1,7 @@
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { BOT_COMMANDS } from "../src/bot-commands.js";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
@@ -1066,6 +1067,25 @@ describe("GUI REST DTO and input boundaries", () => {
     expectRawSecurityHeaders(oversized.headers);
     expect(client.sendFile).not.toHaveBeenCalled();
 
+  });
+
+  it("publishes the bot command catalog so the composer can preview it", async () => {
+    const { handle } = await startFixture();
+    const session = await authenticate(handle);
+    const response = await fetch(`${handle.origin}/api/session`, {
+      headers: readHeaders(handle.origin, session)
+    });
+    const commands = (await response.json()).commands;
+    // 작성창 미리보기는 Telegram의 "/" 목록과 같은 카탈로그를 써야 어긋나지 않는다.
+    expect(commands).toEqual(BOT_COMMANDS.map((entry) => ({
+      command: entry.command,
+      description: entry.description
+    })));
+    expect(commands.length).toBeGreaterThan(20);
+    for (const entry of commands) {
+      expect(entry.command).toMatch(/^[a-z0-9_]{1,32}$/);
+      expect(entry.description.length).toBeGreaterThan(0);
+    }
   });
 
   it("publishes the exact standard and Premium Telegram account upload ceilings", async () => {

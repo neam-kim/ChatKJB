@@ -124,6 +124,7 @@ function startApplication() {
     jumpLatest: document.querySelector("#jump-latest"),
     generalPanel: document.querySelector("#general-panel"),
     composer: document.querySelector("#composer"),
+    commandMenu: document.querySelector("#command-menu"),
     messageInput: document.querySelector("#message-input"),
     fileInput: document.querySelector("#file-input"),
     attachButton: document.querySelector("#attach-button"),
@@ -142,6 +143,9 @@ function startApplication() {
     lastSequence: -1,
     connection: "connecting",
     limits: { uploadBytes: 2_097_152_000, attachmentBytes: 20 * 1024 * 1024 },
+    commands: [],
+    commandMatches: [],
+    commandIndex: -1,
     topics: new Map(),
     activeTopicId: null,
     histories: new Map(),
@@ -232,12 +236,111 @@ function startApplication() {
     }
   }
 
+  // Telegram 클라이언트의 "/" 명령어 목록과 같은 것을 작성창에서도 보여 준다.
+  // 이름과 설명 모두 서버가 setMyCommands에 쓰는 카탈로그에서 온다.
+  function applySessionCommands(commands) {
+    if (!Array.isArray(commands)) return;
+    state.commands = commands.flatMap((entry) => {
+      const command = entry?.command;
+      const description = entry?.description;
+      if (typeof command !== "string" || !/^[a-z0-9_]{1,32}$/i.test(command)) return [];
+      return [{ command, description: typeof description === "string" ? description : "" }];
+    });
+  }
+
+  // 첫 줄이 인자 없는 "/토큰"일 때만 미리보기를 연다. 이미 인자를 적기 시작했거나
+  // 여러 줄을 쓰는 중이라면 방해하지 않는다.
+  function commandQuery() {
+    if (state.activeTopicId === null || elements.messageInput.disabled) return null;
+    const match = /^\/([a-z0-9_]*)$/i.exec(elements.messageInput.value);
+    return match ? match[1].toLowerCase() : null;
+  }
+
+  function closeCommandMenu() {
+    state.commandMatches = [];
+    state.commandIndex = -1;
+    elements.commandMenu.hidden = true;
+    elements.commandMenu.replaceChildren();
+    elements.messageInput.setAttribute("aria-expanded", "false");
+    elements.messageInput.removeAttribute("aria-activedescendant");
+  }
+
+  function renderCommandMenu() {
+    const fragment = document.createDocumentFragment();
+    state.commandMatches.forEach((entry, index) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "command-option";
+      option.id = `command-option-${entry.command}`;
+      option.dataset.command = entry.command;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(index === state.commandIndex));
+      option.tabIndex = -1;
+      const name = document.createElement("span");
+      name.className = "command-name";
+      name.textContent = `/${entry.command}`;
+      const description = document.createElement("span");
+      description.className = "command-description";
+      description.textContent = entry.description;
+      option.append(name, description);
+      fragment.append(option);
+    });
+    elements.commandMenu.replaceChildren(fragment);
+    const selected = state.commandMatches[state.commandIndex];
+    if (selected) {
+      elements.messageInput.setAttribute("aria-activedescendant", `command-option-${selected.command}`);
+      elements.commandMenu.children[state.commandIndex]?.scrollIntoView({ block: "nearest" });
+    } else {
+      elements.messageInput.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  function updateCommandMenu() {
+    const query = commandQuery();
+    if (query === null) {
+      closeCommandMenu();
+      return;
+    }
+    const matches = state.commands.filter((entry) => entry.command.startsWith(query));
+    if (matches.length === 0) {
+      closeCommandMenu();
+      return;
+    }
+    const previous = state.commandMatches[state.commandIndex]?.command;
+    state.commandMatches = matches;
+    const kept = matches.findIndex((entry) => entry.command === previous);
+    state.commandIndex = kept === -1 ? 0 : kept;
+    elements.commandMenu.hidden = false;
+    elements.messageInput.setAttribute("aria-expanded", "true");
+    renderCommandMenu();
+  }
+
+  function moveCommandSelection(step) {
+    if (state.commandMatches.length === 0) return;
+    const size = state.commandMatches.length;
+    state.commandIndex = (state.commandIndex + step + size) % size;
+    renderCommandMenu();
+  }
+
+  // 명령어를 고르면 인자를 바로 이어 쓸 수 있도록 뒤에 공백을 붙인다.
+  function acceptCommand(command) {
+    const entry = state.commands.find((candidate) => candidate.command === command);
+    if (!entry) return;
+    closeCommandMenu();
+    elements.messageInput.value = `/${entry.command} `;
+    elements.messageInput.focus();
+    const end = elements.messageInput.value.length;
+    elements.messageInput.setSelectionRange(end, end);
+    scheduleTyping();
+  }
+
   async function refreshSessionLimits() {
     if (!state.csrf || state.limitsRefreshActive) return;
     state.limitsRefreshActive = true;
     try {
       const session = await requestJson("/api/session", {}, false);
       applySessionLimits(session?.limits);
+      applySessionCommands(session?.commands);
       if (state.selectedFile && !isAllowedUploadFile(state.selectedFile, state.limits.uploadBytes)) {
         showAlert(`현재 Telegram 계정의 ${formatBytes(state.limits.uploadBytes)} 상한을 초과하여 선택을 해제했습니다.`);
         setSelectedFile(null);
@@ -1219,6 +1322,7 @@ function startApplication() {
     }
     if (state.activeTopicId !== null) historyFor(state.activeTopicId).scrollTop = elements.viewport.scrollTop;
     state.activeTopicId = topicId;
+    closeCommandMenu();
     state.selectionGeneration += 1;
     const generation = state.selectionGeneration;
     state.historyAbort?.abort();
@@ -1658,6 +1762,7 @@ function startApplication() {
         await postJson(`/api/topics/${state.activeTopicId}/messages`, { text });
       }
       elements.messageInput.value = "";
+      closeCommandMenu();
       elements.messageInput.style.height = "auto";
       await setTyping(false);
     } catch (error) {
@@ -1778,6 +1883,25 @@ function startApplication() {
   elements.messageInput.addEventListener("compositionstart", () => { state.composing = true; });
   elements.messageInput.addEventListener("compositionend", () => { state.composing = false; });
   elements.messageInput.addEventListener("keydown", (event) => {
+    // 미리보기가 열려 있는 동안에는 방향키·Tab·Enter가 목록을 조작한다. 한글 조합
+    // 중에는 브라우저가 Enter를 조합 확정에 쓰므로 목록을 건드리지 않는다.
+    if (!elements.commandMenu.hidden && !state.composing) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        moveCommandSelection(event.key === "ArrowDown" ? 1 : -1);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeCommandMenu();
+        return;
+      }
+      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
+        event.preventDefault();
+        acceptCommand(state.commandMatches[state.commandIndex]?.command);
+        return;
+      }
+    }
     if (!shouldSubmitComposerKey(event, state.composing)) return;
     event.preventDefault();
     void submitComposer();
@@ -1785,9 +1909,19 @@ function startApplication() {
   elements.messageInput.addEventListener("input", () => {
     elements.messageInput.style.height = "auto";
     elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, 160)}px`;
+    updateCommandMenu();
     if (elements.messageInput.value) scheduleTyping();
   });
-  elements.messageInput.addEventListener("blur", () => void setTyping(false));
+  elements.commandMenu.addEventListener("mousedown", (event) => {
+    // 목록 클릭으로 작성창이 blur되어 메뉴가 먼저 닫히는 것을 막는다.
+    event.preventDefault();
+    const option = event.target.closest(".command-option");
+    if (option) acceptCommand(option.dataset.command);
+  });
+  elements.messageInput.addEventListener("blur", () => {
+    closeCommandMenu();
+    void setTyping(false);
+  });
   elements.composer.addEventListener("submit", (event) => {
     event.preventDefault();
     void submitComposer();
@@ -1829,6 +1963,7 @@ function startApplication() {
       state.csrf = session.csrfToken;
       state.epoch = session.eventEpoch;
       applySessionLimits(session.limits);
+      applySessionCommands(session.commands);
       setConnection(session.connection || "connecting");
       if (session.connection === "ready") await reconcile();
       void consumeEventStream();

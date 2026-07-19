@@ -420,8 +420,9 @@ async function main() {
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || "Browser evaluation failed");
       return result.result?.value;
     };
+    const VIRTUAL_KEY_CODES = { Enter: 13, Tab: 9, Escape: 27, ArrowUp: 38, ArrowDown: 40 };
     const pressKey = async (key, code = key) => {
-      const virtualKeyCode = key === "Enter" ? 13 : 0;
+      const virtualKeyCode = VIRTUAL_KEY_CODES[key] ?? 0;
       await cdp.send("Input.dispatchKeyEvent", {
         type: "keyDown",
         key,
@@ -1509,6 +1510,91 @@ async function main() {
       throw new Error(`Composer text send changed topic or contents: ${JSON.stringify(client.calls.texts)}`);
     }
     process.stdout.write("G003 renderer: text send passed\n");
+
+    const typeComposer = async (value) => await evaluate(`(() => {
+      const input = document.querySelector('#message-input');
+      input.value = ${JSON.stringify(value)};
+      input.focus();
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    const menuCommands = async () => await evaluate(
+      "JSON.stringify([...document.querySelectorAll('#command-menu .command-option')].map((option) => option.dataset.command))"
+    );
+
+    // 직전 전송이 끝나기 전에 입력하면 완료 처리가 작성창을 다시 비운다.
+    await waitFor(async () => await evaluate(
+      "!document.querySelector('#message-input').disabled && document.querySelector('#message-input').value === ''"
+    ), "composer settled after send");
+
+    await typeComposer("/");
+    await waitFor(async () => await evaluate("!document.querySelector('#command-menu').hidden"), "command preview opened");
+    const allCommands = JSON.parse(await menuCommands());
+    if (!allCommands.includes("new") || !allCommands.includes("model") || allCommands.length < 20) {
+      throw new Error(`Command preview did not list the bot catalog: ${JSON.stringify(allCommands)}`);
+    }
+    if (!await evaluate(
+      "document.querySelector('#command-menu .command-option')?.getAttribute('aria-selected') === 'true'"
+    )) throw new Error("Command preview did not preselect its first option");
+    if (!await evaluate(
+      "document.querySelector('#command-menu .command-option .command-description')?.textContent.length > 0"
+    )) throw new Error("Command preview omitted the command description");
+
+    await typeComposer("/mo");
+    await waitFor(async () => await menuCommands() === JSON.stringify(["mode", "model"]), "command preview filtered by prefix");
+    await pressKey("ArrowDown");
+    await waitFor(async () => await evaluate(
+      "document.querySelectorAll('#command-menu .command-option')[1]?.getAttribute('aria-selected') === 'true'"
+    ), "command preview arrow selection");
+    await pressKey("ArrowUp");
+    await pressKey("ArrowUp");
+    await waitFor(async () => await evaluate(
+      "document.querySelectorAll('#command-menu .command-option')[1]?.getAttribute('aria-selected') === 'true'"
+    ), "command preview wrapping arrow selection");
+
+    const textsBeforeAccept = client.calls.text;
+    await pressKey("Enter");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('#message-input').value === '/model '"
+    ), "command preview Enter acceptance");
+    if (client.calls.text !== textsBeforeAccept) {
+      throw new Error("Accepting a command preview entry also sent the message");
+    }
+    if (!await evaluate("document.querySelector('#command-menu').hidden")) {
+      throw new Error("Command preview stayed open after acceptance");
+    }
+
+    // 인자를 적기 시작했거나 일치하는 명령어가 없으면 미리보기는 방해하지 않는다.
+    await typeComposer("/model sonnet");
+    await evaluate("true");
+    if (!await evaluate("document.querySelector('#command-menu').hidden")) {
+      throw new Error("Command preview stayed open once an argument was typed");
+    }
+    await typeComposer("/zzzz");
+    if (!await evaluate("document.querySelector('#command-menu').hidden")) {
+      throw new Error("Command preview stayed open with no matching command");
+    }
+
+    await typeComposer("/st");
+    await waitFor(async () => await menuCommands() === JSON.stringify(["start", "status", "steer", "stop"]), "command preview reopened");
+    await pressKey("Escape");
+    if (!await evaluate("document.querySelector('#command-menu').hidden")) {
+      throw new Error("Escape did not dismiss the command preview");
+    }
+
+    await typeComposer("/st");
+    await waitFor(async () => await evaluate("!document.querySelector('#command-menu').hidden"), "command preview before click");
+    await evaluate(`(() => {
+      const option = [...document.querySelectorAll('#command-menu .command-option')]
+        .find((candidate) => candidate.dataset.command === 'status');
+      option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      return true;
+    })()`);
+    await waitFor(async () => await evaluate(
+      "document.querySelector('#message-input').value === '/status '"
+    ), "command preview click acceptance");
+    await typeComposer("");
+    process.stdout.write("G003 renderer: command preview list, filter, keyboard, click, and dismissal passed\n");
     await evaluate("document.querySelector('.callback-button').focus(); true");
     await pressKey("Enter");
     await waitFor(() => client.calls.callback === 1, "callback");

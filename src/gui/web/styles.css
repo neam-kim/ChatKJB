@@ -284,6 +284,13 @@ a:focus-visible {
 .general-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; min-width: 0; margin-bottom: .55rem; border: 1px solid var(--line); background: var(--line); }
 .general-panel button { min-width: 0; min-height: 2.2rem; padding: .45rem .65rem; overflow: hidden; border: 0; background: var(--panel-raised); color: var(--text); font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .general-panel button:hover { background: #1b272e; color: var(--accent); }
+.command-menu { max-height: 14rem; margin-bottom: .55rem; overflow-y: auto; border: 1px solid var(--line); background: var(--panel-raised); }
+.command-menu[hidden] { display: none; }
+.command-option { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr); gap: .7rem; align-items: baseline; width: 100%; min-width: 0; padding: .4rem .65rem; border: 0; border-left: 2px solid transparent; background: none; color: var(--muted); text-align: left; font: inherit; font-size: .72rem; cursor: pointer; }
+.command-option + .command-option { border-top: 1px solid var(--line-soft); }
+.command-option .command-name { color: var(--accent); font-weight: 700; white-space: nowrap; }
+.command-option .command-description { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-option:hover, .command-option[aria-selected="true"] { border-left-color: var(--accent); background: #14231e; color: var(--text); }
 .composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .55rem; align-items: end; min-width: 0; }
 .composer textarea { width: 100%; min-width: 0; height: var(--composer-control-height); min-height: var(--composer-control-height); max-height: 10rem; resize: none; padding: .5rem .8rem; border: 1px solid var(--line); background: #090d10; color: var(--text); font-size: .84rem; line-height: 1.45; }
 .composer textarea::placeholder { color: var(--faint); }

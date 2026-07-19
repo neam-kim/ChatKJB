@@ -1,3 +1,4 @@
+import { BOT_COMMANDS } from "../bot-commands.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { chmod, lstat, mkdtemp, open, readFile, readdir, rename, rm, statfs } from "node:fs/promises";
@@ -1199,6 +1200,12 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
         connection: auth.state,
         csrfToken,
         eventEpoch: epoch,
+        // Telegram 클라이언트가 "/"에 보여 주는 것과 같은 명령어 목록을 GUI 작성창의
+        // 미리보기에도 쓴다. setMyCommands와 같은 카탈로그를 공유해 서로 어긋나지 않는다.
+        commands: BOT_COMMANDS.map((entry) => ({
+          command: entry.command,
+          description: entry.description
+        })),
         limits: {
           textCharacters: 4_096,
           jsonBytes: GUI_MAX_JSON_BYTES,
