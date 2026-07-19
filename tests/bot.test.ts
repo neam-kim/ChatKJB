@@ -21,6 +21,7 @@ import {
   parseReserveTime,
   resolveSessionUploadPath
 } from "../src/bot.js";
+import { resetAdvisoryRuntimeStateForTests } from "../src/bot/handlers/advisory.js";
 import type { AppConfig } from "../src/config.js";
 import { FALLBACK_MODEL_CATALOG } from "../src/model-catalog.js";
 import { StateStore } from "../src/store.js";
@@ -71,6 +72,8 @@ function botSetup(extra?: {
   availableProviders?: Array<"claude" | "codex" | "agy" | "grok">;
   allowedUserIds?: number[];
   failSessionStartNotification?: boolean;
+  /** sendMessage 본문이 이 조건을 만족하면 Telegram 길이 초과처럼 거부한다. */
+  failSendMessageWhen?: (text: string) => boolean;
   telegramMtproto?: AppConfig["telegramMtproto"];
   runtime?: BotRuntimeDependencies;
 }) {
@@ -155,6 +158,17 @@ function botSetup(extra?: {
       && String((payload as { text?: string; }).text ?? "").startsWith("세션을 시작했습니다.")
     ) {
       throw new Error("fixture session notification failure");
+    }
+    if (method === "sendMessage" && extra?.failSendMessageWhen) {
+      const text = String((payload as { text?: string; }).text ?? "");
+      if (extra.failSendMessageWhen(text)) {
+        const err = new Error(
+          "GrammyError: Call to 'sendMessage' failed! (400: Bad Request: message is too long)"
+        ) as Error & { error_code: number; description: string; };
+        err.error_code = 400;
+        err.description = "Bad Request: message is too long";
+        throw err;
+      }
     }
     let result: unknown = true;
     if (method === "sendMessage") {
@@ -431,6 +445,7 @@ function effortCommand(text: string, updateId = 1) {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  resetAdvisoryRuntimeStateForTests();
   if (originalFolderBrowserRoot === undefined) {
     delete process.env.CHATKJB_FOLDER_BROWSER_ROOT;
   } else {
@@ -1600,6 +1615,62 @@ describe("/compile command", () => {
       .map((call) => call.payload.text);
     expect(texts.some((text) => String(text).includes("LLM-Wiki compile을 시작합니다"))).toBe(true);
     expect(texts.some((text) => String(text).includes("드라이브를 선택하세요"))).toBe(true);
+  });
+
+  it("delivers a completion notice under Telegram's length limit for huge provider output", async () => {
+    const { bot, config, sessions, calls } = botSetup();
+    mkdirSync(join(config.projects[0]!.cwd, ".claude", "commands"), { recursive: true });
+    writeFileSync(join(config.projects[0]!.cwd, ".claude", "commands", "compile.md"), "# compile\n");
+    process.env.WIKI_VAULT = config.projects[0]!.cwd;
+    process.env.KJB_WIKI_POST_COMPILE_SCRIPT = "";
+    const huge = Array.from({ length: 200 }, (_, i) => `progress-${i} ${"x".repeat(500)}`).join("\n");
+    vi.spyOn(sessions, "runOneOffTask").mockResolvedValue(huge);
+
+    await bot.handleUpdate(compileCommand("/compile"));
+
+    await vi.waitFor(() => {
+      const texts = calls
+        .filter((call) => call.method === "sendMessage")
+        .map((call) => String(call.payload.text));
+      expect(texts.some((text) => text.includes("LLM-Wiki compile 완료"))).toBe(true);
+    });
+    const completion = calls
+      .filter((call) => call.method === "sendMessage")
+      .map((call) => String(call.payload.text))
+      .find((text) => text.includes("LLM-Wiki compile 완료"));
+    expect(completion).toBeDefined();
+    expect(completion!.length).toBeLessThanOrEqual(4096);
+  });
+
+  it("falls back to a short completion notice when Telegram rejects a long body", async () => {
+    const { bot, config, sessions, calls } = botSetup({
+      failSendMessageWhen: (text) =>
+        text.includes("compile 완료") && !text.includes("생략되었습니다")
+    });
+    mkdirSync(join(config.projects[0]!.cwd, ".claude", "commands"), { recursive: true });
+    writeFileSync(join(config.projects[0]!.cwd, ".claude", "commands", "compile.md"), "# compile\n");
+    process.env.WIKI_VAULT = config.projects[0]!.cwd;
+    process.env.KJB_WIKI_POST_COMPILE_SCRIPT = "";
+    vi.spyOn(sessions, "runOneOffTask").mockResolvedValue("compile ok\n".repeat(20));
+
+    await bot.handleUpdate(compileCommand("/compile"));
+
+    await vi.waitFor(() => {
+      const texts = calls
+        .filter((call) => call.method === "sendMessage")
+        .map((call) => String(call.payload.text));
+      expect(texts.some((text) => text.includes("생략되었습니다"))).toBe(true);
+    });
+    const fallback = calls
+      .filter((call) => call.method === "sendMessage")
+      .map((call) => String(call.payload.text))
+      .find((text) => text.includes("생략되었습니다"));
+    expect(fallback!.length).toBeLessThanOrEqual(4096);
+    // 거절된 본문 시도 + 짧은 폴백 성공이 calls에 모두 남는다.
+    expect(
+      calls.filter((call) => call.method === "sendMessage"
+        && String(call.payload.text).includes("compile 완료")).length
+    ).toBeGreaterThanOrEqual(2);
   });
 });
 

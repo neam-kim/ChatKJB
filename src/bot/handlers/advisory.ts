@@ -14,7 +14,10 @@ import {
   providerDisplayLabel
 } from "../formatting.js";
 import {
+  buildCompileNotifyText,
   buildWikiCompilePrompt,
+  fitTelegramText,
+  isTransientTelegramError,
   runConfiguredKjbWikiPostCompile,
   summarizeCompileOutput
 } from "../wiki-compile.js";
@@ -25,6 +28,12 @@ const execFileAsync = promisify(execFile);
 // 중간에 AbortError로 끊기므로 /compile에는 전체 제한시간을 두지 않는다.
 let wikiCompileRunning = false;
 let transcriptDumpRunning = false;
+
+/** 테스트 전용: /compile·/dpbot 모듈 플래그를 초기화한다. */
+export function resetAdvisoryRuntimeStateForTests(): void {
+  wikiCompileRunning = false;
+  transcriptDumpRunning = false;
+}
 
 export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
   const {
@@ -171,23 +180,54 @@ export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
     // fire-and-forget 체인에서 unhandledRejection으로 번져 전역 가드가 울린다. 통지는 항상
     // 삼켜서, 컴파일 자체의 성패와 무관하게 프로미스 체인이 조용히 안정 종료되게 한다.
     // compile은 수십 분이 걸리므로 완료 통지를 놓치면 사용자는 결과를 영영 알 수 없다.
-    // 텔레그램 일시 단절은 흔하므로 지수 백오프로 여러 번 재시도한 뒤에만 포기한다.
+    // 네트워크 일시 단절은 지수 백오프로 재시도하되, message is too long 같은 영구 오류는
+    // 짧은 폴백 본문으로 한 번 더 보내고 같은 긴 본문으로 시간을 낭비하지 않는다.
     const notify = async (text: string): Promise<void> => {
       const delaysMs = [1_000, 5_000, 15_000, 45_000, 120_000];
+      let payload = fitTelegramText(text);
+      let usedShortFallback = false;
       for (let attempt = 0; ; attempt += 1) {
         try {
-          await ctx.api.sendMessage(config.chatId, text);
-          if (attempt > 0) console.warn(`[compile] 통지 전송 성공(재시도 ${attempt}회)`);
+          await ctx.api.sendMessage(config.chatId, payload);
+          if (attempt > 0 || usedShortFallback) {
+            console.warn(
+              `[compile] 통지 전송 성공(재시도 ${attempt}회`
+              + `${usedShortFallback ? ", 짧은 폴백" : ""})`
+            );
+          }
           return;
         } catch (err) {
+          const transient = isTransientTelegramError(err);
+          const detail = safeErrorMessage(err);
+          // 길이 초과 등 영구 오류: 짧은 상태 문장만 남겨 한 번 더 시도한다.
+          if (!transient && !usedShortFallback) {
+            const firstLine = payload.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+              ?? "LLM-Wiki compile 알림";
+            payload = fitTelegramText(
+              `${firstLine}\n\n(상세 요약이 Telegram 길이 제한을 넘어 생략되었습니다.)`
+            );
+            usedShortFallback = true;
+            console.warn(`[compile] 통지 본문 단축 후 재전송:`, detail);
+            continue;
+          }
+          if (!transient) {
+            console.error(
+              `[compile] 통지 전송 최종 실패(비재시도): chars=${payload.length}:`,
+              detail
+            );
+            return;
+          }
           const delay = delaysMs[attempt];
           if (delay === undefined) {
-            console.error("[compile] 통지 전송 최종 실패:", safeErrorMessage(err));
+            console.error(
+              `[compile] 통지 전송 최종 실패: chars=${payload.length}:`,
+              detail
+            );
             return;
           }
           console.warn(
             `[compile] 통지 전송 실패, ${delay / 1_000}초 뒤 재시도:`,
-            safeErrorMessage(err)
+            detail
           );
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
@@ -218,22 +258,24 @@ export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
           console.log(
             `[compile] KJB Wiki 공개 그래프 재생성·배포 완료${postCompileSummary ? `\n${postCompileSummary}` : ""}`
           );
-          await notify(
-            `LLM-Wiki compile 및 KJB Wiki 공개 그래프 배포 완료.`
-            + `${summary ? `\n\n${summary}` : ""}`
-          );
+          await notify(buildCompileNotifyText(
+            "LLM-Wiki compile 및 KJB Wiki 공개 그래프 배포 완료.",
+            summary
+          ));
           return;
         }
       } catch (error: unknown) {
-        await notify(
-          `LLM-Wiki compile은 완료했지만 KJB Wiki 공개 그래프 배포 오류: ${safeErrorMessage(error)}`
-          + `${summary ? `\n\n${summary}` : ""}`
-        );
+        await notify(buildCompileNotifyText(
+          `LLM-Wiki compile은 완료했지만 KJB Wiki 공개 그래프 배포 오류: ${safeErrorMessage(error)}`,
+          summary
+        ));
         return;
       }
-      await notify(`LLM-Wiki compile 완료.${summary ? `\n\n${summary}` : ""}`);
+      await notify(buildCompileNotifyText("LLM-Wiki compile 완료.", summary));
     }).catch(async (error: unknown) => {
-      await notify(`LLM-Wiki compile 오류: ${safeErrorMessage(error)}`);
+      await notify(buildCompileNotifyText(
+        `LLM-Wiki compile 오류: ${safeErrorMessage(error)}`
+      ));
     }).finally(() => {
       wikiCompileRunning = false;
     });

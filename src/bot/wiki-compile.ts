@@ -6,6 +6,13 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const POST_COMPILE_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** Telegram Bot API sendMessage 본문 상한(UTF-16 코드 유닛 기준, JS string length와 동일). */
+export const TELEGRAM_TEXT_LIMIT = 4096;
+/** 본문+제목 여유를 두고 잘릴 때 쓰는 안전 상한. */
+export const COMPILE_NOTIFY_BODY_LIMIT = 1200;
+/** 재시도해도 의미 없는 클라이언트 오류(길이 초과·잘못된 요청 등). */
+const NON_RETRYABLE_TELEGRAM_CODES = new Set([400, 401, 403, 404]);
+
 export async function runConfiguredKjbWikiPostCompile(): Promise<string | undefined> {
   const configured = process.env.KJB_WIKI_POST_COMPILE_SCRIPT?.trim();
   if (!configured) return undefined;
@@ -26,15 +33,58 @@ export async function runConfiguredKjbWikiPostCompile(): Promise<string | undefi
   return [stdout, stderr].filter(Boolean).join("\n").trim();
 }
 
+/** Telegram 한 메시지 한도 안으로 잘라 완료 통지가 길이 초과로 유실되지 않게 한다. */
+export function fitTelegramText(text: string, limit = TELEGRAM_TEXT_LIMIT): string {
+  const value = String(text ?? "");
+  if (value.length <= limit) return value;
+  if (limit <= 3) return value.slice(0, limit);
+  return `${value.slice(0, limit - 3)}...`;
+}
+
+/**
+ * 네트워크/한도 초과처럼 잠시 뒤 재시도할 가치가 있는 오류만 true.
+ * `message is too long` 같은 400은 같은 본문으로 재시도해도 영원히 실패한다.
+ */
+export function isTransientTelegramError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return true;
+  const value = error as {
+    error_code?: number;
+    errorCode?: number;
+    description?: string;
+    message?: string;
+    parameters?: { retry_after?: number; };
+  };
+  const code = value.error_code ?? value.errorCode;
+  const detail = `${value.description ?? ""} ${value.message ?? ""}`.toLowerCase();
+  if (detail.includes("message is too long")) return false;
+  if (typeof code === "number" && NON_RETRYABLE_TELEGRAM_CODES.has(code)) {
+    // 429 Too Many Requests 는 재시도 대상(아래 별도 분기 없음 — 코드 집합에 없음).
+    return false;
+  }
+  return true;
+}
+
+/** 제목 + 선택 요약본을 Telegram 한도 안에서 조합한다. */
+export function buildCompileNotifyText(title: string, detail = ""): string {
+  const head = String(title ?? "").trim() || "LLM-Wiki compile";
+  const body = detail.trim();
+  if (!body) return fitTelegramText(head);
+  return fitTelegramText(`${head}\n\n${body}`);
+}
+
 export function summarizeCompileOutput(text: string): string {
-  const summary = text
-    .split("\n")
+  const raw = String(text ?? "");
+  const summary = raw
+    .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
     .slice(-8)
     .join("\n");
   if (!summary) return "";
-  return summary.length > 1200 ? `${summary.slice(0, 1200)}...` : summary;
+  // 마지막 줄(최신 요약)을 우선 보존한다. 앞에서 자르면 완료 요약이 잘린다.
+  if (summary.length <= COMPILE_NOTIFY_BODY_LIMIT) return summary;
+  const keep = COMPILE_NOTIFY_BODY_LIMIT - 3;
+  return `...${summary.slice(summary.length - keep)}`;
 }
 
 export function buildWikiCompilePrompt(vault: string, arg: string): string {
