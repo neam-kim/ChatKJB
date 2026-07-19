@@ -1133,10 +1133,28 @@ function startApplication() {
           state.topics = topics;
           for (const topic of topics.values()) {
             const read = readStateFor(topic.id);
+            const previous = previousTopics.get(topic.id);
+            if (read.latestUnreadMessageId > topic.topMessageId) {
+              // SSE로 이미 받은 더 최신 unread보다 뒤처진 zero/positive/partial
+              // snapshot은 로컬에서 본 사실을 지울 수 없다. snapshot이 그 지점에
+              // 따라잡을 때까지 최신 id와 최소 unread 수를 보존한다.
+              topic.topMessageId = read.latestUnreadMessageId;
+              topic.unreadCount = Math.max(1, previous?.unreadCount || 0);
+            }
             read.latestKnownMessageId = Math.max(read.latestKnownMessageId, topic.topMessageId);
-            if (topic.unreadCount > 0) {
+            if (
+              topic.unreadCount > 0
+              && topic.topMessageId <= read.highWater
+              && read.latestUnreadMessageId <= read.highWater
+            ) {
+              // exact Telegram receipt로 이미 확인한 지점보다 오래된 양수 snapshot은
+              // 늦게 도착한 정합화 응답이다. 이를 다시 적용하면 읽은 badge가
+              // 부활하므로, 단조 증가하는 확인 지점을 authority로 유지한다.
+              topic.unreadCount = 0;
+              read.latestUnreadMessageId = 0;
+              retireConfirmedReadState(read, read.highWater);
+            } else if (topic.unreadCount > 0) {
               read.latestUnreadMessageId = Math.max(read.latestUnreadMessageId, topic.topMessageId);
-              const previous = previousTopics.get(topic.id);
               if (!previous || previous.unreadCount !== topic.unreadCount || previous.topMessageId !== topic.topMessageId) {
                 read.unreadGeneration += 1;
               }

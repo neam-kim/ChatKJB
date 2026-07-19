@@ -234,7 +234,6 @@ export interface TelegramUserAdapter {
   interruptUploadTransport(): Promise<void>;
   downloadMedia(message: unknown, maxBytes: number, signal?: AbortSignal): Promise<Uint8Array>;
   pressCallback(peer: unknown, messageId: number, data: Uint8Array): Promise<unknown>;
-  markGeneralRead(peer: unknown, maxMessageId: number): Promise<void>;
   markTopicRead(peer: unknown, topicId: number, maxMessageId: number): Promise<void>;
   setTyping(peer: unknown, topicId: number, active: boolean): Promise<void>;
   addRawUpdateHandler(handler: (update: unknown) => void): void;
@@ -970,8 +969,10 @@ export class TelegramUserClient {
     const adapter = this.requireReadyAdapter();
     const peer = this.peer;
     const authorityEpoch = this.authorityEpoch;
-    if (topicId === GENERAL_TOPIC_ID) await adapter.markGeneralRead(peer, maxMessageId);
-    else await adapter.markTopicRead(peer, topicId, maxMessageId);
+    // General도 포럼 토픽이므로 ReadDiscussion으로 표시한다. channels.ReadHistory는
+    // 채널 대화 상자만 갱신할 뿐 General 토픽의 readInboxMaxId·unreadCount를 움직이지
+    // 않아, 읽어도 배지가 남는다(실계정 확인: 47134 read 후에도 47074/2 유지).
+    await adapter.markTopicRead(peer, topicId, maxMessageId);
     await this.confirmRead(adapter, peer, authorityEpoch, topicId, maxMessageId);
   }
 
@@ -1588,12 +1589,6 @@ async function createTeleprotoUserAdapter(input: {
       msgId: messageId,
       data: Buffer.from(data)
     })),
-    async markGeneralRead(peer, maxMessageId) {
-      await client.invoke(new teleproto.Api.channels.ReadHistory({
-        channel: peer as never,
-        maxId: maxMessageId
-      }));
-    },
     async markTopicRead(peer, topicId, maxMessageId) {
       await client.invoke(new teleproto.Api.messages.ReadDiscussion({
         peer: peer as never,

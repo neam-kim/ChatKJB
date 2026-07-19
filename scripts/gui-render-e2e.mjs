@@ -51,7 +51,7 @@ class FixtureClient {
     ...Array.from({ length: 160 }, (_, index) => topic(1_000 + index, `보관 토픽 ${index + 1}`))
   ];
   messages = [];
-  calls = { panel: 0, text: 0, texts: [], file: 0, fileInputs: [], callback: 0, read: 0, readTargets: [], readActive: 0, readMax: 0, topics: 0, history: 0, downloadActive: 0, downloadMax: 0 };
+  calls = { panel: 0, text: 0, texts: [], file: 0, fileInputs: [], callback: 0, read: 0, readTargets: [], readInputs: [], readActive: 0, readMax: 0, topics: 0, history: 0, downloadActive: 0, downloadMax: 0 };
   delayPanel = true;
   panelPending = false;
   releasePanel = null;
@@ -275,6 +275,7 @@ class FixtureClient {
   async markRead(topicId, maxMessageId) {
     this.calls.read += 1;
     this.calls.readTargets.push(maxMessageId);
+    this.calls.readInputs.push({ topicId, maxMessageId });
     this.calls.readActive += 1;
     this.calls.readMax = Math.max(this.calls.readMax, this.calls.readActive);
     try {
@@ -777,6 +778,173 @@ async function main() {
       })`);
       throw new Error(`${error.message}; safe browser diagnostic=${JSON.stringify(diagnostic)}`);
     }
+
+    const readsBeforeInactiveGeneral = client.calls.read;
+    const generalTopic = client.topics.find((candidate) => candidate.id === 1);
+    const generalIds = [47065, 47066, 47067, 47068, 47069, 47070, 47071, 47074];
+    for (const id of generalIds) {
+      const incoming = fixtureMessage(id, `비활성 General unread ${id}`, { topicId: 1, outgoing: false });
+      client.generalMessages.push(incoming);
+      generalTopic.topMessageId = id;
+      generalTopic.unreadCount += 1;
+      server.publishUpdate({ type: "message_upsert", message: incoming });
+    }
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '8'"
+    ), "inactive General unread accumulation");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 450));
+    if (client.calls.read !== readsBeforeInactiveGeneral) {
+      throw new Error("Inactive General issued a read marker while another topic was active");
+    }
+
+    client.pendingReadFailures = 1;
+    await evaluate("document.querySelector('[data-topic-id=\"1\"]')?.click(); true");
+    await waitFor(
+      () => client.calls.readInputs.some((input) => input.topicId === 1 && input.maxMessageId === 47074),
+      "General exact read target"
+    );
+    if (!await evaluate("document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '8'")) {
+      throw new Error("General pending confirmation cleared the unread badge early");
+    }
+    await waitFor(
+      () => client.calls.readInputs.filter((input) => input.topicId === 1 && input.maxMessageId === 47074).length === 2,
+      "General pending-only retry"
+    );
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"1\"] .topic-count') === null"
+    ), "active General authoritative unread clear");
+
+    const generalReadsAfterSuccess = client.calls.readInputs.filter((input) => input.topicId === 1).length;
+    generalTopic.topMessageId = 47074;
+    generalTopic.unreadCount = 8;
+    client.delayNextHistory = true;
+    server.publishUpdate({ type: "reconcile_required" });
+    await waitFor(() => client.historyPending, "General stale positive snapshot barrier");
+    if (
+      await evaluate("document.querySelector('[data-topic-id=\"1\"] .topic-count') !== null")
+      || client.calls.readInputs.filter((input) => input.topicId === 1).length !== generalReadsAfterSuccess
+    ) throw new Error("A stale positive General snapshot resurrected the badge or issued another read");
+    client.releaseHistory?.();
+    await waitFor(() => !client.historyPending, "General stale snapshot reconciliation completion");
+
+    const duplicateGeneral = client.generalMessages.find((message) => message.id === 47074);
+    server.publishUpdate({ type: "message_upsert", message: duplicateGeneral });
+    server.publishUpdate({
+      type: "message_upsert",
+      message: { ...duplicateGeneral, text: "편집된 General 메시지", editedAt: Date.now() }
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    if (await evaluate("document.querySelector('[data-topic-id=\"1\"] .topic-count') !== null")) {
+      throw new Error("A duplicate or edited General message resurrected the unread badge");
+    }
+
+    const newerGeneral = fixtureMessage(47075, "확인 뒤의 새 General 메시지", { topicId: 1, outgoing: false });
+    client.generalMessages.push(newerGeneral);
+    generalTopic.topMessageId = newerGeneral.id;
+    generalTopic.unreadCount = 1;
+    client.delayNextRead = true;
+    server.publishUpdate({ type: "message_upsert", message: newerGeneral });
+    await waitFor(() => client.readPending, "newer General read confirmation pending");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '1'"
+    ), "newer General unread badge");
+    client.releaseRead?.();
+    await waitFor(() => !client.readPending, "newer General read completion");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"1\"] .topic-count') === null"
+    ), "newer General unread clear");
+
+    await evaluate("document.querySelector('[data-topic-id=\"42\"]')?.click(); true");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('#topic-title')?.textContent === '반응형 터미널'"
+    ), "ordinary topic before inverse General snapshot race");
+    const generalReadsBeforeInverseRace = client.calls.readInputs.filter((input) => input.topicId === 1).length;
+    const inverseRaceGeneral = fixtureMessage(47076, "낡은 snapshot보다 먼저 도착한 General 메시지", {
+      topicId: 1,
+      outgoing: false
+    });
+    client.generalMessages.push(inverseRaceGeneral);
+    generalTopic.topMessageId = inverseRaceGeneral.id;
+    generalTopic.unreadCount = 1;
+    server.publishUpdate({ type: "message_upsert", message: inverseRaceGeneral });
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '1'"
+    ), "inverse-race newer General unread badge");
+
+    generalTopic.topMessageId = 47075;
+    generalTopic.unreadCount = 8;
+    client.delayNextHistory = true;
+    server.publishUpdate({ type: "reconcile_required" });
+    await waitFor(() => client.historyPending, "inverse General stale snapshot barrier");
+    if (
+      !await evaluate("document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '1'")
+      || client.calls.readInputs.filter((input) => input.topicId === 1).length !== generalReadsBeforeInverseRace
+    ) throw new Error("A stale General snapshot erased a newer local unread or issued an inactive read");
+    client.releaseHistory?.();
+    await waitFor(() => !client.historyPending, "inverse General snapshot reconciliation completion");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '1'"
+    ), "inverse General unread after reconciliation commit");
+    if (client.calls.readInputs.filter((input) => input.topicId === 1).length !== generalReadsBeforeInverseRace) {
+      throw new Error("Inverse General reconciliation issued an inactive read after commit");
+    }
+
+    const partialRaceGeneral = fixtureMessage(47077, "부분 snapshot보다 먼저 도착한 General 메시지", {
+      topicId: 1,
+      outgoing: false
+    });
+    client.generalMessages.push(partialRaceGeneral);
+    generalTopic.topMessageId = partialRaceGeneral.id;
+    generalTopic.unreadCount = 2;
+    server.publishUpdate({ type: "message_upsert", message: partialRaceGeneral });
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '2'"
+    ), "partial-race newer General unread badge");
+
+    generalTopic.topMessageId = 47076;
+    generalTopic.unreadCount = 1;
+    client.delayNextHistory = true;
+    server.publishUpdate({ type: "reconcile_required" });
+    await waitFor(() => client.historyPending, "partial General snapshot barrier");
+    if (
+      !await evaluate("document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '2'")
+      || client.calls.readInputs.filter((input) => input.topicId === 1).length !== generalReadsBeforeInverseRace
+    ) throw new Error("A partial General snapshot undercounted newer local unreads or issued an inactive read");
+    client.releaseHistory?.();
+    await waitFor(() => !client.historyPending, "partial General snapshot reconciliation completion");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '2'"
+    ), "partial General unread after reconciliation commit");
+    if (client.calls.readInputs.filter((input) => input.topicId === 1).length !== generalReadsBeforeInverseRace) {
+      throw new Error("Partial General reconciliation issued an inactive read after commit");
+    }
+
+    generalTopic.topMessageId = 47075;
+    generalTopic.unreadCount = 0;
+    client.delayNextHistory = true;
+    server.publishUpdate({ type: "reconcile_required" });
+    await waitFor(() => client.historyPending, "zero General snapshot barrier");
+    if (
+      !await evaluate("document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '2'")
+      || client.calls.readInputs.filter((input) => input.topicId === 1).length !== generalReadsBeforeInverseRace
+    ) throw new Error("A stale zero General snapshot erased newer local unreads or issued an inactive read");
+    client.releaseHistory?.();
+    await waitFor(() => !client.historyPending, "zero General snapshot reconciliation completion");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"1\"] .topic-count')?.textContent === '2'"
+    ), "zero General unread after reconciliation commit");
+    if (client.calls.readInputs.filter((input) => input.topicId === 1).length !== generalReadsBeforeInverseRace) {
+      throw new Error("Zero General reconciliation issued an inactive read after commit");
+    }
+    await evaluate("document.querySelector('[data-topic-id=\"1\"]')?.click(); true");
+    await waitFor(
+      () => client.calls.readInputs.some((input) => input.topicId === 1 && input.maxMessageId === 47077),
+      "inverse-race General exact read target"
+    );
+    await waitFor(async () => await evaluate(
+      "document.querySelector('[data-topic-id=\"1\"] .topic-count') === null"
+    ), "inverse-race General unread clear");
+    process.stdout.write("G002 renderer: inactive General preserved, active exact retry cleared, stale snapshot stayed retired, and newer incoming re-read passed\n");
 
     await evaluate("document.querySelector('[data-topic-id=\"1\"]')?.click(); true");
     await waitFor(async () => await evaluate(

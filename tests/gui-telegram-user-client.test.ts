@@ -2,8 +2,10 @@ import { existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { returnBigInt } from "teleproto/Helpers.js";
 import {
   GENERAL_TOPIC_ID,
+  GUI_MAX_ATTACHMENT_BYTES,
   safeHttpUrl,
   type GuiAuthState,
   type GuiTelegramUpdate,
@@ -215,7 +217,6 @@ class FakeAdapter implements TelegramUserAdapter {
   readonly interruptUploadTransport = vi.fn(async () => undefined);
   readonly downloadMedia = vi.fn(async () => Uint8Array.from([1, 2, 3]));
   readonly pressCallback = vi.fn(async () => ({ message: "ok" }));
-  readonly markGeneralRead = vi.fn(async () => undefined);
   readonly markTopicRead = vi.fn(async () => undefined);
   readonly setTyping = vi.fn(async () => undefined);
   readonly catchUp = vi.fn(async () => undefined);
@@ -822,7 +823,78 @@ describe("TelegramUserClient forum scope and actions", () => {
       20 * 1024 * 1024,
       undefined
     );
-    await expect(client.downloadAttachment("A".repeat(43))).rejects.toThrow(/attachment/);
+    for (const invalidToken of ["A".repeat(42), "A".repeat(43), "A".repeat(44), "!".repeat(43)]) {
+      await expect(client.downloadAttachment(invalidToken)).rejects.toThrow(/attachment/);
+    }
+    await client.stop();
+  });
+
+  it("accepts teleproto null optionals while rejecting ephemeral media", async () => {
+    const adapter = new FakeAdapter();
+    const document = (ttlSeconds: unknown, spoiler: unknown = false) => ({
+      className: "MessageMediaDocument",
+      ttlSeconds,
+      spoiler,
+      document: {
+        className: "Document",
+        id: "production-document",
+        size: returnBigInt(998_235),
+        mimeType: "image/png",
+        attributes: [
+          { className: "DocumentAttributeImageSize", w: 1_920, h: 1_080 },
+          { className: "DocumentAttributeFilename", fileName: "production.png" }
+        ]
+      }
+    });
+    const photo = (ttlSeconds: unknown, spoiler: unknown = false) => ({
+      className: "MessageMediaPhoto",
+      ttlSeconds,
+      spoiler,
+      photo: {
+        className: "Photo",
+        sizes: [
+          { className: "PhotoSize", w: 800, h: 600, size: 140_696 },
+          { className: "PhotoSizeProgressive", w: 1_600, h: 1_200, sizes: [171_505, 342_961] }
+        ]
+      }
+    });
+    adapter.topicHistory = {
+      messages: [
+        rawMessage({ id: 93, text: "nullable document", topicId: 42, media: document(null), outgoing: true }),
+        rawMessage({ id: 94, text: "nullable photo", topicId: 42, media: photo(null), outgoing: true }),
+        rawMessage({ id: 95, text: "zero ttl", topicId: 42, media: document(0), outgoing: true }),
+        rawMessage({ id: 96, text: "positive ttl", topicId: 42, media: photo(30), outgoing: true }),
+        rawMessage({ id: 97, text: "malformed ttl", topicId: 42, media: document("30"), outgoing: true }),
+        rawMessage({ id: 98, text: "spoiler", topicId: 42, media: photo(null, true), outgoing: true }),
+        rawMessage({ id: 99, text: "numeric false spoiler", topicId: 42, media: document(null, 0), outgoing: true }),
+        rawMessage({ id: 100, text: "numeric true spoiler", topicId: 42, media: photo(null, 1), outgoing: true }),
+        rawMessage({ id: 101, text: "string spoiler", topicId: 42, media: document(null, "false"), outgoing: true }),
+        rawMessage({ id: 102, text: "object spoiler", topicId: 42, media: photo(null, {}), outgoing: true })
+      ]
+    };
+    const { client } = setup(adapter);
+    await client.start();
+    await client.listTopics();
+
+    const messages = (await client.listMessages(42)).messages;
+    expect(messages[0]?.attachment).toMatchObject({
+      kind: "image",
+      name: "production.png",
+      filenameSource: "telegram",
+      mimeType: "image/png",
+      size: 998_235,
+      width: 1_920,
+      height: 1_080
+    });
+    expect(messages[1]?.attachment).toMatchObject({
+      kind: "image",
+      filenameSource: "generated",
+      mimeType: "image/jpeg",
+      size: 342_961,
+      width: 1_600,
+      height: 1_200
+    });
+    for (const message of messages.slice(2)) expect(message.attachment).toBeUndefined();
     await client.stop();
   });
 
@@ -877,6 +949,21 @@ describe("TelegramUserClient forum scope and actions", () => {
               attributes: []
             }
           }
+        }),
+        rawMessage({
+          id: 104,
+          text: "exact download boundary",
+          topicId: 42,
+          media: {
+            className: "MessageMediaDocument",
+            document: {
+              className: "Document",
+              id: "104",
+              size: GUI_MAX_ATTACHMENT_BYTES,
+              mimeType: "application/pdf",
+              attributes: [{ className: "DocumentAttributeFilename", fileName: "boundary.pdf" }]
+            }
+          }
         })
       ]
     };
@@ -911,6 +998,12 @@ describe("TelegramUserClient forum scope and actions", () => {
       size: 512
     });
     expect(messages[2]?.attachment?.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(messages[3]?.attachment).toMatchObject({
+      kind: "document",
+      name: "boundary.pdf",
+      size: GUI_MAX_ATTACHMENT_BYTES,
+      token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/)
+    });
     await client.stop();
   });
 
@@ -1359,8 +1452,12 @@ describe("TelegramUserClient forum scope and actions", () => {
       { text: "topic root", replyToMessageId: 42 },
       { text: "topic reply", replyToMessageId: 92, topMessageId: 42 }
     ]);
-    expect(adapter.markGeneralRead).toHaveBeenCalledWith(adapter.resolved.peer, 10);
-    expect(adapter.markTopicRead).toHaveBeenCalledWith(adapter.resolved.peer, 42, 92);
+    // General도 일반 토픽과 같은 ReadDiscussion 경로를 쓴다. channels.ReadHistory는
+    // General의 readInboxMaxId를 갱신하지 못해 읽음 배지가 남았다.
+    expect(adapter.markTopicRead.mock.calls).toEqual([
+      [adapter.resolved.peer, GENERAL_TOPIC_ID, 10],
+      [adapter.resolved.peer, 42, 92]
+    ]);
     expect(adapter.getForumTopicsById.mock.calls).toEqual([
       [adapter.resolved.peer, [GENERAL_TOPIC_ID]],
       [adapter.resolved.peer, [42]]
@@ -1563,10 +1660,12 @@ describe("TelegramUserClient forum scope and actions", () => {
       outgoing: true,
       media: {
         className: "MessageMediaDocument",
+        ttlSeconds: null,
+        spoiler: false,
         document: {
           className: "Document",
           id: "104",
-          size: 4,
+          size: returnBigInt(4),
           mimeType: "application/pdf",
           attributes: [{ className: "DocumentAttributeFilename", fileName: "report.pdf" }]
         }
@@ -1574,10 +1673,12 @@ describe("TelegramUserClient forum scope and actions", () => {
     });
     const sentMedia = (id: string, size: number) => ({
       className: "MessageMediaDocument",
+      ttlSeconds: null,
+      spoiler: false,
       document: {
         className: "Document",
         id,
-        size,
+        size: returnBigInt(size),
         mimeType: "application/pdf",
         attributes: [{ className: "DocumentAttributeFilename", fileName: "report.pdf" }]
       }

@@ -423,7 +423,11 @@ function photoDimensions(photo: Record<string, unknown>): {
 
 function normalizeAttachment(mediaValue: unknown, messageId: number): GuiAttachment | null {
   const media = record(mediaValue);
-  if (!media || media["spoiler"] === true || media["ttlSeconds"] !== undefined) return null;
+  if (
+    !media
+    || (media["spoiler"] != null && media["spoiler"] !== false)
+    || media["ttlSeconds"] != null
+  ) return null;
   if (media["className"] === "MessageMediaPhoto") {
     const photo = record(media["photo"]);
     if (photo?.["className"] !== "Photo") return null;
