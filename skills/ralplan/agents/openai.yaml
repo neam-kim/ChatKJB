@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ralplan"
+  short_description: "다중 관점 합의형 구현 계획과 명시적 실행 승인 게이트"
+  default_prompt: "Use $ralplan to produce a reviewed implementation plan."

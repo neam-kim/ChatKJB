@@ -1,0 +1,29 @@
+{
+  "name": "price-feed-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Independent MCP server for Toss Securities quotes/order books and CNN Fear & Greed market sentiment.",
+  "bin": {
+    "price-feed-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  },
+  "engines": {
+    "node": ">=26.4.0"
+  }
+}

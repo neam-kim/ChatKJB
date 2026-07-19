@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deep Interview"
+  short_description: "소크라테스식 요구사항 명료화와 단계별 실행 승인 게이트"
+  default_prompt: "Use $deep-interview to clarify this request before implementation."

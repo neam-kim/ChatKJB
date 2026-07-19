@@ -1,0 +1,56 @@
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+const POST_COMPILE_TIMEOUT_MS = 10 * 60 * 1000;
+
+export async function runConfiguredKjbWikiPostCompile(): Promise<string | undefined> {
+  const configured = process.env.KJB_WIKI_POST_COMPILE_SCRIPT?.trim();
+  if (!configured) return undefined;
+  if (!isAbsolute(configured)) {
+    throw new Error("KJB_WIKI_POST_COMPILE_SCRIPT는 절대경로여야 합니다.");
+  }
+  if (!existsSync(configured)) {
+    throw new Error(`KJB Wiki 후처리 스크립트를 찾지 못했습니다: ${configured}`);
+  }
+
+  const { stdout, stderr } = await execFileAsync(configured, ["--deploy"], {
+    cwd: dirname(configured),
+    env: process.env,
+    encoding: "utf8",
+    timeout: POST_COMPILE_TIMEOUT_MS,
+    maxBuffer: 10 * 1024 * 1024
+  });
+  return [stdout, stderr].filter(Boolean).join("\n").trim();
+}
+
+export function summarizeCompileOutput(text: string): string {
+  const summary = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-8)
+    .join("\n");
+  if (!summary) return "";
+  return summary.length > 1200 ? `${summary.slice(0, 1200)}...` : summary;
+}
+
+export function buildWikiCompilePrompt(vault: string, arg: string): string {
+  const commandPath = join(vault, ".claude", "commands", "compile.md");
+  if (!existsSync(commandPath)) {
+    throw new Error(`compile 규약 파일을 찾지 못했습니다: ${commandPath}`);
+  }
+  return (
+    `LLM-Wiki 저장소 \`${vault}\`에서 /compile을 배치 모드로 실행하십시오.\n\n`
+    + `1. \`${commandPath}\`를 먼저 읽고 그 규약을 따르십시오.\n`
+    + `2. 대상은 ${arg ? `\`${arg}\`` : "`10-inbox/`의 미컴파일 소스 전부"}입니다.\n`
+    + `3. 컴파일 세션이나 ChatKJB 토픽을 만들 필요가 없습니다.\n`
+    + `4. agy(Antigravity) 비신뢰 전처리는 필수 체크포인트입니다. 규약상 보안 중단 대상이 아니라면 반드시 한 번 시도하고, 사용/폐기/생략 상태와 사유를 마지막 출력에 포함하십시오.\n`
+    + `5. 배치 모드이므로 사용자에게 되묻지 말고, 불확실한 항목은 규약대로 표시하십시오.\n`
+    + `6. 소스를 하나씩 완결 처리하십시오. 한 소스의 위키 반영(source/entity/concept 페이지·인덱스 갱신)과 원본의 \`20-raw/\` 이동(규약 Step 7)을 끝낸 뒤에야 다음 소스로 넘어가고, 이동을 마지막에 몰아서 하지 마십시오. 시간이 초과되어 중단되더라도 이미 raw로 옮겨진 소스는 완료로 보존되고 인박스에는 미처리 소스만 남아, 다음 /compile 실행이 남은 소스만 자동으로 이어받습니다.\n`
+    + `7. 이 저장소는 git repo입니다. 소스 하나를 완결할 때마다 그 즉시 \`git add -A && git commit\`으로 커밋하여(규약 Step 8을 소스 단위로 앞당김) 각 소스가 온전한 체크포인트로 남게 하십시오. 모든 소스를 마친 뒤 마지막에 한 번 \`git push\`를 시도하되, push가 실패해도(네트워크/인증) 오류로 취급하지 말고 로컬 커밋은 이미 안전하므로 그대로 진행·보고하십시오.\n`
+    + `8. 마지막 출력은 완료 또는 오류 요약만 간결하게 작성하십시오.`
+  );
+}

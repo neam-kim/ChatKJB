@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          # package.json의 engines(>=26.4.0)와 일치시킨다.
+          node-version: 26.4.0
+          cache: npm
+      - run: npm ci
+      - run: npm run audit:portability
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build

@@ -1,0 +1,62 @@
+{
+  "name": "chatkjb",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "audit:portability": "node scripts/audit-portability.mjs",
+    "setup": "node scripts/bootstrap-local.mjs",
+    "auth:setup": "bash scripts/setup-oauth-token.sh",
+    "build": "node scripts/build.mjs",
+    "gui:capability": "npm run build && node scripts/telegram-gui-capability.mjs",
+    "gui:capability:check": "npm run build && node scripts/telegram-gui-capability.mjs --check",
+    "gui:render:check": "npm run build && node scripts/gui-render-e2e.mjs",
+    "gui:macos:build": "npm run build && node scripts/build-macos-app.mjs",
+    "gui:macos:audit": "node scripts/audit-macos-app.mjs",
+    "gui:macos:smoke": "npm run gui:macos:build && node scripts/smoke-macos-app.mjs",
+    "gui:macos:dmg": "npm run gui:macos:build && node scripts/build-macos-dmg.mjs",
+    "gui:macos:migrate": "node scripts/migrate-macos-state.mjs migrate",
+    "gui:macos:migrate:rollback": "node scripts/migrate-macos-state.mjs rollback",
+    "gui:integration:live": "npm run build && node scripts/telegram-gui-integration.mjs",
+    "gui:revoke:live": "npm run build && node scripts/telegram-gui-revoke.mjs",
+    "gui:quality": "node scripts/verify-chatkjb-terminal.mjs",
+    "gui:start": "npm run build && node dist/gui-entry.js",
+    "dev": "tsx watch src/index.ts",
+    "launchd:app": "node scripts/build-daemon-app.mjs --print-path",
+    "launchd:install": "node scripts/install-launch-agent.mjs",
+    "launchd:restart": "node scripts/restart-launch-agent.mjs",
+    "shared:sync": "node --import tsx -e \"import { syncSharedResources } from './src/resource-sync.ts'; const r = syncSharedResources(); console.log('Shared resources synced: ' + r.skillCount + ' skills, ' + r.connectorCount + ' connectors.');\"",
+    "start": "node dist/index.js",
+    "agents:sync": "node scripts/sync-agents.mjs",
+    "agents:install-sync-agent": "node scripts/install-agent-sync-agent.mjs",
+    "agents:install-cleanup-agent": "node scripts/install-cleanup-agent.mjs",
+    "mirror": "node scripts/mirror-to-cloudstorage.mjs",
+    "mirror:install-agent": "node scripts/install-mirror-agent.mjs",
+    "nas-mirror": "node scripts/mirror-to-nas.mjs",
+    "nas-mirror:install-agent": "node scripts/install-nas-mirror-agent.mjs",
+    "skills:add-shared": "node scripts/add-shared-skill.mjs",
+    "transcripts:dump": "node scripts/dump-transcripts.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.174",
+    "@openai/codex-sdk": "^0.144.5",
+    "better-sqlite3": "12.10.0",
+    "dotenv": "17.2.3",
+    "grammy": "1.43.0",
+    "teleproto": "1.228.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "^26.1.0",
+    "esbuild": "0.28.1",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  },
+  "engines": {
+    "node": ">=26.4.0"
+  }
+}

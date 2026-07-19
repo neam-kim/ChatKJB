@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0d10">
+  <title>ChatKJB Terminal</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="app-shell" id="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="ChatKJB 토픽">
+      <header class="brand-block">
+        <div class="brand-mark" aria-hidden="true">&gt;_</div>
+        <div class="brand-copy">
+          <strong>ChatKJB</strong>
+          <span>TERMINAL</span>
+        </div>
+      </header>
+      <div class="sidebar-caption">고정 포럼 / 토픽</div>
+      <nav class="topic-nav" aria-label="토픽 목록">
+        <ol id="topic-list" class="topic-list"></ol>
+      </nav>
+    </aside>
+
+    <main class="terminal" id="terminal">
+      <header class="terminal-header">
+        <button id="sidebar-toggle" class="icon-button sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="토픽 목록 열기">☰</button>
+        <div class="topic-heading">
+          <span class="prompt" aria-hidden="true">chatkjb://</span>
+          <h1 id="topic-title">연결 준비 중</h1>
+        </div>
+        <div id="topic-loading" class="topic-loading" role="status" aria-live="polite" hidden>
+          <span class="topic-loading-spinner" aria-hidden="true"></span>
+          <span class="sr-only">토픽 불러오는 중</span>
+        </div>
+        <div id="connection-status" class="connection-status" role="status" aria-live="polite">
+          <span class="status-light" aria-hidden="true"></span>
+          <span id="connection-label">연결 중</span>
+        </div>
+      </header>
+
+      <section id="auth-panel" class="auth-panel" aria-labelledby="auth-title" hidden>
+        <div>
+          <p class="eyebrow">USER SESSION</p>
+          <h2 id="auth-title">사용자 Telegram 세션이 필요합니다</h2>
+          <p id="auth-description">비공식 개인용 클라이언트입니다. QR은 이 앱 안에서만 표시됩니다.</p>
+        </div>
+        <button id="qr-login" class="primary-button" type="button">QR 로그인 시작</button>
+        <form id="password-form" class="password-form" hidden>
+          <label for="password-input">2단계 인증 비밀번호</label>
+          <div class="password-row">
+            <input id="password-input" name="telegram-2fa" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="512" required>
+            <button class="primary-button" type="submit">확인</button>
+            <button id="password-cancel" class="quiet-button" type="button">취소</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="history-panel" aria-label="메시지 기록">
+        <button id="load-older" class="history-loader" type="button" hidden>이전 기록 불러오기</button>
+        <div id="message-viewport" class="message-viewport" tabindex="0" aria-label="현재 토픽 메시지 기록">
+          <ol id="message-list" class="message-list"></ol>
+          <div id="empty-state" class="empty-state">
+            <span aria-hidden="true">⌁</span>
+            <p>토픽을 선택하면 기록이 여기에 표시됩니다.</p>
+          </div>
+        </div>
+        <button id="jump-latest" class="jump-latest" type="button" hidden>최신 메시지로 이동</button>
+      </section>
+
+      <footer class="composer-shell">
+        <div id="general-panel" class="general-panel" role="group" aria-label="새 세션 기본값" hidden></div>
+        <div id="selected-file" class="selected-file" role="status" hidden>
+          <span id="selected-file-label"></span>
+          <button id="selected-file-remove" class="quiet-button" type="button">첨부 제거</button>
+        </div>
+        <form id="composer" class="composer">
+          <label class="sr-only" for="message-input">메시지</label>
+          <textarea id="message-input" rows="1" maxlength="4096" placeholder="ChatKJB에 메시지 입력…" enterkeyhint="send"></textarea>
+          <input id="file-input" class="sr-only" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/svg+xml,application/pdf,text/plain,application/zip,application/octet-stream,.docx,.xlsx,.pptx">
+          <button id="attach-button" class="icon-button" type="button" aria-label="사진 또는 문서 첨부">＋</button>
+        </form>
+      </footer>
+    </main>
+  </div>
+  <div id="alert" class="alert" role="alert" hidden></div>
+  <script type="module" src="/assets/app.js"></script>
+</body>
+</html>
