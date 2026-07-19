@@ -133,12 +133,15 @@ describe("GUI web static security and responsive contract", () => {
     expect(css).toMatch(/\.general-panel\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
   });
 
-  it("tracks topic read generations and never clears unread state on request failure", () => {
+  it("tracks topic read state by message id and never clears unread state on request failure", () => {
     const script = readFileSync(resolve(webDirectory, "app.js"), "utf8");
-    expect(script).toContain("unreadGeneration");
     expect(script).toContain("latestUnreadMessageId");
     expect(script).toContain("inFlightTarget");
-    expect(script).toMatch(/read\.unreadGeneration === unreadGeneration[\s\S]*?read\.latestUnreadMessageId <= max/);
+    // 읽음 해제 판정은 단조 증가하는 메시지 id로만 한다. 세대(generation) 일치를
+    // 조건으로 두면 스트리밍 중 확인 요청이 매번 무효화되어 배지가 남는다.
+    expect(script).toContain("read.latestUnreadMessageId <= max");
+    expect(script).not.toMatch(/read\.unreadGeneration === unreadGeneration/);
+    // 요청이 실패하면 읽음 상태를 건드리지 않는다.
     expect(script).toMatch(/catch \{\s*\/\/ Read markers are best effort[\s\S]*?finally/);
     expect(script).toContain("const isNewIncoming = !existingMessage && !wasKnownByTopic && message.outgoing !== true");
   });

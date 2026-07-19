@@ -844,6 +844,8 @@ function startApplication() {
     if (isNewIncoming) {
       read.latestUnreadMessageId = Math.max(read.latestUnreadMessageId, message.id);
       read.unreadGeneration += 1;
+      // 화면에 보인다는 이유로 배지를 미리 지우지는 않는다. 읽음은 서버 확인이
+      // 성공했을 때만 반영해야, 확인이 지연·실패한 메시지를 놓치지 않는다.
       if (topic) {
         topic.unreadCount += 1;
         updateTopicBadge(message.topicId);
@@ -1122,13 +1124,17 @@ function startApplication() {
     const topic = state.topics.get(topicId);
     if (read.inFlightTarget >= max) return;
     if (read.highWater >= max && (!topic || topic.unreadCount <= 0)) return;
-    const unreadGeneration = read.unreadGeneration;
     read.inFlightTarget = max;
     let followUp = false;
     try {
       await postJson(`/api/topics/${topicId}/read`, { maxMessageId: max });
       read.highWater = Math.max(read.highWater, max);
-      if (read.unreadGeneration === unreadGeneration && read.latestUnreadMessageId <= max) {
+      // 이전에는 unreadGeneration이 그대로일 때만 배지를 지웠다. 봇이 진행 상황을
+      // 연속으로 보내면 확인 요청이 오가는 사이에 세대가 매번 바뀌어, 다 읽은 뒤에도
+      // 배지가 사라지지 않았다. 세대 조건을 없애고, 단조 증가하는 메시지 id만으로
+      // 판정한다. 확인 지점보다 새 메시지가 남아 있으면 배지는 그대로 두고 후속
+      // 확인을 예약한다(낡은 확인이 새 메시지를 지우지 않도록).
+      if (read.latestUnreadMessageId <= max) {
         read.latestUnreadMessageId = 0;
         const currentTopic = state.topics.get(topicId);
         if (currentTopic) {

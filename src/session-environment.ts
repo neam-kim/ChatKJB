@@ -9,11 +9,29 @@ import { sharedCodexLiteAgentPath } from "./resource-sync.js";
 import { projectSourceDir } from "./runtime-paths.js";
 import type { SessionRecord } from "./types.js";
 
-function prependCurrentNodeBin(pathValue: string | undefined): string {
-  const nodeBin = dirname(process.execPath);
-  if (!pathValue) return `${nodeBin}:/usr/bin:/bin`;
+// provider CLI(codex 등)는 보통 Node와 같은 bin 디렉터리에 설치된다. 그래서 실행 중인
+// Node의 bin을 PATH 앞에 붙여 왔다.
+//
+// 데몬은 macOS 권한 화면 식별을 위해 Node를 복사해 넣은 ChatKJB.app 번들로 실행되므로,
+// process.execPath는 번들 안(.../Contents/MacOS)을 가리킨다. 그 디렉터리에는 CLI가 없어
+// 이것만 쓰면 `spawn codex ENOENT`가 난다. LaunchAgent가 설치 시점의 실제 Node bin을
+// CHATKJB_NODE_BIN으로 넘겨 주므로 그 값을 함께 넣는다.
+function nodeBinCandidates(source: NodeJS.ProcessEnv): string[] {
+  const candidates = [dirname(process.execPath)];
+  const recorded = source.CHATKJB_NODE_BIN?.trim();
+  if (recorded) candidates.unshift(recorded);
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function prependCurrentNodeBin(
+  pathValue: string | undefined,
+  source: NodeJS.ProcessEnv = process.env
+): string {
+  const nodeBins = nodeBinCandidates(source);
+  if (!pathValue) return [...nodeBins, "/usr/bin", "/bin"].join(":");
   const entries = pathValue.split(":").filter(Boolean);
-  return entries.includes(nodeBin) ? pathValue : [nodeBin, ...entries].join(":");
+  const missing = nodeBins.filter((bin) => !entries.includes(bin));
+  return missing.length === 0 ? pathValue : [...missing, ...entries].join(":");
 }
 
 export function buildCodexEnvironment(
@@ -33,7 +51,7 @@ export function buildCodexEnvironment(
     }
     result[key] = value;
   }
-  result["PATH"] = prependCurrentNodeBin(result["PATH"]);
+  result["PATH"] = prependCurrentNodeBin(result["PATH"], source);
   // 다중 계정: 선택된 계정의 CODEX_HOME으로 강제 덮어쓴다. SDK에 env를 통째로 넘기면
   // 자식 프로세스는 process.env를 상속하지 않으므로, 여기서 지정한 값이 인증 디렉터리를 결정한다.
   if (targetHome && targetHome.trim()) {

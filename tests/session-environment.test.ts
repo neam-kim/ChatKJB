@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  buildCodexEnvironment,
   codexSharedResourceConfig,
   ensureCodexMcpConfigForHome
 } from "../src/session-environment.js";
@@ -72,5 +73,31 @@ describe("ensureCodexMcpConfigForHome", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("번들 실행 시 provider CLI 탐색 경로", () => {
+  // 데몬이 ChatKJB.app 번들로 실행되면 process.execPath는 번들 안을 가리킨다.
+  // 그 디렉터리에는 codex 같은 CLI가 없으므로 실제 Node bin을 함께 넣어야 한다.
+  it("CHATKJB_NODE_BIN을 PATH 앞에 넣는다", () => {
+    const env = buildCodexEnvironment(undefined, {
+      PATH: "/usr/bin:/bin",
+      CHATKJB_NODE_BIN: "/real/node/bin"
+    } as NodeJS.ProcessEnv);
+    expect(env["PATH"]?.split(":")[0]).toBe("/real/node/bin");
+    expect(env["PATH"]).toContain("/usr/bin");
+  });
+
+  it("PATH에 이미 있으면 중복해서 넣지 않는다", () => {
+    const env = buildCodexEnvironment(undefined, {
+      PATH: "/real/node/bin:/usr/bin",
+      CHATKJB_NODE_BIN: "/real/node/bin"
+    } as NodeJS.ProcessEnv);
+    expect(env["PATH"]?.split(":").filter((entry: string) => entry === "/real/node/bin")).toHaveLength(1);
+  });
+
+  it("미설정이어도 기존 동작을 유지한다", () => {
+    const env = buildCodexEnvironment(undefined, { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv);
+    expect(env["PATH"]).toContain("/usr/bin");
   });
 });

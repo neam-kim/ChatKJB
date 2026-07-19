@@ -18,6 +18,8 @@ import { buildDaemonApp } from "./build-daemon-app.mjs";
 
 const label = "com.chatkjb.agent-sync";
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// 설치를 실행한 런타임이 곧 provider CLI가 설치된 Node다.
+const realNodeBin = dirname(process.execPath);
 // 봇 데몬과 같은 ChatKJB.app 번들을 통해 실행한다. Node를 직접 실행하면
 // macOS 권한 화면에 "node"로만 표시되어 어떤 프로세스인지 구분할 수 없다.
 const nodePath = buildDaemonApp({ log: (message) => console.log(message) }).executablePath;
@@ -65,6 +67,10 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
   <dict>
     <key>CHATKJB_PROJECT_DIR</key>
     <string>${xml(projectDir)}</string>
+    <!-- 데몬은 ChatKJB.app 번들로 실행되므로 process.execPath로는 provider CLI가 설치된
+         Node bin을 알 수 없다. 설치 시점의 실제 Node bin을 넘겨 PATH 조립에 쓴다. -->
+    <key>CHATKJB_NODE_BIN</key>
+    <string>${xml(realNodeBin)}</string>
   </dict>
   <key>ProgramArguments</key>
   <array>
