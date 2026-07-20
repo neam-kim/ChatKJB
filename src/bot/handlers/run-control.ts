@@ -1,12 +1,20 @@
 import { Bot } from "grammy";
 import { buildServiceRecoveryPrompt } from "../../session-prompts.js";
 import { safeErrorMessage } from "../../telegram-transport.js";
-import type { ProjectConfig } from "../../types.js";
+import type { ProjectConfig, SessionRecord } from "../../types.js";
 import type { BotDeps } from "../deps.js";
 import {
   providerDisplayLabel
 } from "../formatting.js";
 import { pendingStartKey } from "../pending-keys.js";
+
+function hasProviderContext(session: SessionRecord): boolean {
+  if (session.provider === "claude") return !!session.sdkSessionId;
+  if (session.provider === "codex") return !!session.codexThreadId;
+  if (session.provider === "agy") return !!session.agyConversationId;
+  if (session.provider === "grok") return !!session.grokSessionId;
+  return !!session.clineSessionId;
+}
 
 export function registerRunControlHandlers(bot: Bot, deps: BotDeps): void {
   const {
@@ -144,11 +152,7 @@ export function registerRunControlHandlers(bot: Bot, deps: BotDeps): void {
       await ctx.reply("세션 토픽 안에서 사용하세요.");
       return;
     }
-    const hasContext = session.provider === "claude"
-      ? !!session.sdkSessionId
-      : session.provider === "codex"
-        ? !!session.codexThreadId
-        : !!session.agyConversationId;
+    const hasContext = hasProviderContext(session);
     if (!hasContext || sessions.isActive(session.id)) {
       await ctx.reply("분기할 수 있는 완료 세션이 없습니다.");
       return;
@@ -184,6 +188,12 @@ export function registerRunControlHandlers(bot: Bot, deps: BotDeps): void {
       codexReasoning: session.codexReasoning ?? undefined,
       codexHome: session.codexHome ?? undefined,
       agyModel: session.agyModel ?? undefined,
+      agyThinkingLevel: session.agyThinkingLevel ?? undefined,
+      grokModel: session.grokModel ?? undefined,
+      grokReasoning: session.grokReasoning ?? undefined,
+      clineProviderId: session.clineProviderId ?? undefined,
+      clineModel: session.clineModel ?? undefined,
+      clineReasoning: session.clineReasoning ?? undefined,
       ...(handoffSummary ? { handoffSummary } : {}),
       leanMode: session.leanMode
     });
@@ -197,11 +207,7 @@ export function registerRunControlHandlers(bot: Bot, deps: BotDeps): void {
       await ctx.reply("세션 토픽 안에서 사용하세요.");
       return;
     }
-    const hasContext = session.provider === "claude"
-      ? !!session.sdkSessionId
-      : session.provider === "codex"
-        ? !!session.codexThreadId
-        : !!session.agyConversationId;
+    const hasContext = hasProviderContext(session);
     if (!hasContext) {
       await ctx.reply(`아직 압축할 ${providerDisplayLabel(session.provider)} 세션 문맥이 없습니다.`);
       return;

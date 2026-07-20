@@ -80,17 +80,44 @@ function copyBundledPackageLicenses(metafile) {
     if (legalFiles.length === 0) {
       legalFiles = rootFiles.filter((name) => /^readme(?:[._-].*)?$/i.test(name)).slice(0, 1);
     }
-    if (legalFiles.length === 0) throw new Error(`Bundled package has no license or notice text: ${packageName}`);
-
     const destinationDirectory = join(packageLicensesDir, packageLicenseDirectoryName(packageName));
     mkdirSync(destinationDirectory, { recursive: true, mode: 0o755 });
     const files = [];
-    for (const filename of legalFiles.sort()) {
-      const source = join(packageRoot, filename);
-      const destination = join(destinationDirectory, filename);
-      copyFileSync(source, destination);
-      const manifestPath = relative(licensesDir, destination).replaceAll("\\", "/");
-      files.push({ path: manifestPath, sha256: sha256(destination) });
+    if (legalFiles.length === 0) {
+      // npm packages sometimes declare SPDX in package.json without shipping a LICENSE file
+      // (e.g. @cline/sdk@0.0.65). Preserve the SPDX identifier so the app bundle still ships
+      // auditable third-party license text.
+      const spdx = typeof metadata.license === "string" ? metadata.license.trim() : "";
+      if (!spdx) {
+        throw new Error(`Bundled package has no license or notice text: ${packageName}`);
+      }
+      const noticeName = "NOTICE.spdx";
+      const destination = join(destinationDirectory, noticeName);
+      writeFileSync(
+        destination,
+        [
+          `Package: ${packageName}`,
+          `Version: ${typeof metadata.version === "string" ? metadata.version : "unknown"}`,
+          `SPDX-License-Identifier: ${spdx}`,
+          "",
+          "This package did not ship a LICENSE/NOTICE file in its npm tarball.",
+          "The SPDX identifier above is taken from its package.json license field.",
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+      files.push({
+        path: relative(licensesDir, destination).replaceAll("\\", "/"),
+        sha256: sha256(destination)
+      });
+    } else {
+      for (const filename of legalFiles.sort()) {
+        const source = join(packageRoot, filename);
+        const destination = join(destinationDirectory, filename);
+        copyFileSync(source, destination);
+        const manifestPath = relative(licensesDir, destination).replaceAll("\\", "/");
+        files.push({ path: manifestPath, sha256: sha256(destination) });
+      }
     }
     packages.push({
       name: packageName,
@@ -124,6 +151,16 @@ try {
     outputIcnsPath: join(resourcesDir, "AppIcon.icns")
   });
 
+  // Optional peer/native modules pulled in by @cline/* and ws must not remain as
+  // unresolved external imports in the portable backend. Stub them so the audit
+  // and offline runtime stay self-contained.
+  const optionalPackageStubs = new Set([
+    "supports-color",
+    "bufferutil",
+    "utf-8-validate",
+    "ai-sdk-provider-claude-code",
+    "ai-sdk-provider-codex-cli"
+  ]);
   const bundleResult = await bundleWithEsbuild({
     absWorkingDir: projectDir,
     entryPoints: [relative(projectDir, sourceBackendPath)],
@@ -140,7 +177,20 @@ try {
     sourcemap: false,
     sourcesContent: false,
     legalComments: "none",
-    logLevel: "info"
+    logLevel: "info",
+    plugins: [{
+      name: "chatkjb-optional-package-stubs",
+      setup(build) {
+        build.onResolve({ filter: /.*/ }, (args) => {
+          if (!optionalPackageStubs.has(args.path)) return undefined;
+          return { path: args.path, namespace: "chatkjb-optional-stub" };
+        });
+        build.onLoad({ filter: /.*/, namespace: "chatkjb-optional-stub" }, () => ({
+          contents: "module.exports = {};",
+          loader: "js"
+        }));
+      }
+    }]
   });
   for (const name of webAssetNames) copyFileSync(join(sourceWebDir, name), join(backendWebDir, name));
 

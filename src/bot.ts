@@ -47,6 +47,10 @@ import { resolveProject, type AppConfig } from "./config.js";
 import {
   normalizeAgyModelForCatalog
 } from "./model-catalog.js";
+import {
+  clineModelsForProvider,
+  normalizeClineReasoning
+} from "./cline-sdk.js";
 import { PermissionBroker } from "./permission-broker.js";
 import {
   buildProjectSelectionPrompt,
@@ -111,6 +115,29 @@ export function createBot(
   );
   if (normalizedAgyDefault !== storedDefaults.agyModel) {
     store.updateSessionDefaults({ agyModel: normalizedAgyDefault });
+  }
+  const clineProvider = config.modelCatalog.clineProviders.find(
+    (provider) => provider.id === storedDefaults.clineProviderId
+  ) ?? config.modelCatalog.clineProviders[0];
+  if (clineProvider) {
+    const models = clineModelsForProvider(config.modelCatalog, clineProvider.id);
+    const clineModel = models.find((model) => model.id === storedDefaults.clineModel)
+      ?? models.find((model) => model.id === clineProvider.defaultModelId)
+      ?? models[0];
+    if (clineModel) {
+      const clineReasoning = normalizeClineReasoning(storedDefaults.clineReasoning, clineModel);
+      if (
+        storedDefaults.clineProviderId !== clineProvider.id
+        || storedDefaults.clineModel !== clineModel.id
+        || storedDefaults.clineReasoning !== clineReasoning
+      ) {
+        store.updateSessionDefaults({
+          clineProviderId: clineProvider.id,
+          clineModel: clineModel.id,
+          clineReasoning
+        });
+      }
+    }
   }
   // 기본값은 운영체제의 네트워크 선택을 따른다. 특정 호스트에서 IPv4/IPv6 경로에 문제가
   // 있을 때만 TELEGRAM_IP_FAMILY로 고정하며, 파일 다운로드도 같은 에이전트를 공유한다.
@@ -286,7 +313,10 @@ export function createBot(
       options.handoffSummary ?? null,
       options.codexHome ?? null,
       options.claudeTokenIndex ?? null,
-      options.grokReasoning ?? null
+      options.grokReasoning ?? null,
+      options.clineProviderId ?? null,
+      options.clineModel ?? null,
+      options.clineReasoning ?? null
     );
     const codexAccount = session.provider === "codex"
       ? codexAccountLabel(session.codexHome, config.codexAccountHomes)

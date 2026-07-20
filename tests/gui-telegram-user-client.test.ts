@@ -33,6 +33,11 @@ const REPLY_PANEL_ROWS = [
   ["\ud83e\udd16 \uc81c\uacf5\uc790: Codex", "\ud83d\udcad \ucd94\ub860: \ub9e4\uc6b0 \ub192\uc74c (xHigh)"],
   ["\u2796", "\ud83d\udd11 \ud1a0\ud070: #3"]
 ] as const;
+const CLINE_REPLY_PANEL_ROWS = [
+  ["\u2699\ufe0f \uc0c8 \uc138\uc158 \uae30\ubcf8\uac12", "\ud83e\udde0 \ubaa8\ub378: claude-sonnet-4-6"],
+  ["\ud83e\udd16 \uc81c\uacf5\uc790: Cline", "\ud83d\udcad \ucd94\ub860: high"],
+  ["\ud83d\udd0c Cline \uc81c\uacf5\uc790: anthropic", "\u2796"]
+] as const;
 
 function replyKeyboardMarkup(rows: readonly (readonly string[])[] = REPLY_PANEL_ROWS): unknown {
   return {
@@ -1237,13 +1242,17 @@ describe("TelegramUserClient forum scope and actions", () => {
 
     adapter.emit({
       className: "UpdateNewChannelMessage",
-      message: rawMessage({ id: 301, text: "new panel", replyMarkup: replyKeyboardMarkup() })
+      message: rawMessage({
+        id: 301,
+        text: "new Cline panel",
+        replyMarkup: replyKeyboardMarkup(CLINE_REPLY_PANEL_ROWS)
+      })
     });
     expect(updates).toContainEqual({
       type: "message_upsert",
       message: expect.objectContaining({
         id: 301,
-        replyPanel: { messageId: 301, rows: REPLY_PANEL_ROWS }
+        replyPanel: { messageId: 301, rows: CLINE_REPLY_PANEL_ROWS }
       })
     });
     await client.stop();

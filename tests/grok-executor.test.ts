@@ -89,6 +89,8 @@ function setup(): {
     turnIdleTimeoutMs: 1_000,
     claudeMemoryDir: directory,
     modelCatalog: {
+      clineProviders: [],
+      clineModelsByProvider: {},
       claudeModels: [],
       codexModels: [],
       agyModels: [],

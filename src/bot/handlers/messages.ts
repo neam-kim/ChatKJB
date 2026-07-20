@@ -1,4 +1,5 @@
 import { Bot } from "grammy";
+import { clineModelsForProvider } from "../../cline-sdk.js";
 import type { ProjectConfig } from "../../types.js";
 import { safeErrorMessage } from "../../telegram-transport.js";
 import type { BotDeps } from "../deps.js";
@@ -14,6 +15,15 @@ import {
   defaultsSummary,
   defaultsTokenKeyboard
 } from "../keyboards.js";
+import {
+  clineModelSnapshotKeyboard,
+  clineProviderOption,
+  clineProviderSnapshotKeyboard
+} from "../keyboards.js";
+import {
+  clineCatalogRevision,
+  clineSnapshotStoreFor
+} from "../cline-snapshots.js";
 import { pendingStartKey, selectedClaudeTokenIndex, selectedCodexAccountIndex } from "../pending-keys.js";
 import { parseReserveTime } from "../time-parse.js";
 
@@ -34,6 +44,12 @@ export function registerMessageHandlers(bot: Bot, deps: BotDeps): void {
     handleMediaMessage,
     resolveSessionUploadPath
   } = deps;
+  const clineSnapshots = clineSnapshotStoreFor(bot);
+
+  const clineRevision = () => clineCatalogRevision({
+    providers: config.modelCatalog.clineProviders,
+    modelsByProvider: config.modelCatalog.clineModelsByProvider
+  });
 
   bot.callbackQuery(/^(ap|q):/, async (ctx) => {
     const answer = await permissions.handleCallback(ctx.callbackQuery.data);
@@ -80,6 +96,24 @@ export function registerMessageHandlers(bot: Bot, deps: BotDeps): void {
 
   bot.hears(/^🧠 모델/, async (ctx) => {
     const defaults = store.getSessionDefaults();
+    if (defaults.provider === "cline") {
+      const provider = clineProviderOption(config.modelCatalog, defaults.clineProviderId);
+      const models = clineModelsForProvider(config.modelCatalog, provider?.id);
+      if (!provider || models.length === 0) {
+        await ctx.reply("선택 가능한 Cline 내부 제공자 또는 모델이 없습니다. Cline 설정을 확인한 뒤 다시 시도하세요.");
+        return;
+      }
+      const snapshot = clineSnapshots.create("model", {
+        userId: ctx.from!.id,
+        topicId: ctx.message!.message_thread_id ?? null,
+        target: { kind: "defaults" },
+        revision: clineRevision()
+      }, models.map((model) => ({ ...model, providerId: provider.id })));
+      await ctx.reply(`Cline ${provider.label} 모델을 선택하세요.`, {
+        reply_markup: clineModelSnapshotKeyboard(snapshot)
+      });
+      return;
+    }
     await ctx.reply(
       `${providerDisplayLabel(defaults.provider)} 모델을 선택하세요.`,
       { reply_markup: defaultsModelKeyboard(defaults, config.modelCatalog) }
@@ -95,6 +129,8 @@ export function registerMessageHandlers(bot: Bot, deps: BotDeps): void {
         ? "새 세션 기본 Antigravity 추론 강도를 선택하세요."
         : defaults.provider === "grok"
           ? "새 세션 기본 Grok 추론 강도를 선택하세요."
+          : defaults.provider === "cline"
+            ? "새 세션 기본 Cline 추론 강도를 선택하세요."
           : "새 세션 기본 Claude thinking을 선택하세요.";
     await ctx.reply(prompt, {
       reply_markup: defaultsReasoningKeyboard(defaults, config.modelCatalog)
@@ -149,8 +185,32 @@ export function registerMessageHandlers(bot: Bot, deps: BotDeps): void {
     });
   });
 
+  bot.hears(/^🔌 Cline 제공자/, async (ctx) => {
+    const defaults = store.getSessionDefaults();
+    if (defaults.provider !== "cline") {
+      await ctx.reply("Cline을 새 세션 기본 제공자로 먼저 선택하세요.", {
+        reply_markup: defaultPanelKeyboard(defaults)
+      });
+      return;
+    }
+    const providers = config.modelCatalog.clineProviders;
+    if (providers.length === 0) {
+      await ctx.reply("선택 가능한 Cline 내부 제공자가 없습니다. Cline 설정을 확인한 뒤 다시 시도하세요.");
+      return;
+    }
+    const snapshot = clineSnapshots.create("provider", {
+      userId: ctx.from!.id,
+      topicId: ctx.message!.message_thread_id ?? null,
+      target: { kind: "defaults" },
+      revision: clineRevision()
+    }, providers);
+    await ctx.reply("새 세션에서 사용할 Cline 내부 제공자를 선택하세요.", {
+      reply_markup: clineProviderSnapshotKeyboard(snapshot)
+    });
+  });
+
   bot.hears(/^➖/, async (ctx) => {
-    // 예약 슬롯: 아직 배선되지 않았다. 추후 제공자별 추가 선택 항목을 여기에 연결한다.
+    // Cline 외 제공자의 예약 슬롯.
     await ctx.reply("아직 배선되지 않은 예약 슬롯입니다(추후 추가 예정).");
   });
 

@@ -1,5 +1,10 @@
 import { Bot, InlineKeyboard } from "grammy";
 import {
+  clineModelsForProvider,
+  clineReasoningOptionsForModel,
+  normalizeClineReasoning
+} from "../../cline-sdk.js";
+import {
   agyModelLabel,
   agyThinkingLabel,
   agyThinkingOptionsForModel,
@@ -39,6 +44,11 @@ import {
 import {
   agyModelKeyboard,
   codexModelKeyboard,
+  clineModelOption,
+  clineModelSnapshotKeyboard,
+  clineProviderOption,
+  clineProviderSnapshotKeyboard,
+  clineReasoningLabel,
   defaultsProviderKeyboard,
   defaultsSummary,
   grokModelKeyboard,
@@ -48,6 +58,7 @@ import {
   providerKeyboard,
   thinkingKeyboard
 } from "../keyboards.js";
+import { clineCatalogRevision, clineSnapshotStoreFor } from "../cline-snapshots.js";
 import { parseTokenId, pendingStartKey } from "../pending-keys.js";
 
 export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
@@ -58,6 +69,11 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
     pendingStarts,
     defaultPanelKeyboard
   } = deps;
+  const clineSnapshots = clineSnapshotStoreFor(bot);
+  const clineRevision = () => clineCatalogRevision({
+    providers: config.modelCatalog.clineProviders,
+    modelsByProvider: config.modelCatalog.clineModelsByProvider
+  });
 
   bot.command("firstp", async (ctx) => {
     const current = store.getSessionDefaults();
@@ -101,6 +117,8 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
         ? !!session.agyConversationId
         : session.provider === "grok"
           ? !!session.grokSessionId
+          : session.provider === "cline"
+            ? !!session.clineSessionId
           : !!session.sdkSessionId;
     if (!hasContext) {
       await ctx.reply(
@@ -130,7 +148,7 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
     if (!mode) {
       await ctx.reply(
         `현재 모드: ${session.permissionMode}\n사용 가능: default, acceptEdits, plan, dontAsk, auto\n`
-        + "Claude는 텔레그램 승인 브로커를 사용하고, Codex·Antigravity는 같은 모드를 샌드박스와 실행 지침으로 적용합니다."
+        + "Claude와 Cline은 텔레그램 승인 브로커를 사용하고, Codex·Antigravity·Grok은 같은 모드를 샌드박스와 실행 지침으로 적용합니다."
       );
       return;
     }
@@ -182,6 +200,36 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
     }
     const input = ctx.match.trim();
     if (!input) {
+      if (session.provider === "cline") {
+        const provider = clineProviderOption(config.modelCatalog, session.clineProviderId);
+        const models = clineModelsForProvider(config.modelCatalog, provider?.id);
+        if (!provider || models.length === 0) {
+          await ctx.reply("선택 가능한 Cline 내부 제공자 또는 모델이 없습니다. Cline 설정을 확인한 뒤 다시 시도하세요.");
+          return;
+        }
+        const scope = {
+          userId: ctx.from!.id,
+          topicId: topicId ?? null,
+          target: { kind: "session" as const, sessionId: session.id },
+          revision: clineRevision()
+        };
+        const providerSnapshot = clineSnapshots.create("provider", scope, config.modelCatalog.clineProviders);
+        const modelSnapshot = clineSnapshots.create(
+          "model",
+          scope,
+          models.map((model) => ({ ...model, providerId: provider.id }))
+        );
+        const model = clineModelOption(config.modelCatalog, provider.id, session.clineModel);
+        await ctx.reply(
+          `현재: Cline · ${provider.label} · ${model?.label ?? "감지된 모델 없음"}\n`
+          + "내부 제공자를 바꾸려면 아래에서 선택하세요.",
+          { reply_markup: clineProviderSnapshotKeyboard(providerSnapshot) }
+        );
+        await ctx.reply("현재 내부 제공자의 모델을 선택하세요.", {
+          reply_markup: clineModelSnapshotKeyboard(modelSnapshot)
+        });
+        return;
+      }
       const current = session.provider === "codex"
         ? `현재: Codex · ${codexModelLabel(config.modelCatalog, session.codexModel ?? DEFAULT_CODEX_MODEL)}`
         : session.provider === "agy"
@@ -244,6 +292,27 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       await ctx.reply(`다음 실행부터 Grok ${grokModelLabel(config.modelCatalog, grokModel)} 모델을 사용합니다.`);
       return;
     }
+    if (session.provider === "cline") {
+      const provider = clineProviderOption(config.modelCatalog, session.clineProviderId);
+      const models = clineModelsForProvider(config.modelCatalog, provider?.id);
+      const option = models.find((item) => item.id === input);
+      if (!provider || !option) {
+        await ctx.reply("지원하지 않는 Cline 모델입니다. /model 버튼의 모델을 사용하세요.");
+        return;
+      }
+      const clineReasoning = normalizeClineReasoning(session.clineReasoning, option);
+      const changed = await sessions.updateClineConnection(session.id, {
+        clineProviderId: provider.id,
+        clineModel: option.id,
+        clineReasoning
+      });
+      if (!changed.ok) {
+        await ctx.reply(changed.reason ?? "Cline 연결 설정을 바꾸지 못했습니다.");
+        return;
+      }
+      await ctx.reply(`다음 실행부터 Cline ${option.label} 모델을 사용합니다.\nreasoning: ${clineReasoningLabel(clineReasoning)}`);
+      return;
+    }
     const model = resolveModel(config.modelCatalog, input);
     if (!model) {
       await ctx.reply("지원하지 않는 모델입니다. /model 버튼에 표시되는 모델 ID나 별칭을 사용하세요.");
@@ -265,7 +334,7 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       return;
     }
     if (session.provider !== "claude") {
-      await ctx.reply("/thinking은 Claude 전용입니다. Codex·Antigravity는 /power를 사용하세요.");
+      await ctx.reply("/thinking은 Claude 전용입니다. Codex·Antigravity·Grok·Cline은 /power를 사용하세요.");
       return;
     }
     const input = ctx.match.trim().toLowerCase();
@@ -319,6 +388,8 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
           ? `현재 Codex 추론 강도: ${codexReasoningLabel(session.codexReasoning ?? DEFAULT_CODEX_REASONING)}`
           : session.provider === "grok"
             ? `현재 Grok 추론 강도: ${grokReasoningLabel(session.grokReasoning ?? DEFAULT_GROK_REASONING)}`
+            : session.provider === "cline"
+              ? `현재 Cline 추론 강도: ${clineReasoningLabel(session.clineReasoning)}`
             : `현재 Antigravity 추론 강도: ${agyThinkingLabel(session.agyThinkingLevel ?? DEFAULT_AGY_THINKING_LEVEL)}`;
       await ctx.reply(
         `${currentText}${aliasSuffix}`,
@@ -375,6 +446,28 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       }
       store.updateSession(session.id, { grokReasoning: option.id });
       await ctx.reply(`다음 실행부터 Grok 추론 강도를 ${option.label}(으)로 사용합니다.${aliasSuffix}`);
+      return;
+    }
+
+    if (session.provider === "cline") {
+      const model = clineModelOption(config.modelCatalog, session.clineProviderId, session.clineModel);
+      const option = clineReasoningOptionsForModel(model).find((value) => value === input);
+      if (!option) {
+        await ctx.reply(
+          `지원하지 않는 Cline 추론 강도입니다.\n사용 가능: ${clineReasoningOptionsForModel(model).join(", ")}${aliasSuffix}`
+        );
+        return;
+      }
+      if (sessions.isActive(session.id)) {
+        await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
+        return;
+      }
+      const changed = await sessions.updateClineConnection(session.id, { clineReasoning: option });
+      if (!changed.ok) {
+        await ctx.reply(changed.reason ?? "Cline 연결 설정을 바꾸지 못했습니다.");
+        return;
+      }
+      await ctx.reply(`다음 실행부터 Cline 추론 강도를 ${clineReasoningLabel(option)}(으)로 사용합니다.${aliasSuffix}`);
       return;
     }
 
@@ -579,6 +672,31 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       return;
     }
 
+    if (provider === "cline") {
+      if (session.provider !== "cline") {
+        await ctx.answerCallbackQuery({ text: "Cline 세션이 아닙니다.", show_alert: true });
+        return;
+      }
+      const model = clineModelOption(config.modelCatalog, session.clineProviderId, session.clineModel);
+      const option = clineReasoningOptionsForModel(model).find((value) => value === optionId);
+      if (!option) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 Cline 추론 강도입니다.", show_alert: true });
+        return;
+      }
+      if (sessions.isActive(session.id)) {
+        await ctx.answerCallbackQuery({ text: "실행 중에는 바꿀 수 없습니다.", show_alert: true });
+        return;
+      }
+      const changed = await sessions.updateClineConnection(session.id, { clineReasoning: option });
+      if (!changed.ok) {
+        await ctx.answerCallbackQuery({ text: changed.reason ?? "Cline 연결 변경 실패", show_alert: true });
+        return;
+      }
+      await ctx.answerCallbackQuery({ text: `${clineReasoningLabel(option)} 선택` });
+      await ctx.reply(`다음 실행부터 Cline 추론 강도를 ${clineReasoningLabel(option)}(으)로 사용합니다.`);
+      return;
+    }
+
     const resolved = optionId === "reset" || optionId === "default"
       ? null
       : resolveAgyThinkingLevel(optionId);
@@ -614,7 +732,7 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       return;
     }
     const [first, second, ...rest] = payload.split(":");
-    if ((first === "claude" || first === "codex" || first === "agy" || first === "grok") && second && rest.length === 0) {
+    if ((first === "claude" || first === "codex" || first === "agy" || first === "grok" || first === "cline") && second && rest.length === 0) {
       await applyPowerSelection(ctx, first, second);
       return;
     }
@@ -652,7 +770,7 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
 
   bot.callbackQuery(/^mprov:/, async (ctx) => {
     const target = ctx.callbackQuery.data.slice("mprov:".length) as ProviderKind;
-    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "grok") {
+    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "grok" && target !== "cline") {
       await ctx.answerCallbackQuery({ text: "알 수 없는 제공자입니다.", show_alert: true });
       return;
     }
@@ -688,6 +806,8 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
         ? `Antigravity · ${agyModelLabel(config.modelCatalog, updated?.agyModel ?? DEFAULT_AGY_MODEL)}`
         : target === "grok"
           ? `Grok · ${grokModelLabel(config.modelCatalog, updated?.grokModel ?? DEFAULT_GROK_MODEL)}`
+          : target === "cline"
+            ? `Cline · ${clineProviderOption(config.modelCatalog, updated?.clineProviderId)?.label ?? "감지 없음"} · ${clineModelOption(config.modelCatalog, updated?.clineProviderId, updated?.clineModel)?.label ?? "감지된 모델 없음"}`
           : `Claude · ${modelLabel(config.modelCatalog, updated?.model ?? DEFAULT_CLAUDE_MODEL)}`;
     await ctx.reply(
       `제공자를 ${label}로 전환했습니다. 다음 메시지부터 새 제공자가 직전 작업 요약을 이어받아 진행합니다.`
@@ -698,7 +818,7 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
 
   bot.callbackQuery(/^dprov:/, async (ctx) => {
     const target = ctx.callbackQuery.data.slice("dprov:".length) as ProviderKind;
-    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "grok") {
+    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "grok" && target !== "cline") {
       await ctx.answerCallbackQuery();
       return;
     }
@@ -706,7 +826,20 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       await ctx.answerCallbackQuery({ text: "인증되지 않은 제공자입니다.", show_alert: true });
       return;
     }
-    const defaults = store.updateSessionDefaults({ provider: target });
+    const clineProvider = target === "cline" ? clineProviderOption(config.modelCatalog, null) : undefined;
+    const clineModel = target === "cline"
+      ? clineModelOption(config.modelCatalog, clineProvider?.id, clineProvider?.defaultModelId)
+      : undefined;
+    const defaults = store.updateSessionDefaults({
+      provider: target,
+      ...(target === "cline"
+        ? {
+          clineProviderId: clineProvider?.id ?? "",
+          clineModel: clineModel?.id ?? "",
+          clineReasoning: normalizeClineReasoning(undefined, clineModel)
+        }
+        : {})
+    });
     await ctx.answerCallbackQuery({ text: `${providerDisplayLabel(target)} 선택` });
     await ctx.reply(
       `새 세션 기본 제공자: ${providerDisplayLabel(target)}\n${defaultsSummary(defaults, config.modelCatalog)}`,
@@ -793,6 +926,161 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
     await ctx.reply(`다음 실행부터 Grok ${option.label} 모델을 사용합니다.`);
   });
 
+  function clineSnapshotError(reason: string): string {
+    return reason === "scope"
+      ? "이 Cline 선택지는 다른 사용자 또는 토픽에서 열렸습니다."
+      : "Cline 선택 목록이 만료되었거나 변경되었습니다. 목록을 다시 여세요.";
+  }
+
+  bot.callbackQuery(/^clp:/, async (ctx) => {
+    const [prefix, nonce, action, ...rest] = ctx.callbackQuery.data.split(":");
+    if (prefix !== "clp" || !nonce || !action || rest.length > 0) {
+      await ctx.answerCallbackQuery({ text: "잘못된 Cline 제공자 선택입니다.", show_alert: true });
+      return;
+    }
+    const resolution = clineSnapshots.resolve("provider", nonce, action, {
+      userId: ctx.from.id,
+      topicId: ctx.callbackQuery.message?.message_thread_id ?? null,
+      revision: clineRevision()
+    });
+    if (!resolution.ok) {
+      await ctx.answerCallbackQuery({ text: clineSnapshotError(resolution.reason), show_alert: true });
+      return;
+    }
+    if (resolution.page !== undefined) {
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageReplyMarkup({
+        reply_markup: clineProviderSnapshotKeyboard(resolution.snapshot, resolution.page)
+      });
+      return;
+    }
+    const selected = resolution.item
+      ? config.modelCatalog.clineProviders.find((provider) => provider.id === resolution.item!.id)
+      : undefined;
+    const models = clineModelsForProvider(config.modelCatalog, selected?.id);
+    const model = models.find((item) => item.id === selected?.defaultModelId) ?? models[0];
+    if (!selected || !model) {
+      await ctx.answerCallbackQuery({ text: "Cline 제공자 또는 모델이 더 이상 제공되지 않습니다.", show_alert: true });
+      return;
+    }
+    const target = resolution.snapshot.scope.target;
+    if (target.kind === "session") {
+      const session = store.getSession(target.sessionId);
+      if (!session || session.provider !== "cline") {
+        await ctx.answerCallbackQuery({ text: "Cline 세션을 찾을 수 없습니다.", show_alert: true });
+        return;
+      }
+      if (sessions.isActive(session.id)) {
+        await ctx.answerCallbackQuery({ text: "실행 중에는 바꿀 수 없습니다. /stop 후 다시 시도하세요.", show_alert: true });
+        return;
+      }
+      const changed = await sessions.updateClineConnection(session.id, {
+        clineProviderId: selected.id,
+        clineModel: model.id,
+        clineReasoning: normalizeClineReasoning(session.clineReasoning, model)
+      });
+      if (!changed.ok) {
+        await ctx.answerCallbackQuery({ text: changed.reason ?? "Cline 연결 변경 실패", show_alert: true });
+        return;
+      }
+    } else {
+      const current = store.getSessionDefaults();
+      const clineReasoning = normalizeClineReasoning(current.clineReasoning, model);
+      store.updateSessionDefaults({
+        clineProviderId: selected.id,
+        clineModel: model.id,
+        clineReasoning
+      });
+      const pendingKey = pendingStartKey(ctx.from.id, ctx.callbackQuery.message?.message_thread_id);
+      const pending = pendingStarts.get(pendingKey);
+      if (pending && (pending.provider ?? config.defaultProvider) === "cline") {
+        pendingStarts.set(pendingKey, {
+          ...pending,
+          clineProviderId: selected.id,
+          clineModel: model.id,
+          clineReasoning
+        });
+      }
+    }
+    const modelSnapshot = clineSnapshots.create(
+      "model",
+      resolution.snapshot.scope,
+      models.map((item) => ({ ...item, providerId: selected.id }))
+    );
+    await ctx.answerCallbackQuery({ text: `${selected.label} 선택` });
+    await ctx.reply(`Cline 내부 제공자: ${selected.label}\n모델을 선택하세요.`, {
+      reply_markup: clineModelSnapshotKeyboard(modelSnapshot)
+    });
+  });
+
+  bot.callbackQuery(/^clm:/, async (ctx) => {
+    const [prefix, nonce, action, ...rest] = ctx.callbackQuery.data.split(":");
+    if (prefix !== "clm" || !nonce || !action || rest.length > 0) {
+      await ctx.answerCallbackQuery({ text: "잘못된 Cline 모델 선택입니다.", show_alert: true });
+      return;
+    }
+    const resolution = clineSnapshots.resolve("model", nonce, action, {
+      userId: ctx.from.id,
+      topicId: ctx.callbackQuery.message?.message_thread_id ?? null,
+      revision: clineRevision()
+    });
+    if (!resolution.ok) {
+      await ctx.answerCallbackQuery({ text: clineSnapshotError(resolution.reason), show_alert: true });
+      return;
+    }
+    if (resolution.page !== undefined) {
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageReplyMarkup({
+        reply_markup: clineModelSnapshotKeyboard(resolution.snapshot, resolution.page)
+      });
+      return;
+    }
+    const target = resolution.snapshot.scope.target;
+    const currentProviderId = target.kind === "session"
+      ? store.getSession(target.sessionId)?.clineProviderId
+      : store.getSessionDefaults().clineProviderId;
+    if (!resolution.item?.providerId || currentProviderId !== resolution.item.providerId) {
+      await ctx.answerCallbackQuery({ text: "Cline 내부 제공자가 변경되었습니다. 모델 목록을 다시 여세요.", show_alert: true });
+      return;
+    }
+    const option = clineModelsForProvider(config.modelCatalog, currentProviderId)
+      .find((model) => model.id === resolution.item!.id);
+    if (!option) {
+      await ctx.answerCallbackQuery({ text: "Cline 모델이 더 이상 제공되지 않습니다.", show_alert: true });
+      return;
+    }
+    if (target.kind === "session") {
+      const session = store.getSession(target.sessionId);
+      if (!session || session.provider !== "cline") {
+        await ctx.answerCallbackQuery({ text: "Cline 세션을 찾을 수 없습니다.", show_alert: true });
+        return;
+      }
+      if (sessions.isActive(session.id)) {
+        await ctx.answerCallbackQuery({ text: "실행 중에는 바꿀 수 없습니다. /stop 후 다시 시도하세요.", show_alert: true });
+        return;
+      }
+      const changed = await sessions.updateClineConnection(session.id, {
+        clineModel: option.id,
+        clineReasoning: normalizeClineReasoning(session.clineReasoning, option)
+      });
+      if (!changed.ok) {
+        await ctx.answerCallbackQuery({ text: changed.reason ?? "Cline 연결 변경 실패", show_alert: true });
+        return;
+      }
+    } else {
+      const current = store.getSessionDefaults();
+      const clineReasoning = normalizeClineReasoning(current.clineReasoning, option);
+      store.updateSessionDefaults({ clineModel: option.id, clineReasoning });
+      const pendingKey = pendingStartKey(ctx.from.id, ctx.callbackQuery.message?.message_thread_id);
+      const pending = pendingStarts.get(pendingKey);
+      if (pending && (pending.provider ?? config.defaultProvider) === "cline") {
+        pendingStarts.set(pendingKey, { ...pending, clineModel: option.id, clineReasoning });
+      }
+    }
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    await ctx.reply(`다음 Cline 실행부터 ${option.label} 모델을 사용합니다.`);
+  });
+
   bot.callbackQuery(/^agygo:/, async (ctx) => {
     const sessionId = ctx.callbackQuery.data.slice("agygo:".length);
     const session = store.getSession(sessionId);
@@ -870,6 +1158,13 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
     const sep = rest.indexOf(":");
     const provider = rest.slice(0, sep) as ProviderKind;
     const modelId = rest.slice(sep + 1);
+    if (provider === "cline") {
+      await ctx.answerCallbackQuery({
+        text: "Cline 모델 목록이 변경될 수 있습니다. 모델 버튼을 다시 여세요.",
+        show_alert: true
+      });
+      return;
+    }
     if (provider === "codex") {
       const option = config.modelCatalog.codexModels.find((item) => item.id === modelId);
       if (!option) {
@@ -967,6 +1262,21 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       const defaults = store.updateSessionDefaults({ grokReasoning: option.id });
       await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
       await ctx.reply(`새 세션 기본 Grok 추론 강도: ${option.label}`, {
+        reply_markup: defaultPanelKeyboard(defaults)
+      });
+      return;
+    }
+    if (provider === "cline") {
+      const current = store.getSessionDefaults();
+      const model = clineModelOption(config.modelCatalog, current.clineProviderId, current.clineModel);
+      const option = clineReasoningOptionsForModel(model).find((value) => value === valueId);
+      if (!option) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 Cline 추론 강도입니다.", show_alert: true });
+        return;
+      }
+      const defaults = store.updateSessionDefaults({ clineReasoning: option });
+      await ctx.answerCallbackQuery({ text: `${clineReasoningLabel(option)} 기본값` });
+      await ctx.reply(`새 세션 기본 Cline 추론 강도: ${clineReasoningLabel(option)}`, {
         reply_markup: defaultPanelKeyboard(defaults)
       });
       return;

@@ -90,7 +90,7 @@ describe("shared resource skill catalog", () => {
     }
   });
 
-  it("includes grok-native skills so all four agents share one catalog", () => {
+  it("includes grok-native skills in the five-provider shared catalog", () => {
     const root = mkdtempSync(join(tmpdir(), "shared-skills-grok-"));
     try {
       const grokSkill = join(root, ".grok", "skills", "code-review");
@@ -201,7 +201,7 @@ describe("shared memory resource text", () => {
     const text = buildSharedResourceGuideText(paths);
     const policy = buildSharedPolicyText(paths);
 
-    expect(text).toContain("Claude, Codex, agy, and Grok");
+    expect(text).toContain("Claude, Codex, agy, Grok, and Cline");
     expect(text).toContain("POLICIES.md section");
     expect(text).toContain("LLM-Wiki query flow");
     expect(text).toContain("native auto-memory fallback only if needed");
@@ -348,7 +348,48 @@ describe("shared resource sync", () => {
     }
   });
 
-  it("makes shared Peekaboo, Playwright, and price-feed tools available to all four providers", () => {
+  it("publishes canonical instructions and the skill router at Cline global and project discovery paths", () => {
+    const root = mkdtempSync(join(tmpdir(), "shared-resource-sync-cline-"));
+    try {
+      const projectRoot = join(root, "project");
+      const sharedRoot = join(root, ".claude", "shared-resources");
+      const canonical = join(root, ".claude", "CLAUDE.md");
+      const globalSkills = join(root, ".agents", "skills");
+      const projectSkills = join(projectRoot, ".agents", "skills");
+      mkdirSync(join(root, ".claude"), { recursive: true });
+      writeFileSync(canonical, "# Canonical instructions\n");
+
+      syncSharedResources({
+        home: root,
+        sharedRoot,
+        connectorRegistry: join(sharedRoot, "connectors.json"),
+        skillCatalog: join(sharedRoot, "SKILLS.md"),
+        resourceGuide: join(sharedRoot, "RESOURCE.md"),
+        memoryBridge: join(sharedRoot, "MEMORY-BRIDGE.md"),
+        routerSkill: join(sharedRoot, "shared-skill-router"),
+        codexConfig: join(root, ".codex", "config.toml"),
+        codexAccountConfigs: [],
+        agyMcpConfig: join(root, ".gemini", "config", "mcp_config.json"),
+        grokConfigPath: join(root, ".grok", "config.toml"),
+        wrapperScript: join(projectRoot, "scripts", "run-shared-mcp.mjs"),
+        skillRoots: [],
+        providerSkillRoots: [globalSkills, projectSkills]
+      });
+
+      expect(readlinkSync(join(root, ".agents", "AGENTS.md"))).toBe(canonical);
+      expect(readlinkSync(join(projectRoot, "AGENTS.md"))).toBe(canonical);
+      expect(readlinkSync(join(globalSkills, "shared-skill-router"))).toBe(
+        join(sharedRoot, "shared-skill-router")
+      );
+      expect(readlinkSync(join(projectSkills, "shared-skill-router"))).toBe(
+        join(sharedRoot, "shared-skill-router")
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("makes shared Peekaboo, Playwright, and price-feed tools available to all five providers", () => {
     const root = mkdtempSync(join(tmpdir(), "shared-browser-mcp-"));
     const savedAgyMcpServers = process.env.AGY_MCP_SERVERS;
     const savedGrokMcpServers = process.env.GROK_MCP_SERVERS;
@@ -411,6 +452,13 @@ describe("shared resource sync", () => {
       expect(readFileSync(grokConfig, "utf8")).toContain('[mcp_servers."playwright"]');
       expect(readFileSync(grokConfig, "utf8")).toContain('[mcp_servers."peekaboo"]');
       expect(readFileSync(grokConfig, "utf8")).toContain('[mcp_servers."price-feed"]');
+      const cline = JSON.parse(readFileSync(
+        join(root, ".cline", "data", "settings", "cline_mcp_settings.json"),
+        "utf8"
+      ));
+      expect(cline.mcpServers.playwright.transport.args.at(-1)).toBe("playwright");
+      expect(cline.mcpServers.peekaboo.transport.args.at(-1)).toBe("peekaboo");
+      expect(cline.mcpServers["price-feed"].transport.args.at(-1)).toBe("price-feed");
     } finally {
       if (savedAgyMcpServers === undefined) delete process.env.AGY_MCP_SERVERS;
       else process.env.AGY_MCP_SERVERS = savedAgyMcpServers;
@@ -565,7 +613,9 @@ describe("shared resource sync", () => {
         join(root, ".codex", "AGENTS.md"),
         join(root, ".codex-acct-b", "AGENTS.md"),
         join(root, ".gemini", "config", "AGENTS.md"),
-        join(root, ".grok", "Agents.md")
+        join(root, ".grok", "Agents.md"),
+        join(root, ".agents", "AGENTS.md"),
+        join(root, "AGENTS.md")
       ]) {
         expect(readlinkSync(link)).toBe(canonical);
       }
@@ -576,6 +626,19 @@ describe("shared resource sync", () => {
       expect(lite).toContain('[mcp_servers."sample-tool"]');
       expect(lite).toContain('command = "/bin/echo"');
       expect(lite).toContain("enabled = false");
+      const cline = JSON.parse(readFileSync(
+        join(root, ".cline", "data", "settings", "cline_mcp_settings.json"),
+        "utf8"
+      ));
+      expect(cline.mcpServers["sample-tool"].transport).toMatchObject({
+        type: "stdio",
+        command: process.execPath,
+        args: [
+          join(root, "scripts", "run-shared-mcp.mjs"),
+          join(sharedRoot, "connectors.json"),
+          "sample-tool"
+        ]
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

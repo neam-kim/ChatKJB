@@ -1,5 +1,6 @@
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { loadMcpSettingsFile } from "@cline/core";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +10,7 @@ import {
   loadPluginMcpServers,
   parseCodexMcpServers,
   syncAgyMcpConfig,
+  syncClineMcpConfig,
   syncCodexMcpConfig,
   toGeminiMcpConfig
 } from "../src/connectors.js";
@@ -473,5 +475,131 @@ describe("syncCodexMcpConfig", () => {
       command: "/node",
       args: ["/wrapper.mjs", "/connectors.json", "keep"]
     });
+  });
+});
+
+describe("syncClineMcpConfig", () => {
+  it("atomically merges managed servers while preserving user entries, secrets, and settings", () => {
+    const dir = tempDir();
+    const configPath = join(dir, "cline_mcp_settings.json");
+    const userServer = {
+      transport: {
+        type: "stdio",
+        command: "user-command",
+        env: { USER_SECRET: "keep-user-secret" }
+      },
+      disabled: true,
+      metadata: { owner: "user" }
+    };
+    writeFileSync(configPath, JSON.stringify({
+      theme: "dark",
+      apiSecret: "keep-top-level-secret",
+      mcpServers: {
+        user: userServer,
+        collision: {
+          transport: { type: "stdio", command: "keep-collision" },
+          oauth: { tokens: { access_token: "keep-oauth-secret" } }
+        },
+        stale: {
+          transport: { type: "stdio", command: "old-wrapper" },
+          metadata: { chatkjbSharedMcp: 1 }
+        },
+        managed: {
+          transport: {
+            type: "stdio",
+            command: "old-wrapper",
+            args: ["old"],
+            cwd: "/keep/cwd",
+            env: { KEEP_SETTING: "yes" }
+          },
+          disabled: true,
+          oauth: { tokens: { access_token: "keep-managed-oauth" } },
+          metadata: { chatkjbSharedMcp: 1, note: "keep-note" }
+        }
+      }
+    }, null, 2));
+
+    const merged = {
+      collision: { type: "stdio", command: "shared-collision" },
+      managed: { type: "stdio", command: "shared-managed", env: { REGISTRY_SECRET: "registry-only" } },
+      remote: {
+        type: "http",
+        url: "https://example.test/mcp",
+        headers: { Authorization: "Bearer registry-secret" }
+      }
+    } as unknown as Record<string, McpServerConfig>;
+
+    const first = syncClineMcpConfig(
+      merged,
+      configPath,
+      "/node",
+      "/wrapper.mjs",
+      "/connectors.json"
+    );
+    expect(first).toEqual({ changed: true, count: 2 });
+    const written = JSON.parse(readFileSync(configPath, "utf8")) as {
+      theme: string;
+      apiSecret: string;
+      mcpServers: Record<string, Record<string, unknown>>;
+    };
+    expect(written.theme).toBe("dark");
+    expect(written.apiSecret).toBe("keep-top-level-secret");
+    expect(written.mcpServers.user).toEqual(userServer);
+    expect(written.mcpServers.collision).toMatchObject({
+      transport: { command: "keep-collision" },
+      oauth: { tokens: { access_token: "keep-oauth-secret" } }
+    });
+    expect(written.mcpServers.stale).toBeUndefined();
+    expect(written.mcpServers.managed).toMatchObject({
+      transport: {
+        type: "stdio",
+        command: "/node",
+        args: ["/wrapper.mjs", "/connectors.json", "managed"],
+        cwd: "/keep/cwd",
+        env: { KEEP_SETTING: "yes" }
+      },
+      disabled: true,
+      oauth: { tokens: { access_token: "keep-managed-oauth" } },
+      metadata: { chatkjbSharedMcp: 1, note: "keep-note" }
+    });
+    expect(JSON.stringify(written.mcpServers.managed)).not.toContain("registry-only");
+    expect(written.mcpServers.remote).toMatchObject({
+      transport: {
+        type: "streamableHttp",
+        url: "https://example.test/mcp",
+        headers: { Authorization: "Bearer registry-secret" }
+      },
+      metadata: { chatkjbSharedMcp: 1 }
+    });
+    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir).filter((name) => name.includes(".tmp."))).toEqual([]);
+    expect(loadMcpSettingsFile({ filePath: configPath }).mcpServers.remote?.transport).toMatchObject({
+      type: "streamableHttp",
+      url: "https://example.test/mcp"
+    });
+
+    const second = syncClineMcpConfig(
+      merged,
+      configPath,
+      "/node",
+      "/wrapper.mjs",
+      "/connectors.json"
+    );
+    expect(second).toEqual({ changed: false, count: 2 });
+  });
+
+  it("refuses to replace malformed user settings", () => {
+    const dir = tempDir();
+    const configPath = join(dir, "cline_mcp_settings.json");
+    writeFileSync(configPath, "{ malformed user secret");
+
+    expect(() => syncClineMcpConfig(
+      { sample: { type: "stdio", command: "sample" } } as unknown as Record<string, McpServerConfig>,
+      configPath,
+      "/node",
+      "/wrapper.mjs",
+      "/connectors.json"
+    )).toThrow(/보존할 수 없어 동기화를 중단/);
+    expect(readFileSync(configPath, "utf8")).toBe("{ malformed user secret");
   });
 });

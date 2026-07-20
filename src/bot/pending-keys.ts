@@ -15,6 +15,9 @@ export interface PendingStartOptions {
   agyModel?: string | undefined;
   grokModel?: string | undefined;
   grokReasoning?: string | undefined;
+  clineProviderId?: string | undefined;
+  clineModel?: string | undefined;
+  clineReasoning?: string | undefined;
   handoffSummary?: string | undefined;
   leanMode?: boolean | undefined;
 }
@@ -76,6 +79,15 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
       provider: "grok",
       grokModel: defaults.grokModel,
       grokReasoning: defaults.grokReasoning,
+      leanMode: true
+    };
+  }
+  if (defaults.provider === "cline") {
+    return {
+      provider: "cline",
+      clineProviderId: defaults.clineProviderId ?? "",
+      clineModel: defaults.clineModel ?? "",
+      clineReasoning: defaults.clineReasoning ?? "off",
       leanMode: true
     };
   }

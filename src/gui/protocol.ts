@@ -214,7 +214,7 @@ function normalizeButtons(replyMarkup: unknown): GuiButton[][] {
 const REPLY_PANEL_PREFIXES: ReadonlyArray<ReadonlyArray<readonly string[]>> = [
   [["\u2699\ufe0f \uc0c8 \uc138\uc158 \uae30\ubcf8\uac12"], ["\ud83e\udde0 \ubaa8\ub378"]],
   [["\ud83e\udd16 \uc81c\uacf5\uc790"], ["\ud83d\udcad "]],
-  [["\ud83d\udee0\ufe0f \uc791\uc5c5\ub7c9", "\u2796"], ["\ud83d\udd11 \ud1a0\ud070", "\u2796"]]
+  [["\ud83d\udee0\ufe0f \uc791\uc5c5\ub7c9", "\ud83d\udd0c Cline \uc81c\uacf5\uc790", "\u2796"], ["\ud83d\udd11 \ud1a0\ud070", "\u2796"]]
 ];
 
 function validReplyPanelLabel(value: unknown, row: number, column: number): value is string {

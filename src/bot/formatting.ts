@@ -1,4 +1,5 @@
 import { appLocale, appTimeZone } from "../localization.js";
+import { clineModelsForProvider } from "../cline-sdk.js";
 import {
   agyModelLabel,
   agyThinkingLabel,
@@ -104,6 +105,12 @@ export function formatSessionStatus(
             : "실행 중인 작업 없음";
   const codexAccount = codexAccountLabel(session.codexHome, codexAccountHomes);
   const claudeTokenIndex = selectedClaudeTokenIndex(session.claudeTokenIndex, claudeTokenCount);
+  const clineProvider = catalog.clineProviders.find((option) => option.id === session.clineProviderId)
+    ?? catalog.clineProviders[0];
+  const clineModels = clineModelsForProvider(catalog, clineProvider?.id);
+  const clineModel = clineModels.find((option) => option.id === session.clineModel)
+    ?? clineModels.find((option) => option.id === clineProvider?.defaultModelId)
+    ?? clineModels[0];
   const providerLines = session.provider === "codex"
     ? [
       "제공자: Codex",
@@ -123,6 +130,13 @@ export function formatSessionStatus(
           `Grok 모델: ${grokModelLabel(catalog, session.grokModel ?? DEFAULT_GROK_MODEL)}`,
           `Grok 추론 강도: ${grokReasoningLabel(session.grokReasoning)}`
         ]
+        : session.provider === "cline"
+          ? [
+            "제공자: Cline",
+            `Cline 내부 제공자: ${clineProvider?.label ?? "감지 없음"}`,
+            `Cline 모델: ${clineModel?.label ?? "감지된 모델 없음"}`,
+            `Cline 추론 강도: ${session.clineReasoning || "off"}`
+          ]
         : [
           "제공자: Claude",
           `모델: ${modelLabel(catalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`,
@@ -151,5 +165,6 @@ export function providerDisplayLabel(provider: ProviderKind): string {
   if (provider === "codex") return "Codex";
   if (provider === "agy") return "Antigravity";
   if (provider === "grok") return "Grok";
+  if (provider === "cline") return "Cline";
   return "Claude";
 }

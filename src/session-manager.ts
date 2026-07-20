@@ -87,6 +87,7 @@ import {
   createCodexClient
 } from "./session/executors/codex.js";
 import { executeGrok as executeGrokProvider } from "./session/executors/grok.js";
+import { ClineExecutor } from "./session/executors/cline.js";
 import { isCodexUsageSnapshot } from "./session/provider-progress.js";
 import { StateStore } from "./store.js";
 import { safeErrorMessage } from "./telegram-transport.js";
@@ -198,6 +199,11 @@ export interface ResetContextResult {
   reason?: string;
 }
 
+export type ClineSessionSelection = Pick<
+  SessionRecord,
+  "clineProviderId" | "clineModel" | "clineReasoning"
+>;
+
 export type InitialSessionPrompt = string | ((session: SessionRecord) => string);
 
 export type GoalSetResult = "active" | "stored" | "native" | "unsupported";
@@ -297,6 +303,7 @@ export class SessionManager {
   private readonly agyExecutor: AgyExecutor;
   private readonly claudeExecutor: ClaudeExecutor;
   private readonly codexExecutor: CodexExecutor;
+  private readonly clineExecutor: ClineExecutor;
   private readonly tokenPool: TokenPool;
   private readonly oauthTokens: string[];
   // Codex 다중 계정 풀(CODEX_HOME 디렉터리 기준, sticky 선택 + reactive 페일오버).
@@ -361,6 +368,10 @@ export class SessionManager {
       }
     });
     this.agyExecutor = new AgyExecutor(this.baseExecutorHost());
+    this.clineExecutor = new ClineExecutor({
+      ...this.baseExecutorHost(),
+      permissions: this.permissions
+    });
   }
 
   async dispose(): Promise<void> {
@@ -387,6 +398,7 @@ export class SessionManager {
       ...this.readOnlyTasks.values()
     ])];
     await Promise.allSettled(tasks);
+    await this.clineExecutor.dispose();
     this.active.clear();
     this.projectTails.clear();
     this.queuedCounts.clear();
@@ -399,7 +411,7 @@ export class SessionManager {
   }
 
   private isProviderAvailable(provider: ProviderKind): boolean {
-    return (this.options.availableProviders ?? ["claude", "codex", "agy", "grok"])
+    return (this.options.availableProviders ?? ["claude", "codex", "agy", "grok", "cline"])
       .includes(provider);
   }
 
@@ -443,7 +455,10 @@ export class SessionManager {
     handoffSummary?: string | null,
     codexHome?: string | null,
     claudeTokenIndex?: number | null,
-    grokReasoning?: string | null
+    grokReasoning?: string | null,
+    clineProviderId?: string | null,
+    clineModel?: string | null,
+    clineReasoning?: string | null
   ): SessionRecord {
     if (this.disposed) throw new Error("세션 관리자가 종료되어 새 세션을 만들 수 없습니다.");
     const selectedProvider = provider ?? this.defaultProvider();
@@ -477,6 +492,11 @@ export class SessionManager {
       agyConversationId: null,
       agyUsage: null,
       grokUsage: null,
+      clineProviderId: clineProviderId ?? null,
+      clineModel: clineModel ?? null,
+      clineReasoning: clineReasoning ?? null,
+      clineSessionId: null,
+      clineUsage: null,
       handoffSummary: handoffSummary ?? null,
       goalCondition: null,
       leanMode,
@@ -547,7 +567,7 @@ export class SessionManager {
   }
 
   private toolFreeProvider(preferred: ProviderKind): ProviderKind {
-    const candidates: ProviderKind[] = [preferred, "claude", "codex", "grok"];
+    const candidates: ProviderKind[] = [preferred, "claude", "codex", "grok", "cline"];
     const provider = candidates.find((candidate, index) =>
       candidate !== "agy"
       && candidates.indexOf(candidate) === index
@@ -555,7 +575,7 @@ export class SessionManager {
     );
     if (!provider) {
       throw new Error(
-        "프로젝트 자동 선택에는 도구 없는 분류를 지원하는 Claude, Codex 또는 Grok 인증이 필요합니다. "
+        "프로젝트 자동 선택에는 도구 없는 분류를 지원하는 Claude, Codex, Grok 또는 Cline 인증이 필요합니다. "
         + "/new browse 또는 /reserve browse로 직접 선택하세요."
       );
     }
@@ -595,6 +615,11 @@ export class SessionManager {
       agyConversationId: null,
       agyUsage: null,
       grokUsage: null,
+      clineProviderId: defaults.clineProviderId ?? null,
+      clineModel: defaults.clineModel ?? null,
+      clineReasoning: defaults.clineReasoning ?? null,
+      clineSessionId: null,
+      clineUsage: null,
       handoffSummary: null,
       goalCondition: null,
       leanMode: true,
@@ -656,7 +681,7 @@ export class SessionManager {
   }
 
   private oneOffProviderOrder(preferred: ProviderKind): ProviderKind[] {
-    const providers: ProviderKind[] = [preferred, "claude", "codex", "agy", "grok"];
+    const providers: ProviderKind[] = [preferred, "claude", "codex", "agy", "grok", "cline"];
     return providers.filter((provider, index) => {
       if (providers.indexOf(provider) !== index) return false;
       return this.isProviderAvailable(provider);
@@ -794,6 +819,12 @@ export class SessionManager {
       return result.text;
     }
 
+    if (provider === "cline") {
+      return this.clineExecutor.runReadOnly(session, options.prompt, {
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs })
+      });
+    }
+
     return this.agyExecutor.runOneOff(session, options.prompt, "bypassPermissions");
   }
 
@@ -851,6 +882,7 @@ export class SessionManager {
     const canResume = current.provider === "codex"
       || current.provider === "agy"
       || current.provider === "grok"
+      || current.provider === "cline"
       || !!current.sdkSessionId
       || !!current.handoffSummary;
     if (!canResume) return false;
@@ -906,6 +938,7 @@ export class SessionManager {
     if (session.provider === "codex") return session.codexThreadId;
     if (session.provider === "agy") return session.agyConversationId;
     if (session.provider === "grok") return session.grokSessionId ?? null;
+    if (session.provider === "cline") return session.clineSessionId ?? null;
     return session.sdkSessionId;
   }
 
@@ -1358,6 +1391,33 @@ export class SessionManager {
     return !!session && this.active.has(sessionId) && isTerminalSessionStatus(session.status);
   }
 
+  /** 유휴 Cline 세션의 연결 설정을 SDK와 DB에 원자적으로 반영한다. */
+  async updateClineConnection(
+    sessionId: string,
+    fields: Partial<ClineSessionSelection>
+  ): Promise<ResetContextResult> {
+    const previous = this.store.getSession(sessionId);
+    if (!previous || previous.provider !== "cline") {
+      return { ok: false, reason: "Cline 세션을 찾을 수 없습니다." };
+    }
+    if (this.active.has(sessionId) || this.sessionTasks.has(sessionId)) {
+      return { ok: false, reason: "실행 중에는 바꿀 수 없습니다. /stop 후 다시 시도하세요." };
+    }
+    this.store.updateSession(sessionId, fields);
+    const updated = this.store.getSession(sessionId) ?? previous;
+    try {
+      await this.clineExecutor.updateConnection(updated);
+      return { ok: true };
+    } catch (error) {
+      this.store.updateSession(sessionId, {
+        clineProviderId: previous.clineProviderId ?? null,
+        clineModel: previous.clineModel ?? null,
+        clineReasoning: previous.clineReasoning ?? null
+      });
+      return { ok: false, reason: safeErrorMessage(error) };
+    }
+  }
+
   inspect(): SessionInspection[] {
     const now = Date.now();
     const inspections: SessionInspection[] = [];
@@ -1427,6 +1487,13 @@ export class SessionManager {
         grokSessionId: null,
         ...(summary ? { handoffSummary: summary } : {})
       });
+    } else if (target === "cline") {
+      this.store.updateSession(sessionId, {
+        provider: "cline",
+        clineSessionId: null,
+        clineUsage: null,
+        ...(summary ? { handoffSummary: summary } : {})
+      });
     } else {
       // 대상=Claude: 새 SDK 세션에서 요약을 받아 시작한다.
       this.store.updateSession(sessionId, {
@@ -1464,6 +1531,13 @@ export class SessionManager {
           agyConversationId: null,
           agyUsage: null,
           grokUsage: null,
+          handoffSummary: null
+        });
+      } else if (session.provider === "cline") {
+        await this.clineExecutor.reset(session);
+        this.store.updateSession(session.id, {
+          clineSessionId: null,
+          clineUsage: null,
           handoffSummary: null
         });
       } else {
@@ -1537,6 +1611,10 @@ export class SessionManager {
       });
       return result.text.trim();
     }
+    if (session.provider === "cline") {
+      if (!session.clineSessionId) return "";
+      return this.clineExecutor.summarizeForHandoff(session, prompt);
+    }
     // Codex: 직전 스레드를 재개해 비스트리밍으로 요약 한 턴을 받는다.
     if (!session.codexThreadId) return "";
     const codexHome = this.selectCodexHome(session);
@@ -1569,6 +1647,11 @@ export class SessionManager {
     const wasActive = this.active.has(session.id);
     this.stop(session.id);
     this.agyExecutor.resetContext(session.id);
+    if (session.clineSessionId) {
+      await this.clineExecutor.reset(session).catch((error) => {
+        console.error("Cline session deletion failed:", safeErrorMessage(error));
+      });
+    }
     this.store.deleteSession(session.id);
 
     const task = this.sessionTasks.get(session.id);
@@ -1777,6 +1860,10 @@ export class SessionManager {
       await this.executeGrok(request);
       return;
     }
+    if (provider === "cline") {
+      await this.clineExecutor.execute(request);
+      return;
+    }
     await this.execute(request);
   }
 
@@ -1945,7 +2032,7 @@ export class SessionManager {
     if (this.active.has(session.id)) {
       return { ok: false, reason: "실행 중에는 병렬 종합을 시작할 수 없습니다. 작업 완료 또는 /stop 후 다시 시도하세요." };
     }
-    const providers = (["claude", "codex", "agy", "grok"] as const)
+    const providers = (["claude", "codex", "agy", "grok", "cline"] as const)
       .filter((provider): provider is ProviderKind => this.isProviderAvailable(provider));
     // 인증된 제공자들을 동시에 시작하되 초기화 버스트만 SYNTH_PROVIDER_STAGGER_MS 간격으로 어긋나게
     // 한다(동시 모듈 로딩·spawn 스파이크로 인한 errno 11 크래시 완화). 일단 시작된 뒤의 대기는
@@ -2250,6 +2337,12 @@ export class SessionManager {
         controller.abort();
         this.silentControllers.delete(controller);
       }
+    }
+    if (provider === "cline") {
+      return this.clineExecutor.runReadOnly(session, prompt, {
+        ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+        ...(options.toolFree !== undefined ? { toolFree: options.toolFree } : {})
+      });
     }
     const tempSession: SessionRecord = {
       ...session,

@@ -22,6 +22,7 @@ import {
 import { filesystemPath } from "./filesystem-path.js";
 import { isValidTimeZone } from "./localization.js";
 import { FALLBACK_MODEL_CATALOG } from "./model-catalog.js";
+import { hasReadyClineProvider } from "./cline-sdk.js";
 import { projectSourceDir } from "./runtime-paths.js";
 import type { ProjectConfig, ProviderKind } from "./types.js";
 
@@ -509,10 +510,11 @@ export async function loadConfig() {
     codexAccountHomes,
     home: process.env.HOME?.trim() || homedir()
   });
+  if (await hasReadyClineProvider().catch(() => false)) availableProviders.push("cline");
   if (availableProviders.length === 0) {
     throw new Error(
       "사용 가능한 AI 제공자 인증이 없습니다. Claude OAuth, Codex ChatGPT 로그인, "
-      + "Antigravity OAuth 또는 Grok 로그인 중 하나 이상이 필요합니다."
+      + "Antigravity OAuth, Grok 로그인 또는 실행 가능한 Cline provider 중 하나 이상이 필요합니다."
     );
   }
   // 실제 카탈로그는 시작 시 index.ts가 제공사에서 읽어 config.modelCatalog에 채운다.

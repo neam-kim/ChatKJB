@@ -1,5 +1,13 @@
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -610,5 +618,165 @@ export function syncAgyMcpConfig(
 
   mkdirSync(dirname(geminiMcpConfigPath), { recursive: true });
   writeFileSync(geminiMcpConfigPath, nextText, { mode: 0o600 });
+  return { changed: true, count };
+}
+
+// ---- Cline SDK 동기화 -------------------------------------------------------
+
+interface ClineTransport {
+  type?: string;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  [key: string]: unknown;
+}
+
+interface ClineServer {
+  transport?: ClineTransport;
+  metadata?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+const CLINE_MANAGED_METADATA_KEY = "chatkjbSharedMcp";
+const CLINE_MANAGED_METADATA_VERSION = 1;
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function isChatKjbManagedClineServer(value: unknown): value is ClineServer {
+  const server = objectRecord(value);
+  const metadata = objectRecord(server?.metadata);
+  return metadata?.[CLINE_MANAGED_METADATA_KEY] === CLINE_MANAGED_METADATA_VERSION;
+}
+
+function clineTransport(
+  server: McpServerConfig,
+  name: string,
+  nodeExecutable: string,
+  wrapperScript: string,
+  connectorRegistry: string,
+  existing?: ClineTransport
+): ClineTransport {
+  const value = server as Record<string, unknown>;
+  if (value.type === "http" || value.type === "sse") {
+    const compatibleExisting = { ...(existing ?? {}) };
+    delete compatibleExisting.command;
+    delete compatibleExisting.args;
+    delete compatibleExisting.cwd;
+    delete compatibleExisting.env;
+    const desiredHeaders = objectRecord(value.headers) as Record<string, string> | null;
+    const existingHeaders = objectRecord(existing?.headers) as Record<string, string> | null;
+    const headers = { ...(desiredHeaders ?? {}), ...(existingHeaders ?? {}) };
+    return {
+      ...compatibleExisting,
+      type: value.type === "sse" ? "sse" : "streamableHttp",
+      url: String(value.url),
+      ...(Object.keys(headers).length > 0 ? { headers } : {})
+    };
+  }
+  const compatibleExisting = { ...(existing ?? {}) };
+  delete compatibleExisting.url;
+  delete compatibleExisting.headers;
+  return {
+    ...compatibleExisting,
+    type: "stdio",
+    command: nodeExecutable,
+    args: [wrapperScript, connectorRegistry, name]
+  };
+}
+
+/**
+ * 공유 커넥터를 Cline SDK의 native MCP 설정에 병합한다.
+ *
+ * ChatKJB가 만든 항목만 metadata 표식으로 갱신·정리한다. 같은 이름의 사용자 항목과 다른
+ * 최상위 설정은 그대로 보존하며, 관리 항목 안에서도 disabled·oauth·사용자 metadata·env/cwd와
+ * 같은 Cline 설정을 유지한다. stdio 서버의 실제 env/비밀은 0600 공유 registry를 읽는 wrapper에
+ * 남겨 Cline 설정에 복제하지 않는다.
+ */
+export function syncClineMcpConfig(
+  merged: Record<string, McpServerConfig>,
+  clineMcpConfigPath: string,
+  nodeExecutable: string,
+  wrapperScript: string,
+  connectorRegistry: string
+): { changed: boolean; count: number; } {
+  let previousText = "";
+  let existing: Record<string, unknown> = {};
+  try {
+    previousText = readFileSync(clineMcpConfigPath, "utf8");
+    const parsed = previousText.trim() ? JSON.parse(previousText) : {};
+    const record = objectRecord(parsed);
+    if (!record) throw new Error("Cline MCP 설정의 최상위 값은 객체여야 합니다.");
+    existing = record;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      throw new Error(
+        `기존 Cline MCP 설정을 보존할 수 없어 동기화를 중단했습니다: ${clineMcpConfigPath}`,
+        { cause: error }
+      );
+    }
+  }
+
+  const existingServers = existing.mcpServers === undefined
+    ? {}
+    : objectRecord(existing.mcpServers);
+  if (!existingServers) {
+    throw new Error(
+      `기존 Cline MCP 설정을 보존할 수 없어 동기화를 중단했습니다: ${clineMcpConfigPath}`
+    );
+  }
+  const nextServers: Record<string, unknown> = {};
+  for (const [name, server] of Object.entries(existingServers)) {
+    if (!isChatKjbManagedClineServer(server)) nextServers[name] = server;
+  }
+
+  let count = 0;
+  for (const [name, server] of Object.entries(merged).sort(([a], [b]) => a.localeCompare(b))) {
+    const current = existingServers[name];
+    if (current !== undefined && !isChatKjbManagedClineServer(current)) continue;
+    const managed = objectRecord(current) as ClineServer | null;
+    const existingTransport = objectRecord(managed?.transport) as ClineTransport | null;
+    const metadata = {
+      ...(objectRecord(managed?.metadata) ?? {}),
+      [CLINE_MANAGED_METADATA_KEY]: CLINE_MANAGED_METADATA_VERSION
+    };
+    const desiredTransport = clineTransport(
+      server,
+      name,
+      nodeExecutable,
+      wrapperScript,
+      connectorRegistry,
+      existingTransport ?? undefined
+    );
+    nextServers[name] = {
+      ...(managed ?? {}),
+      transport: desiredTransport,
+      metadata
+    };
+    count += 1;
+  }
+
+  if (count === 0 && previousText === "") return { changed: false, count };
+  const next = { ...existing, mcpServers: nextServers };
+  const nextText = `${JSON.stringify(next, null, 2)}\n`;
+  if (nextText === previousText) {
+    chmodSync(clineMcpConfigPath, 0o600);
+    return { changed: false, count };
+  }
+  mkdirSync(dirname(clineMcpConfigPath), { recursive: true });
+  const temporary = `${clineMcpConfigPath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  try {
+    writeFileSync(temporary, nextText, { mode: 0o600, flag: "wx" });
+    renameSync(temporary, clineMcpConfigPath);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
   return { changed: true, count };
 }

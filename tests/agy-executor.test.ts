@@ -81,6 +81,8 @@ describe("AgyExecutor lifecycle", () => {
       turnIdleTimeoutMs: 1_000,
       claudeMemoryDir: directory,
       modelCatalog: {
+        clineProviders: [],
+        clineModelsByProvider: {},
         claudeModels: [], codexModels: [], grokModels: [],
         agyModels: [{ id: "Gemini 3.5 Flash (Medium)", label: "Gemini 3.5 Flash (Medium)", source: "cli" }]
       }
@@ -155,6 +157,8 @@ describe("AgyExecutor lifecycle", () => {
       turnIdleTimeoutMs: 1_000,
       claudeMemoryDir: directory,
       modelCatalog: {
+        clineProviders: [],
+        clineModelsByProvider: {},
         claudeModels: [],
         codexModels: [],
         agyModels: [

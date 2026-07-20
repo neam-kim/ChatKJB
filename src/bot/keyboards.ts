@@ -2,6 +2,11 @@ import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { InlineKeyboard, Keyboard } from "grammy";
 import { isAbsolute, relative } from "node:path";
 import {
+  clineModelsForProvider,
+  clineReasoningOptionsForModel,
+  normalizeClineReasoning
+} from "../cline-sdk.js";
+import {
   agyModelLabel,
   agyThinkingLabel,
   agyThinkingOptionsForModel,
@@ -22,6 +27,11 @@ import {
 } from "../model-catalog.js";
 import type { ProviderKind, SessionDefaults, SessionRecord } from "../types.js";
 import type { DriveEntry, FolderBrowserState } from "./drive-browser.js";
+import {
+  CLINE_MODEL_PAGE_SIZE,
+  CLINE_PROVIDER_PAGE_SIZE,
+  type ClineSnapshot
+} from "./cline-snapshots.js";
 import { providerDisplayLabel } from "./formatting.js";
 import { selectedClaudeTokenIndex, selectedCodexAccountIndex } from "./pending-keys.js";
 
@@ -63,6 +73,62 @@ export function folderBrowserKeyboard(
 // (user 요청: 빈 패널은 '-' 표기, 추후 배선 가능성만 열어둔다.)
 const RESERVED_SLOT_LABEL = "➖";
 
+function clineProviderOption(catalog: ModelCatalog, providerId: string | null | undefined) {
+  return catalog.clineProviders.find((option) => option.id === providerId)
+    ?? catalog.clineProviders[0];
+}
+
+function clineModelOption(
+  catalog: ModelCatalog,
+  providerId: string | null | undefined,
+  modelId: string | null | undefined
+) {
+  const provider = clineProviderOption(catalog, providerId);
+  const models = clineModelsForProvider(catalog, provider?.id);
+  return models.find((option) => option.id === modelId)
+    ?? models.find((option) => option.id === provider?.defaultModelId)
+    ?? models[0];
+}
+
+function clineReasoningLabel(value: string | null | undefined): string {
+  return value || "off";
+}
+
+function clineButtonLabel(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 48 ? `${normalized.slice(0, 47)}…` : normalized;
+}
+
+function clineSnapshotKeyboard(
+  snapshot: ClineSnapshot,
+  page: number,
+  pageSize: number,
+  prefix: "clp" | "clm"
+): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const pageCount = Math.max(1, Math.ceil(snapshot.items.length / pageSize));
+  const currentPage = Math.min(Math.max(0, page), pageCount - 1);
+  const start = currentPage * pageSize;
+  const items = snapshot.items.slice(start, start + pageSize);
+  for (const [offset, option] of items.entries()) {
+    keyboard.text(clineButtonLabel(option.label), `${prefix}:${snapshot.nonce}:i${start + offset}`).row();
+  }
+  if (pageCount > 1) {
+    if (currentPage > 0) keyboard.text("◀️ 이전", `${prefix}:${snapshot.nonce}:p${currentPage - 1}`);
+    keyboard.text(`${currentPage + 1}/${pageCount}`, `noop:cline-page`);
+    if (currentPage + 1 < pageCount) keyboard.text("다음 ▶️", `${prefix}:${snapshot.nonce}:p${currentPage + 1}`);
+  }
+  return keyboard;
+}
+
+function clineProviderSnapshotKeyboard(snapshot: ClineSnapshot, page = 0): InlineKeyboard {
+  return clineSnapshotKeyboard(snapshot, page, CLINE_PROVIDER_PAGE_SIZE, "clp");
+}
+
+function clineModelSnapshotKeyboard(snapshot: ClineSnapshot, page = 0): InlineKeyboard {
+  return clineSnapshotKeyboard(snapshot, page, CLINE_MODEL_PAGE_SIZE, "clm");
+}
+
 function defaultsKeyboard(
   defaults: SessionDefaults,
   catalog: ModelCatalog,
@@ -76,6 +142,8 @@ function defaultsKeyboard(
       ? agyModelLabel(catalog, defaults.agyModel)
       : defaults.provider === "grok"
         ? grokModelLabel(catalog, defaults.grokModel)
+        : defaults.provider === "cline"
+          ? clineModelOption(catalog, defaults.clineProviderId, defaults.clineModel)?.label ?? "감지된 모델 없음"
         : modelLabel(catalog, defaults.claudeModel);
   const fourth = defaults.provider === "codex"
     ? `💭 추론: ${codexReasoningLabel(defaults.codexReasoning)}`
@@ -83,12 +151,16 @@ function defaultsKeyboard(
       ? `💭 추론: ${agyThinkingLabel(defaults.agyThinkingLevel)}`
       : defaults.provider === "grok"
         ? `💭 추론: ${grokReasoningLabel(defaults.grokReasoning)}`
+        : defaults.provider === "cline"
+          ? `💭 추론: ${clineReasoningLabel(defaults.clineReasoning)}`
         : `💭 thinking: ${defaults.thinking === "off" ? "off" : "on"}`;
   // 5번째 슬롯: Claude는 작업량(effort)을 thinking과 별개 축으로 토글한다.
   // Codex·agy는 추론 강도(💭)가 작업량을 겸하므로 추가로 고를 게 없어 예약('-') 처리한다.
   const fifth = defaults.provider === "claude"
     ? `🛠️ 작업량: ${claudeEffortLabel(defaults.claudeEffort)}`
-    : RESERVED_SLOT_LABEL;
+    : defaults.provider === "cline"
+      ? `🔌 Cline 제공자: ${clineProviderOption(catalog, defaults.clineProviderId)?.label ?? "감지 없음"}`
+      : RESERVED_SLOT_LABEL;
   const codexAccountIndex = selectedCodexAccountIndex(defaults.codexHome, codexAccountHomes);
   const claudeTokenIndex = selectedClaudeTokenIndex(defaults.claudeTokenIndex, claudeTokenCount);
   // 6번째 슬롯: Claude/Codex 제공자에서는 토큰 선택 버튼, agy는 예약 슬롯.
@@ -119,6 +191,8 @@ function defaultsModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog)
       ? catalog.agyModels.map((option) => ({ id: option.id, label: option.label }))
       : defaults.provider === "grok"
         ? catalog.grokModels.map((option) => ({ id: option.id, label: option.label }))
+        : defaults.provider === "cline"
+          ? []
         : catalog.claudeModels.map((option) => ({ id: option.id, label: option.label }));
   for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `setm:${defaults.provider}:${option.id}`);
@@ -140,6 +214,13 @@ function defaultsReasoningKeyboard(defaults: SessionDefaults, catalog: ModelCata
       : defaults.provider === "grok"
         ? grokReasoningOptions(catalog)
           .map((option) => ({ id: option.id, label: option.label, current: option.id === defaults.grokReasoning }))
+        : defaults.provider === "cline"
+          ? (() => {
+            const model = clineModelOption(catalog, defaults.clineProviderId, defaults.clineModel);
+            const current = normalizeClineReasoning(defaults.clineReasoning, model);
+            return clineReasoningOptionsForModel(model)
+              .map((id) => ({ id, label: clineReasoningLabel(id), current: id === current }));
+          })()
         : [
           { id: "adaptive", label: "on", current: defaults.thinking !== "off" },
           { id: "off", label: "off", current: defaults.thinking === "off" }
@@ -186,6 +267,11 @@ function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): stri
   if (defaults.provider === "grok") {
     return `Grok · ${grokModelLabel(catalog, defaults.grokModel)} · reasoning ${grokReasoningLabel(defaults.grokReasoning)}`;
   }
+  if (defaults.provider === "cline") {
+    const provider = clineProviderOption(catalog, defaults.clineProviderId);
+    const model = clineModelOption(catalog, provider?.id, defaults.clineModel);
+    return `Cline · ${provider?.label ?? "감지 없음"} · ${model?.label ?? "감지된 모델 없음"} · reasoning ${clineReasoningLabel(normalizeClineReasoning(defaults.clineReasoning, model))}`;
+  }
   return `Claude · ${modelLabel(catalog, defaults.claudeModel)} · thinking ${defaults.thinking === "off" ? "off" : "on"} · 작업량 ${claudeEffortLabel(defaults.claudeEffort)}`;
 }
 
@@ -219,6 +305,12 @@ function powerKeyboardForSession(session: SessionRecord, catalog: ModelCatalog):
       : session.provider === "grok"
         ? grokReasoningOptions(catalog)
           .map((option) => ({ callback: `power:grok:${option.id}`, label: option.label }))
+        : session.provider === "cline"
+          ? (() => {
+            const model = clineModelOption(catalog, session.clineProviderId, session.clineModel);
+            return clineReasoningOptionsForModel(model)
+              .map((id) => ({ callback: `power:cline:${id}`, label: clineReasoningLabel(id) }));
+          })()
         : claudeEffortOptionsForModel(catalog, session.model ?? DEFAULT_CLAUDE_MODEL)
           .map((option) => ({ callback: `power:claude:${option.id}`, label: option.label }));
   for (const [index, option] of options.entries()) {
@@ -258,10 +350,10 @@ function grokModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
   return keyboard;
 }
 
-// /provider에서 제공자를 고르는 인라인 키보드. mprov:claude|codex|agy|grok
+// /provider에서 제공자를 고르는 인라인 키보드. mprov:claude|codex|agy|grok|cline
 function providerKeyboard(
   current: ProviderKind,
-  available: readonly ProviderKind[] = ["claude", "codex", "agy", "grok"]
+  available: readonly ProviderKind[] = ["claude", "codex", "agy", "grok", "cline"]
 ): InlineKeyboard {
   return providerSelectionKeyboard(current, available, "mprov");
 }
@@ -269,7 +361,7 @@ function providerKeyboard(
 // 기본값 패널: 새 세션 기본 제공자 선택. 콜백 dprov:<provider> (mprov:과 의미 다름 — 요약 인계 없음)
 function defaultsProviderKeyboard(
   current: ProviderKind,
-  available: readonly ProviderKind[] = ["claude", "codex", "agy", "grok"]
+  available: readonly ProviderKind[] = ["claude", "codex", "agy", "grok", "cline"]
 ): InlineKeyboard {
   return providerSelectionKeyboard(current, available, "dprov");
 }
@@ -283,7 +375,8 @@ function providerSelectionKeyboard(
     ["claude", "Claude"],
     ["codex", "Codex"],
     ["agy", "Antigravity"],
-    ["grok", "Grok"]
+    ["grok", "Grok"],
+    ["cline", "Cline"]
   ];
   const options = allOptions.filter(([kind]) => available.includes(kind));
   const keyboard = new InlineKeyboard();
@@ -310,6 +403,11 @@ function usageRateLimitWarning(): string {
 
 export {
   agyModelKeyboard,
+  clineModelOption,
+  clineModelSnapshotKeyboard,
+  clineProviderOption,
+  clineProviderSnapshotKeyboard,
+  clineReasoningLabel,
   codexModelKeyboard,
   defaultsEffortKeyboard,
   defaultsKeyboard,

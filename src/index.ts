@@ -42,11 +42,13 @@ async function main(): Promise<void> {
     const codexDynamic = config.modelCatalog.codexModels.some((m) => m.source === "cli");
     const agyDynamic = config.modelCatalog.agyModels.some((m) => m.source === "cli");
     const grokDynamic = config.modelCatalog.grokModels.some((m) => m.source === "cli");
+    const clineDynamic = config.modelCatalog.clineProviders.length > 0;
     console.log(
       `Model catalog → Claude: ${claudeDynamic ? "동적" : "기본값"}, `
       + `Codex: ${codexDynamic ? "동적" : "기본값"}, `
       + `Antigravity: ${agyDynamic ? "동적" : "기본값"}, `
-      + `Grok: ${grokDynamic ? "동적" : "기본값"}`
+      + `Grok: ${grokDynamic ? "동적" : "기본값"}, `
+      + `Cline: ${clineDynamic ? `동적(${config.modelCatalog.clineProviders.length} providers)` : "사용 불가"}`
     );
   }
 

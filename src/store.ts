@@ -28,7 +28,9 @@ import type {
 } from "./types.js";
 
 function normalizeProvider(value: string | null | undefined): ProviderKind {
-  return value === "codex" || value === "agy" || value === "grok" ? value : "claude";
+  return value === "codex" || value === "agy" || value === "grok" || value === "cline"
+    ? value
+    : "claude";
 }
 
 const SESSION_DEFAULT_SEED: SessionDefaults = {
@@ -39,6 +41,9 @@ const SESSION_DEFAULT_SEED: SessionDefaults = {
   agyModel: DEFAULT_AGY_MODEL,
   grokModel: DEFAULT_GROK_MODEL,
   grokReasoning: DEFAULT_GROK_REASONING,
+  clineProviderId: "",
+  clineModel: "",
+  clineReasoning: "high",
   thinking: DEFAULT_THINKING_LEVEL,
   claudeEffort: DEFAULT_CLAUDE_EFFORT,
   codexReasoning: DEFAULT_CODEX_REASONING,
@@ -83,6 +88,11 @@ interface SessionRow {
   grok_model: string | null;
   grok_reasoning: string | null;
   grok_session_id: string | null;
+  cline_provider_id: string | null;
+  cline_model: string | null;
+  cline_reasoning: string | null;
+  cline_session_id: string | null;
+  cline_usage: string | null;
   handoff_summary: string | null;
   goal_condition: string | null;
   lean_mode: number;
@@ -170,6 +180,11 @@ export class StateStore {
         grok_model TEXT,
         grok_reasoning TEXT,
         grok_session_id TEXT,
+        cline_provider_id TEXT,
+        cline_model TEXT,
+        cline_reasoning TEXT,
+        cline_session_id TEXT,
+        cline_usage TEXT,
         agy_conversation_id TEXT,
         handoff_summary TEXT,
         lean_mode INTEGER NOT NULL DEFAULT 1,
@@ -301,15 +316,30 @@ export class StateStore {
     if (!sessionColumns.some((column) => column.name === "grok_usage")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN grok_usage TEXT");
     }
+    if (!sessionColumns.some((column) => column.name === "cline_provider_id")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN cline_provider_id TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "cline_model")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN cline_model TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "cline_reasoning")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN cline_reasoning TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "cline_session_id")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN cline_session_id TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "cline_usage")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN cline_usage TEXT");
+    }
     this.db.exec(`
       UPDATE sessions
       SET provider = 'claude'
-      WHERE provider IS NULL OR provider NOT IN ('claude', 'codex', 'agy', 'grok');
+      WHERE provider IS NULL OR provider NOT IN ('claude', 'codex', 'agy', 'grok', 'cline');
 
       UPDATE app_settings
       SET value = 'claude'
       WHERE key = 'default.provider'
-        AND value NOT IN ('claude', 'codex', 'agy', 'grok');
+        AND value NOT IN ('claude', 'codex', 'agy', 'grok', 'cline');
     `);
     const agyThinkingDefault = this.db
       .prepare("SELECT value FROM app_settings WHERE key = 'default.agyThinkingLevel'")
@@ -371,9 +401,11 @@ export class StateStore {
         id, sdk_session_id, chat_id, topic_id, project_name, cwd, title,
         status, permission_mode, provider, model, thinking, claude_effort,
         claude_token_index, codex_model, codex_reasoning, codex_home, codex_thread_id, agy_model, grok_model, grok_reasoning, grok_session_id, agy_thinking_level,
-        agy_conversation_id, agy_usage, grok_usage, handoff_summary, goal_condition, lean_mode, usage_snapshot,
+        agy_conversation_id, agy_usage, grok_usage,
+        cline_provider_id, cline_model, cline_reasoning, cline_session_id, cline_usage,
+        handoff_summary, goal_condition, lean_mode, usage_snapshot,
         always_allowed_tools, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.sdkSessionId,
@@ -401,6 +433,11 @@ export class StateStore {
       session.agyConversationId ?? null,
       session.agyUsage ?? null,
       session.grokUsage ?? null,
+      session.clineProviderId ?? null,
+      session.clineModel ?? null,
+      session.clineReasoning ?? null,
+      session.clineSessionId ?? null,
+      session.clineUsage ?? null,
       session.handoffSummary ?? null,
       session.goalCondition ?? null,
       session.leanMode ? 1 : 0,
@@ -441,7 +478,7 @@ export class StateStore {
     id: string,
     fields: Partial<Pick<
       SessionRecord,
-      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "claudeTokenIndex" | "codexModel" | "codexReasoning" | "codexHome" | "codexThreadId" | "agyModel" | "grokModel" | "grokReasoning" | "grokSessionId" | "agyThinkingLevel" | "agyConversationId" | "agyUsage" | "grokUsage" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
+      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "claudeTokenIndex" | "codexModel" | "codexReasoning" | "codexHome" | "codexThreadId" | "agyModel" | "grokModel" | "grokReasoning" | "grokSessionId" | "agyThinkingLevel" | "agyConversationId" | "agyUsage" | "grokUsage" | "clineProviderId" | "clineModel" | "clineReasoning" | "clineSessionId" | "clineUsage" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
     >>
   ): void {
     const entries: Array<[string, unknown]> = [];
@@ -466,6 +503,11 @@ export class StateStore {
     if ("agyConversationId" in fields) entries.push(["agy_conversation_id", fields.agyConversationId]);
     if ("agyUsage" in fields) entries.push(["agy_usage", fields.agyUsage ?? null]);
     if ("grokUsage" in fields) entries.push(["grok_usage", fields.grokUsage ?? null]);
+    if ("clineProviderId" in fields) entries.push(["cline_provider_id", fields.clineProviderId ?? null]);
+    if ("clineModel" in fields) entries.push(["cline_model", fields.clineModel ?? null]);
+    if ("clineReasoning" in fields) entries.push(["cline_reasoning", fields.clineReasoning ?? null]);
+    if ("clineSessionId" in fields) entries.push(["cline_session_id", fields.clineSessionId ?? null]);
+    if ("clineUsage" in fields) entries.push(["cline_usage", fields.clineUsage ?? null]);
     if ("handoffSummary" in fields) entries.push(["handoff_summary", fields.handoffSummary]);
     if ("goalCondition" in fields) entries.push(["goal_condition", fields.goalCondition]);
     if ("leanMode" in fields) entries.push(["lean_mode", fields.leanMode ? 1 : 0]);
@@ -504,6 +546,9 @@ export class StateStore {
       agyModel: stored.get("agyModel") ?? SESSION_DEFAULT_SEED.agyModel,
       grokModel: stored.get("grokModel") ?? SESSION_DEFAULT_SEED.grokModel,
       grokReasoning: stored.get("grokReasoning") ?? SESSION_DEFAULT_SEED.grokReasoning,
+      clineProviderId: stored.get("clineProviderId") ?? SESSION_DEFAULT_SEED.clineProviderId ?? "",
+      clineModel: stored.get("clineModel") ?? SESSION_DEFAULT_SEED.clineModel ?? "",
+      clineReasoning: stored.get("clineReasoning") ?? SESSION_DEFAULT_SEED.clineReasoning ?? "high",
       thinking: stored.get("thinking") ?? SESSION_DEFAULT_SEED.thinking,
       claudeEffort: stored.get("claudeEffort") ?? SESSION_DEFAULT_SEED.claudeEffort,
       codexReasoning: stored.get("codexReasoning") ?? SESSION_DEFAULT_SEED.codexReasoning,
@@ -726,6 +771,11 @@ export class StateStore {
       grokModel: row.grok_model,
       grokReasoning: row.grok_reasoning,
       grokSessionId: row.grok_session_id,
+      clineProviderId: row.cline_provider_id,
+      clineModel: row.cline_model,
+      clineReasoning: row.cline_reasoning,
+      clineSessionId: row.cline_session_id,
+      clineUsage: row.cline_usage,
       agyThinkingLevel: row.agy_thinking_level,
       agyConversationId: row.agy_conversation_id,
       agyUsage: row.agy_usage,

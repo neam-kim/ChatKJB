@@ -180,6 +180,31 @@ describe("workflow commands as the first session message", () => {
     expect(test.startSessionFromOptions).not.toHaveBeenCalled();
   });
 
+  it("preserves Cline provider/model/reasoning when a shared workflow starts the session", async () => {
+    const project: ProjectConfig = { name: "test", cwd: "/tmp/test", defaultMode: "default" };
+    const test = setup({
+      pending: {
+        kind: "project",
+        project,
+        pendingTopicId: TOPIC_ID,
+        provider: "cline",
+        clineProviderId: "cline-pass",
+        clineModel: "kimi-k3",
+        clineReasoning: "high"
+      }
+    });
+
+    await test.bot.handleUpdate(workflowUpdate("/ultragoal 승인 계획 실행"));
+
+    expect(test.startSessionFromOptions).toHaveBeenCalledOnce();
+    expect(test.startSessionFromOptions.mock.calls[0]?.[2]).toMatchObject({
+      provider: "cline",
+      clineProviderId: "cline-pass",
+      clineModel: "kimi-k3",
+      clineReasoning: "high"
+    });
+  });
+
   it("claims the pending start before project selection so concurrent commands start once", async () => {
     let releaseSelection!: (project: ProjectConfig) => void;
     const selection = new Promise<ProjectConfig>((resolve) => {

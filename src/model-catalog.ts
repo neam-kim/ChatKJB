@@ -6,6 +6,12 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { terminateChildTree } from "./child-process.js";
+import {
+  EMPTY_CLINE_CATALOG,
+  discoverClineCatalog,
+  type ClineModelOption,
+  type ClineProviderOption
+} from "./cline-sdk.js";
 import { buildGrokSubscriptionEnvironment } from "./grok-environment.js";
 import type { ProviderKind } from "./types.js";
 
@@ -82,6 +88,8 @@ export interface ModelCatalog {
   codexModels: CodexModelOption[];
   agyModels: AgyModelOption[];
   grokModels: GrokModelOption[];
+  clineProviders: ClineProviderOption[];
+  clineModelsByProvider: Record<string, ClineModelOption[]>;
   /** 기동 시 Grok CLI가 실제로 보고한 `--reasoning-effort` 허용 목록. */
   grokReasoningEfforts?: GrokReasoningEffort[];
 }
@@ -181,6 +189,8 @@ export const FALLBACK_MODEL_CATALOG: ModelCatalog = {
   codexModels: FALLBACK_CODEX_MODELS,
   agyModels: FALLBACK_AGY_MODELS,
   grokModels: FALLBACK_GROK_MODELS,
+  clineProviders: [],
+  clineModelsByProvider: {},
   grokReasoningEfforts: []
 };
 
@@ -456,29 +466,43 @@ export interface CatalogProbe {
 }
 
 export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalog> {
-  const available = probe.availableProviders ?? ["claude", "codex", "agy", "grok"];
-  const [claudeModels, codexModels, agyModels, grokModels, grokReasoningEfforts] = await Promise.all([
-    probe.oauthToken && available.includes("claude")
+  const available = new Set<string>(
+    probe.availableProviders ?? ["claude", "codex", "agy", "grok", "cline"]
+  );
+  const [
+    claudeModels,
+    codexModels,
+    agyModels,
+    grokModels,
+    grokReasoningEfforts,
+    clineCatalog
+  ] = await Promise.all([
+    probe.oauthToken && available.has("claude")
       ? discoverClaudeModels(probe).catch(() => FALLBACK_CLAUDE_MODELS)
       : Promise.resolve(FALLBACK_CLAUDE_MODELS),
-    available.includes("codex")
+    available.has("codex")
       ? discoverCodexModels(probe).catch(() => FALLBACK_CODEX_MODELS)
       : Promise.resolve(FALLBACK_CODEX_MODELS),
-    available.includes("agy")
+    available.has("agy")
       ? discoverAgyModels(probe).catch(() => FALLBACK_AGY_MODELS)
       : Promise.resolve(FALLBACK_AGY_MODELS),
-    available.includes("grok")
+    available.has("grok")
       ? discoverGrokModels(probe).catch(() => FALLBACK_GROK_MODELS)
       : Promise.resolve(FALLBACK_GROK_MODELS),
-    available.includes("grok")
+    available.has("grok")
       ? discoverGrokReasoningEfforts(probe).catch(() => [])
-      : Promise.resolve([])
+      : Promise.resolve([]),
+    available.has("cline")
+      ? discoverClineCatalog().catch(() => EMPTY_CLINE_CATALOG)
+      : Promise.resolve(EMPTY_CLINE_CATALOG)
   ]);
   return {
     claudeModels: claudeModels.length ? claudeModels : FALLBACK_CLAUDE_MODELS,
     codexModels: codexModels.length ? codexModels : FALLBACK_CODEX_MODELS,
     agyModels: agyModels.length ? agyModels : FALLBACK_AGY_MODELS,
     grokModels: grokModels.length ? grokModels : FALLBACK_GROK_MODELS,
+    clineProviders: clineCatalog.providers,
+    clineModelsByProvider: clineCatalog.modelsByProvider,
     grokReasoningEfforts
   };
 }

@@ -18,6 +18,7 @@ import {
   loadMergedConnectors,
   PROVIDER_NATIVE_MCP_SERVER_NAMES,
   syncAgyMcpConfig,
+  syncClineMcpConfig,
   syncCodexMcpConfig
 } from "./connectors.js";
 import { projectSourceDir } from "./runtime-paths.js";
@@ -35,6 +36,7 @@ export interface SharedResourcePaths {
   codexAccountConfigs: string[];
   agyMcpConfig: string;
   grokConfigPath: string;
+  clineMcpConfig: string;
   wrapperScript: string;
   skillRoots: string[];
   providerSkillRoots: string[];
@@ -93,6 +95,14 @@ function defaultPaths(): SharedResourcePaths {
   const codexConfig = join(home, ".codex", "config.toml");
   const primaryCodexSkills = join(home, ".codex", "skills");
   const grokSkills = join(home, ".grok", "skills");
+  const clineSkills = join(home, ".cline", "skills");
+  const agentsSkills = join(home, ".agents", "skills");
+  const projectRoot = projectSourceDir();
+  const projectClineSkillRoots = [
+    join(projectRoot, ".clinerules", "skills"),
+    join(projectRoot, ".cline", "skills"),
+    join(projectRoot, ".agents", "skills")
+  ];
   const codexAccountHomes = defaultCodexAccountHomes(home);
   const codexAccountSkillRoots = codexAccountHomes
     .map((codexHome) => join(codexHome, "skills"))
@@ -109,26 +119,31 @@ function defaultPaths(): SharedResourcePaths {
     codexAccountConfigs: defaultCodexAccountConfigs(codexAccountHomes, codexConfig),
     agyMcpConfig: join(home, ".gemini", "config", "mcp_config.json"),
     grokConfigPath: join(home, ".grok", "config.toml"),
+    clineMcpConfig: join(home, ".cline", "data", "settings", "cline_mcp_settings.json"),
     wrapperScript: resolve(projectSourceDir(), "scripts", "run-shared-mcp.mjs"),
     skillRoots: [
-      join(projectSourceDir(), "skills"),
+      join(projectRoot, "skills"),
+      ...projectClineSkillRoots,
       join(home, ".claude", "skills"),
       primaryCodexSkills,
       ...codexAccountSkillRoots,
       join(home, ".codex", "plugins", "cache"),
       join(home, ".gemini", "config", "skills"),
       join(home, ".gemini", "antigravity-cli", "builtin", "skills"),
-      grokSkills
+      grokSkills,
+      clineSkills,
+      agentsSkills
     ],
-    // grok(네 번째 에이전트)도 Claude·Codex·agy와 같은 라우터 스킬을 받아 공유 카탈로그를
-    // 검색·소비할 수 있도록 providerSkillRoots에 포함한다. grok CLI는 자체 ~/.grok/skills를
-    // 탐색하므로, 여기에 shared-skill-router를 심링크하면 네 에이전트가 동일한 스킬 집합을 공유한다.
+    // Grok과 Cline도 Claude·Codex·agy와 같은 라우터 스킬을 받아 공유 카탈로그를 검색·소비한다.
+    // Cline SDK는 전역 ~/.agents/skills와 프로젝트 .agents/skills를 모두 native 탐색한다.
     providerSkillRoots: [
       join(home, ".claude", "skills"),
       primaryCodexSkills,
       ...codexAccountSkillRoots,
       join(home, ".gemini", "config", "skills"),
-      grokSkills
+      grokSkills,
+      agentsSkills,
+      join(projectRoot, ".agents", "skills")
     ]
   };
 }
@@ -280,7 +295,7 @@ interface SkillEntry {
 // life-science-research 플러그인 스킬 중 이미 붙은 MCP 서버와 기능이 직접 겹치는 것들은 공유
 // 카탈로그에서 제외한다(정책: "MCP와 중복된 것만 제거"). 플러그인 구성원이라 파일
 // 삭제는 캐시 루트 스캔으로 원복되므로, 카탈로그 빌더 단계에서 제외하는 것이 정확·가역적이다.
-// 스킬은 설치된 채 남고, 4-에이전트 공유 카탈로그에서만 빠진다. 되돌리려면 이 집합만 비우면 된다.
+// 스킬은 설치된 채 남고, 5-provider 공유 카탈로그에서만 빠진다. 되돌리려면 이 집합만 비우면 된다.
 // 우측은 대응 MCP 서버.
 export const MCP_REDUNDANT_SKILLS = new Set<string>([
   "chembl-skill", // chembl
@@ -435,7 +450,7 @@ function writeRouterSkill(paths: SharedResourcePaths): void {
       "# Shared Skill Router",
       "",
       `Search ${paths.skillCatalog} only when the task appears to need a dedicated skill.`,
-      "If a matching skill is selected, read its SKILL.md completely and follow it. The catalog is the common source for Claude, Codex, agy, and Grok.",
+      "If a matching skill is selected, read its SKILL.md completely and follow it. The catalog is the common source for Claude, Codex, agy, Grok, and Cline.",
       ""
     ].join("\n"),
     0o644
@@ -588,7 +603,7 @@ export function buildSharedMemoryBridgeText(paths: SharedMemoryTextPaths): strin
   return [
     "# Cross-provider Memory Bridge",
     "",
-    "Claude, Codex, agy, and Grok share this recall route. Provider-native memory systems remain enabled and keep their own formats.",
+    "Claude, Codex, agy, Grok, and Cline share this recall route. Provider-native memory systems remain enabled and keep their own formats.",
     "",
     `- Claude canonical facts: ${paths.claudeMemory}`,
     `- Claude index: ${join(paths.claudeMemory, "MEMORY.md")}`,
@@ -635,7 +650,7 @@ export function buildSharedResourceGuideText(paths: SharedMemoryTextPaths & { ho
   return [
     "# Shared AI Resources",
     "",
-    "This is the common lazy-loaded resource layer for Claude, Codex, agy, and Grok.",
+    "This is the common lazy-loaded resource layer for Claude, Codex, agy, Grok, and Cline.",
     "",
     `- Global instructions: ${join(paths.home, ".claude", "CLAUDE.md")} and ${join(paths.home, ".codex", "AGENTS.md")}`,
     `- Claude memory: ${join(paths.home, ".claude", "memory")}`,
@@ -657,16 +672,29 @@ export function syncSharedResources(
   overrides: Partial<SharedResourcePaths> = {}
 ): SharedResourceSummary {
   const paths = { ...defaultPaths(), ...overrides };
+  if (!overrides.clineMcpConfig) {
+    paths.clineMcpConfig = join(
+      paths.home,
+      ".cline",
+      "data",
+      "settings",
+      "cline_mcp_settings.json"
+    );
+  }
   mkdirSync(paths.sharedRoot, { recursive: true });
 
-  // 전역 지침은 한 파일만 정본으로 두고 네 provider의 native discovery 위치는 심링크로
+  // 전역 지침은 한 파일만 정본으로 두고 다섯 provider의 native discovery 위치는 심링크로
   // 연결한다. ChatKJB bootstrap에서 전문을 다시 복사하지 않아도 각 harness가 직접 읽는다.
   const globalInstructions = join(paths.home, ".claude", "CLAUDE.md");
+  const projectRoot = resolve(dirname(paths.wrapperScript), "..");
   const providerInstructionLinks = [
     join(paths.home, ".codex", "AGENTS.md"),
     ...(paths.codexAccountConfigs ?? []).map((config) => join(dirname(config), "AGENTS.md")),
     join(paths.home, ".gemini", "config", "AGENTS.md"),
-    join(paths.home, ".grok", "Agents.md")
+    join(paths.home, ".grok", "Agents.md"),
+    // Cline SDK 0.0.65의 native rules discovery 출력.
+    join(paths.home, ".agents", "AGENTS.md"),
+    join(projectRoot, "AGENTS.md")
   ];
   for (const linkPath of [...new Set(providerInstructionLinks)]) {
     ensureInstructionSymlink(globalInstructions, linkPath);
@@ -678,7 +706,7 @@ export function syncSharedResources(
     [
       "# Shared Skill Catalog",
       "",
-      "Claude, Codex, agy, and Grok use this same catalog. Search by task keyword, then read only the selected SKILL.md.",
+      "Claude, Codex, agy, Grok, and Cline use this same catalog. Search by task keyword, then read only the selected SKILL.md.",
       "",
       ...skills.map((skill) =>
         `- \`${skill.id}\` — ${skill.description || skill.name} — \`${skill.path}\``
@@ -780,6 +808,13 @@ export function syncSharedResources(
   syncCodexMcpConfig(
     selectedGrokMcpConnectors(connectors),
     paths.grokConfigPath,
+    process.execPath,
+    paths.wrapperScript,
+    paths.connectorRegistry
+  );
+  syncClineMcpConfig(
+    connectors,
+    paths.clineMcpConfig,
     process.execPath,
     paths.wrapperScript,
     paths.connectorRegistry

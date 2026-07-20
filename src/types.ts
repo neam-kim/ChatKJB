@@ -12,7 +12,7 @@ export type SessionStatus =
   | "error"
   | "interrupted";
 
-export type ProviderKind = "claude" | "codex" | "agy" | "grok";
+export type ProviderKind = "claude" | "codex" | "agy" | "grok" | "cline";
 
 export interface ProjectConfig {
   name: string;
@@ -30,6 +30,9 @@ export interface SessionDefaults {
   agyModel: string;
   grokModel: string;
   grokReasoning: string;
+  clineProviderId?: string;
+  clineModel?: string;
+  clineReasoning?: string;
   thinking: string;
   claudeEffort: string;
   codexReasoning: string;
@@ -80,6 +83,9 @@ export interface ReservedTaskStartOptions {
   agyModel?: string;
   grokModel?: string;
   grokReasoning?: string;
+  clineProviderId?: string;
+  clineModel?: string;
+  clineReasoning?: string;
   leanMode?: boolean;
 }
 
@@ -208,6 +214,12 @@ export interface SessionRecord {
   // 턴에서 새 UUID로 세션을 만든 뒤 저장한다. 제공사 전환·문맥 초기화 시 null로 비워
   // 다음 grok 턴이 새 세션을 만들게 한다(봇 session.id와 분리해 UUID 충돌을 피한다).
   grokSessionId?: string | null;
+  // ClineCore 내부 provider/model/reasoning 및 durable SDK session 상태.
+  clineProviderId?: string | null;
+  clineModel?: string | null;
+  clineReasoning?: string | null;
+  clineSessionId?: string | null;
+  clineUsage?: string | null;
   // 제공사 전환 시 직전 provider가 만든 인계 요약. 다음 턴 프롬프트에 1회 주입 후 비운다.
   handoffSummary: string | null;
   // Claude/Codex 네이티브 /goal 상태를 UI에 표시하고 세션 핸들 생성 뒤 동기화하기 위한 미러.
