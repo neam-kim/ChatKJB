@@ -3,7 +3,7 @@ import { reapOrphanedClineMcp, type ClineReaperDeps } from "../src/cline-orphan-
 
 const HUB = 37773;
 const HUB_COMMAND = "/opt/homebrew/lib/node_modules/cline/bin/.cline --cline-hub-daemon "
-  + "--cwd /Users/neam --host 127.0.0.1 --port 25463 --pathname /hub";
+  + "--cwd /Users/tester --host 127.0.0.1 --port 25463 --pathname /hub";
 
 interface Scenario {
   hubPids?: number[];
