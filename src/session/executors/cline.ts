@@ -160,9 +160,13 @@ export class ClineExecutor {
   private tools(session: SessionRecord, readOnly = false, toolFree = false) {
     if (toolFree) return { tools: [], policies: {} };
     const boundary = clineToolBoundary(session.permissionMode, readOnly);
+    // auto는 다른 제공자와 같은 의미여야 한다: Codex는 danger-full-access, agy는
+    // --dangerously-skip-permissions로 격리를 아예 푼다. Cline만 워크스페이스 가둠과
+    // 허용목록 심사를 유지하면 같은 모드인데 혼자 못 하는 작업이 생긴다.
+    const unrestricted = !readOnly && session.permissionMode === "auto";
     const defaults = createDefaultExecutors({
-      editor: { restrictToCwd: true },
-      applyPatch: { restrictToCwd: true },
+      editor: { restrictToCwd: !unrestricted },
+      applyPatch: { restrictToCwd: !unrestricted },
       bash: { timeoutMs: this.host.options.providerTurnTimeoutMs ?? 30_000 }
     });
     const editor: EditorExecutor = async (
@@ -170,7 +174,7 @@ export class ClineExecutor {
       cwd: string,
       context: AgentToolContext
     ) => {
-      assertWorkspacePath(input.path, cwd);
+      if (!unrestricted) assertWorkspacePath(input.path, cwd);
       if (!defaults.editor) throw new Error("Cline editor executor가 없습니다.");
       return defaults.editor(input, cwd, context);
     };
@@ -180,10 +184,12 @@ export class ClineExecutor {
       context: AgentToolContext
     ) => {
       const patch = input.input;
-      const preview = await computePatchChanges(patch, cwd, { restrictToCwd: true });
-      for (const [path, change] of Object.entries(preview.changes) as Array<[string, PatchFileChange]>) {
-        assertWorkspacePath(path, cwd);
-        if (change.movePath) assertWorkspacePath(change.movePath, cwd);
+      const preview = await computePatchChanges(patch, cwd, { restrictToCwd: !unrestricted });
+      if (!unrestricted) {
+        for (const [path, change] of Object.entries(preview.changes) as Array<[string, PatchFileChange]>) {
+          assertWorkspacePath(path, cwd);
+          if (change.movePath) assertWorkspacePath(change.movePath, cwd);
+        }
       }
       if (!defaults.applyPatch) throw new Error("Cline apply_patch executor가 없습니다.");
       return defaults.applyPatch(input, cwd, context);
@@ -198,7 +204,7 @@ export class ClineExecutor {
       }
       const text = typeof command === "string" ? command : command.command;
       if (session.permissionMode === "auto") {
-        const classification = classifyClineAutoCommand(text, cwd);
+        const classification = classifyClineAutoCommand(text);
         if (!classification.allowed) {
           throw new Error(`Cline 자동 명령 거부: ${classification.reason ?? "안전성을 입증할 수 없음"}`);
         }

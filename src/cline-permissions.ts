@@ -62,42 +62,40 @@ export function clineToolBoundary(
   };
 }
 
-const UNSAFE_SHELL_SYNTAX = /[;&|><`$(){}\[\]\n\r\\]/;
 const SECRET_TARGET = /(?:^|[/.\s_-])(?:\.env|credentials?|secrets?|tokens?|auth\.json|providers\.json|\.ssh|\.aws|\.gnupg)(?:$|[/.\s_-])/i;
-const UNSAFE_COMMAND = /^(?:curl|wget|ssh|scp|sftp|nc|netcat|telnet|ftp|rsync|rm|rmdir|mv|cp|chmod|chown|kill|pkill|killall|sudo|su|dd|mkfs|diskutil|launchctl|open|osascript|env|printenv|security)$/i;
-const SAFE_GIT_SUBCOMMANDS = new Set(["status", "diff", "log", "show", "rev-parse"]);
-const SAFE_NPM_SCRIPTS = new Set(["test", "typecheck", "build"]);
+
+/** 명령 위치(줄 처음 또는 셸 구분자 뒤)에 나타나는 낱말만 잡는다. */
+function commandWord(names: string): RegExp {
+  return new RegExp(String.raw`(?:^|[\s;&|(\`])(?:${names})(?=$|[\s;&|)\`])`, "i");
+}
+
+const REMOTE_TRANSFER = commandWord("curl|wget|ssh|scp|sftp|nc|netcat|telnet|ftp|rsync");
+const PRIVILEGE_ESCALATION = commandWord("sudo|su|doas");
+const DISK_DESTRUCTIVE = commandWord(String.raw`dd|mkfs(?:\.\w+)?|diskutil|newfs(?:_\w+)?`);
+// `rm file`은 통과시키고 재귀·강제 삭제만 막는다.
+const RECURSIVE_DELETE = /(?:^|[\s;&|(`])rm\s+(?:[^|;&]*\s)?-{1,2}(?:[a-z]*[rRf]|recursive|force)/i;
 
 /**
- * `auto`에서만 쓰는 보수적 명령 분류기다. 셸 문법을 해석하지 않고 안전성을 입증할 수
- * 없는 입력은 모두 거부한다. 쓰기는 editor/apply_patch로만 수행한다.
+ * `auto`에서 쓰는 차단목록이다. auto는 다른 제공자와 같은 의미(격리 해제)여야 하므로
+ * 셸 결합·임의 실행 파일·프로젝트 밖 경로를 모두 허용하고, 되돌릴 수 없거나 데이터를
+ * 기기 밖으로 내보내는 부류만 남긴다.
+ *
+ * 주의: 셸 문법을 허용하는 순간 이 검사는 보안 경계가 아니라 사고 방지용 가드다.
+ * `sh -c`, 변수 치환, 경로 우회로 얼마든지 회피할 수 있다. 신뢰할 수 없는 프롬프트를
+ * auto로 돌리는 상황을 막아 주지는 못한다.
  */
-export function classifyClineAutoCommand(command: string, cwd: string): {
+export function classifyClineAutoCommand(command: string, _cwd?: string): {
   allowed: boolean;
   reason?: string;
 } {
   const clean = command.trim();
   if (!clean) return { allowed: false, reason: "빈 명령" };
-  if (UNSAFE_SHELL_SYNTAX.test(clean)) return { allowed: false, reason: "셸 결합·치환·리디렉션 금지" };
   if (SECRET_TARGET.test(clean)) return { allowed: false, reason: "비밀/인증 대상 금지" };
-  const argv = clean.split(/\s+/);
-  if (argv.some((part) => part === ".." || part.startsWith("../") || part.includes("/../"))) {
-    return { allowed: false, reason: "상위 경로 금지" };
-  }
-  if (argv.some((part) => isAbsolute(part) && !isPathWithinWorkspace(part, cwd))) {
-    return { allowed: false, reason: "프로젝트 밖 절대 경로 금지" };
-  }
-  const executable = argv[0]?.replace(/^.*\//, "") ?? "";
-  if (UNSAFE_COMMAND.test(executable)) return { allowed: false, reason: "외부/파괴/권한 명령 금지" };
-  if (["pwd", "ls", "rg"].includes(executable)) return { allowed: true };
-  if (executable === "git" && argv[1] && SAFE_GIT_SUBCOMMANDS.has(argv[1])) {
-    return { allowed: true };
-  }
-  if (executable === "npm") {
-    const script = argv[1] === "run" ? argv[2] : argv[1];
-    if (script && SAFE_NPM_SCRIPTS.has(script)) return { allowed: true };
-  }
-  return { allowed: false, reason: "자동 허용목록에 없는 명령" };
+  if (REMOTE_TRANSFER.test(clean)) return { allowed: false, reason: "원격 전송 명령 금지" };
+  if (PRIVILEGE_ESCALATION.test(clean)) return { allowed: false, reason: "권한 상승 명령 금지" };
+  if (DISK_DESTRUCTIVE.test(clean)) return { allowed: false, reason: "디스크 파괴 명령 금지" };
+  if (RECURSIVE_DELETE.test(clean)) return { allowed: false, reason: "재귀·강제 삭제 금지" };
+  return { allowed: true };
 }
 
 export function isPathWithinWorkspace(path: string, cwd: string): boolean {
