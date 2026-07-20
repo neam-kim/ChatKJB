@@ -20,10 +20,20 @@
 //      → 재시작(즉 "codex CLI 업데이트 후 봇이 새 버전으로 동작"까지 자동 완결).
 //   2) Claude/Grok/agy는 같은 경로 in-place 갱신이라 다음 스폰에 자동 반영 — 해석 경로가 바뀐
 //      경우에만 재시작(버전만 바뀌면 재시작 불필요).
-//   3) 아무 변동이 없으면 아무것도 하지 않는다(재시작조차 하지 않는다).
+//   3) 아무 변동이 없으면 재시작하지 않는다. 텔레그램 보고는 매 실행 후 보낸다
+//      (AGENT_SYNC_NOTIFY=0 이면 비활성).
 //   위험한 npm 작업(공유 node_modules 갱신)은 codex 버전이 실제로 바뀐 경우에만 실행하며,
 //   @openai 스코프 백업 → 검증 → 실패 시 롤백(재시작 안 함)으로 봇을 항상 살려둔다.
 //   AGENT_SYNC_SKIP_UPDATE=1 이면 능동 업데이트 단계를 건너뛰고 리컨실만 수행한다.
+//
+// 데몬 런타임:
+//   LaunchAgent는 macOS 권한 화면 식별을 위해 ChatKJB.app 번들로 이 스크립트를 실행한다.
+//   process.execPath 는 번들 MacOS 경로라 npm/codex 형제가 없다. 설치 시 기록한
+//   CHATKJB_NODE_BIN(실제 Node bin)을 npm·codex·PATH 해석에 우선 사용한다.
+//
+// 환경변수:
+//   CHATKJB_PROJECT_DIR, CHATKJB_NODE_BIN, AGENT_SYNC_SKIP_UPDATE, AGENT_SYNC_NOTIFY=0
+//   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (프로젝트 .env 또는 프로세스 환경)
 
 import { execFileSync } from "node:child_process";
 import {
@@ -36,23 +46,55 @@ import {
   writeFileSync
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const label = "com.chatkjb.bot";
 const projectDir =
   process.env.CHATKJB_PROJECT_DIR ??
   join(dirname(fileURLToPath(import.meta.url)), "..");
-const nodePath = process.execPath;
-const nodeBinDir = dirname(nodePath);
+
+// launchd 실행 시 셸 환경이 없으므로 오케스트레이터와 같은 .env를 내장 loader로 읽는다.
+try {
+  process.loadEnvFile(join(projectDir, ".env"));
+} catch {
+  /* .env 없음 — 기본값 유지 */
+}
+
+const ENV_FILE = join(projectDir, ".env");
+const NOTIFY = process.env.AGENT_SYNC_NOTIFY !== "0";
+const APP_TIME_ZONE =
+  process.env.TZ?.trim() ||
+  Intl.DateTimeFormat().resolvedOptions().timeZone ||
+  "Asia/Seoul";
+
+// ChatKJB.app 번들로 실행되면 execPath 옆에는 npm이 없다. 설치 시점 Node bin을 우선한다.
+function resolveNodeBinDir(env = process.env, execPath = process.execPath) {
+  const candidates = [];
+  const recorded = env.CHATKJB_NODE_BIN?.trim();
+  if (recorded) candidates.push(recorded);
+  candidates.push(dirname(execPath));
+  for (const dir of candidates) {
+    if (!dir) continue;
+    if (existsSync(join(dir, "npm")) || existsSync(join(dir, "node"))) return dir;
+  }
+  return candidates.find(Boolean) ?? dirname(execPath);
+}
+
+const nodeBinDir = resolveNodeBinDir();
+const nodePath = existsSync(join(nodeBinDir, "node"))
+  ? join(nodeBinDir, "node")
+  : process.execPath;
 const npmCli = join(nodeBinDir, "npm");
 // launchd 컨텍스트의 PATH는 빈약해 `#!/usr/bin/env node` 셰방(codex.js, npm)이 node를
-// 못 찾는다. 자식 프로세스 PATH 앞에 이 런타임의 node bin 디렉터리를 넣어 해결한다.
-const childEnv = { ...process.env, PATH: `${nodeBinDir}:${process.env.PATH ?? ""}` };
+// 못 찾는다. 자식 프로세스 PATH 앞에 실제 Node bin을 넣어 해결한다.
+const childEnv = {
+  ...process.env,
+  PATH: `${nodeBinDir}:${process.env.PATH ?? ""}`
+};
 const home = homedir();
 const shareBase = join(home, ".local", "share", "chatkjb");
 const sharedNm = join(shareBase, "node_modules");
-const projectNm = join(projectDir, "node_modules");
 const stateFile = join(shareBase, "agent-sync-state.json");
 const uid = process.getuid?.() ?? 501;
 const nowTag = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
@@ -61,12 +103,24 @@ function log(msg) {
   console.log(`[sync-agents ${new Date().toISOString()}] ${msg}`);
 }
 
+function localStamp(date = new Date()) {
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: APP_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
 // PATH가 빈약한 launchd 컨텍스트에서도 바이너리를 찾도록, cli-resolver.ts의 후보 순서를 흉내낸다.
-function resolveBin(name, candidates) {
+function resolveBin(name, candidates, pathValue = process.env.PATH) {
   for (const c of candidates) {
     if (c && existsSync(c)) return c;
   }
-  const pathDirs = (process.env.PATH ?? "").split(":");
+  const pathDirs = (pathValue ?? "").split(":");
   for (const d of pathDirs) {
     if (!d) continue;
     const p = join(d, name);
@@ -75,35 +129,55 @@ function resolveBin(name, candidates) {
   return null;
 }
 
-const bins = {
-  // 전역 codex는 이 스크립트를 돌리는 node와 같은 npm 전역 bin에 설치되므로 형제 경로가 가장 확실하다.
-  codex: resolveBin("codex", [
-    join(nodeBinDir, "codex"),
-    join(home, ".local/bin/codex"),
-    "/opt/homebrew/bin/codex",
-    "/usr/local/bin/codex"
-  ]),
-  claude: resolveBin("claude", [
-    join(home, ".local/bin/claude"),
-    "/opt/homebrew/bin/claude",
-    "/usr/local/bin/claude"
-  ]),
-  // cli-resolver.ts와 같은 순서. `grok update`는 버전이 박힌 새 파일을 받고 ~/.grok/bin/grok
-  // 심링크만 옮기므로, 최초 설치본 downloads/grok-macos-aarch64를 먼저 보면 stale 바이너리로
-  // 업데이트를 돌리게 되고 봇도 구버전을 스폰한다.
-  grok: resolveBin("grok", [
-    join(home, ".grok/bin/grok"),
-    join(home, ".local/bin/grok"),
-    "/opt/homebrew/bin/grok",
-    "/usr/local/bin/grok",
-    join(home, ".grok/downloads/grok-macos-aarch64")
-  ]),
-  agy: resolveBin("agy", [
-    join(home, ".local/bin/agy"),
-    "/opt/homebrew/bin/agy",
-    "/usr/local/bin/agy"
-  ])
-};
+function resolveProviderBins(binDir = nodeBinDir, pathValue = childEnv.PATH) {
+  return {
+    // 전역 codex는 실제 Node/npm bin에 설치되므로 그 형제 경로를 우선한다.
+    codex: resolveBin(
+      "codex",
+      [
+        join(binDir, "codex"),
+        join(home, ".local/bin/codex"),
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex"
+      ],
+      pathValue
+    ),
+    claude: resolveBin(
+      "claude",
+      [
+        join(home, ".local/bin/claude"),
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude"
+      ],
+      pathValue
+    ),
+    // cli-resolver.ts와 같은 순서. `grok update`는 버전이 박힌 새 파일을 받고 ~/.grok/bin/grok
+    // 심링크만 옮기므로, 최초 설치본 downloads/grok-macos-aarch64를 먼저 보면 stale 바이너리로
+    // 업데이트를 돌리게 되고 봇도 구버전을 스폰한다.
+    grok: resolveBin(
+      "grok",
+      [
+        join(home, ".grok/bin/grok"),
+        join(home, ".local/bin/grok"),
+        "/opt/homebrew/bin/grok",
+        "/usr/local/bin/grok",
+        join(home, ".grok/downloads/grok-macos-aarch64")
+      ],
+      pathValue
+    ),
+    agy: resolveBin(
+      "agy",
+      [
+        join(home, ".local/bin/agy"),
+        "/opt/homebrew/bin/agy",
+        "/usr/local/bin/agy"
+      ],
+      pathValue
+    )
+  };
+}
+
+const bins = resolveProviderBins();
 
 function binVersion(bin) {
   if (!bin) return null;
@@ -172,6 +246,11 @@ function relockstepCodex(targetVer) {
   const openaiBak = join(shareBase, `@openai.bak-${nowTag}`);
   log(`codex 락스텝 시작 → codex-sdk@${targetVer}`);
 
+  if (!existsSync(npmCli)) {
+    log(`codex 락스텝 실패 → npm 미발견: ${npmCli}`);
+    return false;
+  }
+
   // 롤백용 백업(@openai 스코프만 바뀐다).
   rmSync(openaiBak, { recursive: true, force: true });
   cpSync(openaiDir, openaiBak, { recursive: true });
@@ -230,57 +309,216 @@ function relockstepCodex(targetVer) {
 // 멈춤을 방지한다(각 명령은 claude/grok/agy `update`, codex는 전역 npm으로 실증 완료: 비대화형).
 const UPDATE_TIMEOUT_MS = 300_000;
 
+/** @typedef {{ name: string, status: 'updated'|'latest'|'failed'|'skipped', before?: string|null, after?: string|null, error?: string }} UpdateLine */
+
+/**
+ * @param {string} name
+ * @param {string|null} bin
+ * @param {string[]} argv
+ * @returns {UpdateLine}
+ */
 function runUpdate(name, bin, argv) {
   if (!bin) {
     log(`${name} 바이너리 미발견 — 업데이트 건너뜀.`);
-    return;
+    return { name, status: "skipped", error: "바이너리 미발견" };
   }
   const before = binVersion(bin);
   try {
     execFileSync(bin, argv, { stdio: "inherit", env: childEnv, timeout: UPDATE_TIMEOUT_MS });
   } catch (e) {
-    log(`${name} 업데이트 실패(무시하고 계속): ${e?.message ?? e}`);
-    return;
+    const error = String(e?.message ?? e);
+    log(`${name} 업데이트 실패(무시하고 계속): ${error}`);
+    return { name, status: "failed", before, after: binVersion(bin), error };
   }
   const after = binVersion(bin);
-  log(after !== before ? `${name} CLI: ${before} → ${after}` : `${name} CLI: 최신(${after ?? "?"})`);
+  if (after !== before) {
+    log(`${name} CLI: ${before} → ${after}`);
+    return { name, status: "updated", before, after };
+  }
+  log(`${name} CLI: 최신(${after ?? "?"})`);
+  return { name, status: "latest", before, after };
 }
 
+/**
+ * @returns {UpdateLine[]}
+ */
 function updateAllClis() {
+  /** @type {UpdateLine[]} */
+  const lines = [];
   if (process.env.AGENT_SYNC_SKIP_UPDATE === "1") {
     log("AGENT_SYNC_SKIP_UPDATE=1 — CLI 능동 업데이트 건너뜀(리컨실만 수행).");
-    return;
+    return [
+      { name: "codex", status: "skipped", error: "AGENT_SYNC_SKIP_UPDATE=1" },
+      { name: "claude", status: "skipped", error: "AGENT_SYNC_SKIP_UPDATE=1" },
+      { name: "grok", status: "skipped", error: "AGENT_SYNC_SKIP_UPDATE=1" },
+      { name: "agy", status: "skipped", error: "AGENT_SYNC_SKIP_UPDATE=1" }
+    ];
   }
+
   // codex: self-update 명령이 없어 전역 npm으로 올린다. 이후 main()의 리컨실 단계가 새 CLI
   // 버전을 감지해 codex-sdk 락스텝 + 데몬 재시작까지 자동 완결한다.
   const codexBefore = binVersion(bins.codex);
-  try {
-    execFileSync(npmCli, ["install", "-g", "@openai/codex@latest"], {
-      stdio: "inherit",
-      env: childEnv,
-      timeout: UPDATE_TIMEOUT_MS
-    });
-    const codexAfter = binVersion(bins.codex);
-    log(
-      codexAfter !== codexBefore
-        ? `codex CLI: ${codexBefore} → ${codexAfter}`
-        : `codex CLI: 최신(${codexAfter ?? "?"})`
-    );
-  } catch (e) {
-    log(`codex CLI 업데이트 실패(무시하고 계속): ${e?.message ?? e}`);
+  if (!existsSync(npmCli)) {
+    const error = `npm 미발견: ${npmCli}`;
+    log(`codex CLI 업데이트 실패(무시하고 계속): ${error}`);
+    lines.push({ name: "codex", status: "failed", before: codexBefore, after: codexBefore, error });
+  } else {
+    try {
+      execFileSync(npmCli, ["install", "-g", "@openai/codex@latest"], {
+        stdio: "inherit",
+        env: childEnv,
+        timeout: UPDATE_TIMEOUT_MS
+      });
+      // 업데이트 직후 PATH/형제로 다시 해석(이전에 null이었을 수 있음).
+      const codexBin =
+        resolveBin(
+          "codex",
+          [join(nodeBinDir, "codex"), bins.codex, join(home, ".local/bin/codex")].filter(Boolean),
+          childEnv.PATH
+        ) ?? bins.codex;
+      if (codexBin) bins.codex = codexBin;
+      const codexAfter = binVersion(bins.codex);
+      if (codexAfter !== codexBefore) {
+        log(`codex CLI: ${codexBefore} → ${codexAfter}`);
+        lines.push({ name: "codex", status: "updated", before: codexBefore, after: codexAfter });
+      } else {
+        log(`codex CLI: 최신(${codexAfter ?? "?"})`);
+        lines.push({ name: "codex", status: "latest", before: codexBefore, after: codexAfter });
+      }
+    } catch (e) {
+      const error = String(e?.message ?? e);
+      log(`codex CLI 업데이트 실패(무시하고 계속): ${error}`);
+      lines.push({
+        name: "codex",
+        status: "failed",
+        before: codexBefore,
+        after: binVersion(bins.codex),
+        error
+      });
+    }
   }
 
   // claude/grok/agy: 각자 self-update 서브커맨드(같은 경로 in-place 갱신 → 다음 스폰 자동 반영).
-  runUpdate("claude", bins.claude, ["update"]);
-  runUpdate("grok", bins.grok, ["update"]);
-  runUpdate("agy", bins.agy, ["update"]);
+  lines.push(runUpdate("claude", bins.claude, ["update"]));
+  lines.push(runUpdate("grok", bins.grok, ["update"]));
+  lines.push(runUpdate("agy", bins.agy, ["update"]));
+  return lines;
+}
+
+// ── 텔레그램 보고 ────────────────────────────────────────────────────────────
+function readEnvValue(key) {
+  try {
+    for (const line of readFileSync(ENV_FILE, "utf8").split("\n")) {
+      const m = line.match(/^([A-Z0-9_]+)\s*=\s*(.*)$/);
+      if (m && m[1] === key) return m[2].trim().replace(/^["']|["']$/g, "");
+    }
+  } catch {
+    /* .env 없으면 프로세스 환경으로 폴백 */
+  }
+  return process.env[key] || "";
+}
+
+function parseTelegramResponse(response) {
+  try {
+    const parsed = JSON.parse(response);
+    return {
+      ok: parsed.ok === true,
+      description: String(parsed.description || "알 수 없는 API 오류")
+    };
+  } catch {
+    return { ok: false, description: "유효하지 않은 Telegram API 응답" };
+  }
+}
+
+function telegramPost(method, body) {
+  const token = readEnvValue("TELEGRAM_BOT_TOKEN");
+  if (!token) return false;
+  const url = `https://api.telegram.org/bot${token}/${method}`;
+  const payload = JSON.stringify(body);
+  // fetch는 일부 환경 undici에서 ETIMEDOUT을 내므로 실패 시 curl로 폴백한다(동기 best-effort).
+  for (const bin of ["/usr/bin/curl", "curl"]) {
+    try {
+      const response = execFileSync(
+        bin,
+        ["-sS", "-m", "15", "-X", "POST", url, "-H", "content-type: application/json", "-d", payload],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
+      );
+      const parsed = parseTelegramResponse(response);
+      if (parsed.ok) return true;
+      log(`telegram ${method} 거부: ${parsed.description}`);
+      return false;
+    } catch (e) {
+      if (bin === "curl") log(`telegram ${method} 실패: ${e?.message || e}`);
+    }
+  }
+  return false;
+}
+
+function notifyTelegram(text) {
+  if (!NOTIFY) return false;
+  const chatId = readEnvValue("TELEGRAM_CHAT_ID");
+  if (!chatId) {
+    log("telegram 통지 건너뜀: chat_id 없음");
+    return false;
+  }
+  return telegramPost("sendMessage", { chat_id: Number(chatId), text });
+}
+
+/**
+ * @param {{
+ *   updates: UpdateLine[],
+ *   current: { codexCli: string|null, codexSdk: string|null, claude: string|null, grok: string|null, agy: string|null },
+ *   lockstep?: { from: string|null, to: string, ok: boolean }|null,
+ *   restartReason?: string|null,
+ *   outcome?: string|null,
+ * }} report
+ */
+function formatAgentSyncReport(report, date = new Date()) {
+  const lines = [`🔄 agent-sync ${localStamp(date)}`];
+  for (const u of report.updates) {
+    if (u.status === "updated") {
+      lines.push(`· ${u.name}: ${u.before ?? "?"} → ${u.after ?? "?"}`);
+    } else if (u.status === "latest") {
+      lines.push(`· ${u.name}: 최신(${u.after ?? "?"})`);
+    } else if (u.status === "failed") {
+      lines.push(`· ${u.name}: 실패 — ${u.error ?? "unknown"}`);
+    } else {
+      lines.push(`· ${u.name}: 건너뜀${u.error ? ` (${u.error})` : ""}`);
+    }
+  }
+  const cur = report.current;
+  if (cur) {
+    lines.push(
+      `· 현재: codexCLI=${cur.codexCli ?? "null"} codexSDK=${cur.codexSdk ?? "null"} ` +
+        `claude=${cur.claude ?? "null"} grok=${cur.grok ?? "null"} agy=${cur.agy ?? "null"}`
+    );
+  }
+  if (report.lockstep) {
+    lines.push(
+      report.lockstep.ok
+        ? `· 락스텝: codex-sdk ${report.lockstep.from ?? "?"} → ${report.lockstep.to} 성공`
+        : `· 락스텝: codex-sdk ${report.lockstep.from ?? "?"} → ${report.lockstep.to} 실패`
+    );
+  }
+  if (report.restartReason) {
+    lines.push(`· 데몬 재시작: ${report.restartReason}`);
+  } else if (report.outcome) {
+    lines.push(`· ${report.outcome}`);
+  }
+  return lines.join("\n");
 }
 
 function main() {
+  log(`nodeBinDir=${nodeBinDir} npm=${existsSync(npmCli) ? npmCli : "MISSING"}`);
+
   // (0) 4개 CLI를 최신으로 능동 업데이트한 뒤 아래에서 현재 버전을 다시 읽는다.
-  updateAllClis();
+  const updates = updateAllClis();
 
   const prev = loadState();
+  // 업데이트 과정에서 bins.codex가 채워졌을 수 있으므로 최종 해석을 한 번 더 반영.
+  const liveBins = resolveProviderBins();
+  Object.assign(bins, liveBins);
+
   const cur = {
     codexCli: binVersion(bins.codex),
     codexSdk: pkgVersion(join(sharedNm, "@openai", "codex-sdk")),
@@ -294,16 +532,37 @@ function main() {
   );
 
   let restartReason = null;
+  /** @type {{ from: string|null, to: string, ok: boolean }|null} */
+  let lockstep = null;
+  let outcome = null;
 
   // (1) Codex 락스텝 — 유일하게 npm 작업이 필요한 항목.
   if (cur.codexCli && cur.codexSdk && cur.codexCli !== cur.codexSdk) {
     log(`codex 드리프트 감지: CLI ${cur.codexSdk} → ${cur.codexCli}`);
-    if (relockstepCodex(cur.codexCli)) {
+    const ok = relockstepCodex(cur.codexCli);
+    lockstep = { from: cur.codexSdk, to: cur.codexCli, ok };
+    if (ok) {
       cur.codexSdk = cur.codexCli;
       restartReason = `codex 락스텝 ${cur.codexCli}`;
     } else {
       // 실패: 상태 저장하지 않고 종료(다음 주기에 재시도), 재시작 없음.
-      log("codex 락스텝 실패로 종료(재시도는 다음 주기).");
+      outcome = "codex 락스텝 실패로 종료(재시도는 다음 주기)";
+      log(outcome);
+      const text = formatAgentSyncReport({
+        updates,
+        current: {
+          codexCli: cur.codexCli,
+          codexSdk: cur.codexSdk,
+          claude: cur.claude.ver,
+          grok: cur.grok.ver,
+          agy: cur.agy.ver
+        },
+        lockstep,
+        restartReason: null,
+        outcome
+      });
+      log(text.replace(/\n/g, " | "));
+      notifyTelegram(text);
       return;
     }
   }
@@ -319,12 +578,47 @@ function main() {
   }
 
   if (restartReason) {
-    restartDaemon(restartReason);
+    const restarted = restartDaemon(restartReason);
+    if (!restarted) outcome = `재시작 실패: ${restartReason}`;
   } else {
-    log("변동 없음 — 무동작.");
+    const changed = updates.some((u) => u.status === "updated");
+    const failed = updates.some((u) => u.status === "failed");
+    if (changed || failed) {
+      outcome = failed
+        ? "일부 업데이트 실패 · 재시작 없음(다음 스폰/주기에 반영·재시도)"
+        : "CLI 갱신 반영 · 재시작 없음(다음 스폰에 자동 적용)";
+    } else {
+      outcome = "변동 없음 — 무동작";
+    }
+    log(outcome);
   }
 
   saveState({ ...cur, updatedAt: new Date().toISOString() });
+
+  const text = formatAgentSyncReport({
+    updates,
+    current: {
+      codexCli: cur.codexCli,
+      codexSdk: cur.codexSdk,
+      claude: cur.claude.ver,
+      grok: cur.grok.ver,
+      agy: cur.agy.ver
+    },
+    lockstep,
+    restartReason,
+    outcome: restartReason ? null : outcome
+  });
+  log(text.replace(/\n/g, " | "));
+  notifyTelegram(text);
 }
 
-main();
+export {
+  formatAgentSyncReport,
+  parseTelegramResponse,
+  resolveNodeBinDir,
+  resolveBin
+};
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
