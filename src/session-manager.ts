@@ -14,6 +14,7 @@ import { fetchCodexLiveUsage } from "./codex-live-usage.js";
 import {
   loadClaudeConnectors
 } from "./connectors.js";
+import { seedClineConnection } from "./cline-sdk.js";
 import { runGrokCli } from "./grok-cli.js";
 import {
   buildJudgePrompt,
@@ -1488,10 +1489,14 @@ export class SessionManager {
         ...(summary ? { handoffSummary: summary } : {})
       });
     } else if (target === "cline") {
+      // 대상=Cline: 새 Cline 세션에서 요약을 받아 시작한다. 내부 제공자·모델을 함께 확정하지
+      // 않으면 세션이 빈 연결값으로 남아 /model 패널이 선택을 계속 거부한다.
+      const seeded = seedClineConnection(this.options.modelCatalog, session);
       this.store.updateSession(sessionId, {
         provider: "cline",
         clineSessionId: null,
         clineUsage: null,
+        ...seeded,
         ...(summary ? { handoffSummary: summary } : {})
       });
     } else {

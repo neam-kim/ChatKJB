@@ -134,10 +134,14 @@ function clineSession(defaults: SessionDefaults): SessionRecord {
   };
 }
 
-function setup(options: { withSession?: boolean; active?: boolean; } = {}) {
+function setup(options: { withSession?: boolean; active?: boolean; unsetConnection?: boolean; } = {}) {
   const catalog = clineCatalog();
   let defaults = defaultsFor(catalog);
   let session = options.withSession ? clineSession(defaults) : undefined;
+  if (session && options.unsetConnection) {
+    // switchProvider(→cline)가 남기는 상태: provider만 cline이고 내부 연결값은 비어 있다.
+    session = { ...session, clineProviderId: "", clineModel: "", clineReasoning: null, clineSessionId: null };
+  }
   const sent: ApiPayload[] = [];
   const callbackAnswers: ApiPayload[] = [];
   const edited: ApiPayload[] = [];
@@ -333,5 +337,20 @@ describe("Cline bot configuration UI", () => {
     await active.bot.handleUpdate(messageUpdate("/power off", 4));
     expect(active.updateSession).not.toHaveBeenCalled();
     expect(String(active.sent.at(-1)?.["text"])).toContain("실행 중에는 바꿀 수 없습니다");
+  });
+
+  it("recovers a Cline session whose internal connection was never seeded", async () => {
+    // 다른 제공자에서 /provider로 전환해 온 세션은 clineProviderId가 비어 있다. 이때도
+    // /model 패널이 고른 모델을 받아들이고, 폴백 제공자 id를 함께 확정해야 한다.
+    const test = setup({ withSession: true, unsetConnection: true });
+    const fallback = test.catalog.clineProviders[0]!;
+
+    await test.bot.handleUpdate(messageUpdate("/model", 1));
+    const modelCallback = callbacks(test.sent.at(-1)).find((value) => value.endsWith(":i1"))!;
+    await test.bot.handleUpdate(callbackUpdate(modelCallback, 2));
+
+    expect(test.callbackAnswers.at(-1)).not.toMatchObject({ show_alert: true });
+    expect(test.session()?.clineProviderId).toBe(fallback.id);
+    expect(test.session()?.clineModel).toBe(test.catalog.clineModelsByProvider[fallback.id]![1]!.id);
   });
 });

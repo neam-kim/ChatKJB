@@ -2,7 +2,8 @@ import { Bot, InlineKeyboard } from "grammy";
 import {
   clineModelsForProvider,
   clineReasoningOptionsForModel,
-  normalizeClineReasoning
+  normalizeClineReasoning,
+  seedClineConnection
 } from "../../cline-sdk.js";
 import {
   agyModelLabel,
@@ -826,18 +827,11 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       await ctx.answerCallbackQuery({ text: "인증되지 않은 제공자입니다.", show_alert: true });
       return;
     }
-    const clineProvider = target === "cline" ? clineProviderOption(config.modelCatalog, null) : undefined;
-    const clineModel = target === "cline"
-      ? clineModelOption(config.modelCatalog, clineProvider?.id, clineProvider?.defaultModelId)
-      : undefined;
+    // Cline으로 되돌아올 때 직전에 고른 내부 제공자·모델을 버리지 않는다(유효하면 보존).
     const defaults = store.updateSessionDefaults({
       provider: target,
       ...(target === "cline"
-        ? {
-          clineProviderId: clineProvider?.id ?? "",
-          clineModel: clineModel?.id ?? "",
-          clineReasoning: normalizeClineReasoning(undefined, clineModel)
-        }
+        ? seedClineConnection(config.modelCatalog, store.getSessionDefaults())
         : {})
     });
     await ctx.answerCallbackQuery({ text: `${providerDisplayLabel(target)} 선택` });
@@ -1036,9 +1030,13 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       return;
     }
     const target = resolution.snapshot.scope.target;
-    const currentProviderId = target.kind === "session"
+    const storedProviderId = target.kind === "session"
       ? store.getSession(target.sessionId)?.clineProviderId
       : store.getSessionDefaults().clineProviderId;
+    // 목록은 clineProviderOption의 폴백(첫 제공자)으로 만들어졌으므로 가드도 같은 해석을
+    // 써야 한다. 원본 값을 그대로 비교하면 내부 제공자가 비어 있는 세션(/provider 전환 직후)이
+    // 영구히 모델을 고를 수 없게 된다.
+    const currentProviderId = clineProviderOption(config.modelCatalog, storedProviderId)?.id;
     if (!resolution.item?.providerId || currentProviderId !== resolution.item.providerId) {
       await ctx.answerCallbackQuery({ text: "Cline 내부 제공자가 변경되었습니다. 모델 목록을 다시 여세요.", show_alert: true });
       return;
@@ -1060,6 +1058,7 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
         return;
       }
       const changed = await sessions.updateClineConnection(session.id, {
+        clineProviderId: currentProviderId,
         clineModel: option.id,
         clineReasoning: normalizeClineReasoning(session.clineReasoning, option)
       });
@@ -1070,11 +1069,16 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
     } else {
       const current = store.getSessionDefaults();
       const clineReasoning = normalizeClineReasoning(current.clineReasoning, option);
-      store.updateSessionDefaults({ clineModel: option.id, clineReasoning });
+      store.updateSessionDefaults({ clineProviderId: currentProviderId, clineModel: option.id, clineReasoning });
       const pendingKey = pendingStartKey(ctx.from.id, ctx.callbackQuery.message?.message_thread_id);
       const pending = pendingStarts.get(pendingKey);
       if (pending && (pending.provider ?? config.defaultProvider) === "cline") {
-        pendingStarts.set(pendingKey, { ...pending, clineModel: option.id, clineReasoning });
+        pendingStarts.set(pendingKey, {
+          ...pending,
+          clineProviderId: currentProviderId,
+          clineModel: option.id,
+          clineReasoning
+        });
       }
     }
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });

@@ -30,6 +30,15 @@ type ClineCatalogSource =
   | Pick<ClineCatalog, "modelsByProvider">
   | { clineModelsByProvider: Record<string, ClineModelOption[]>; };
 
+/** 제공자 목록까지 필요한 호출부용. ClineCatalog와 ModelCatalog 두 표기를 모두 받는다. */
+type ClineProviderSource =
+  | Pick<ClineCatalog, "providers">
+  | { clineProviders: readonly ClineProviderOption[]; };
+
+function providerList(source: ClineProviderSource): readonly ClineProviderOption[] {
+  return "providers" in source ? source.providers : source.clineProviders;
+}
+
 export interface ClineCatalogDiscoveryOptions {
   /** 테스트 또는 별도 Cline profile을 위한 SDK data directory override. */
   dataDir?: string | undefined;
@@ -170,6 +179,40 @@ export function clineModelsForProvider(
 ): ClineModelOption[] {
   if (!providerId) return [];
   return modelMap(catalog)[providerId] ?? [];
+}
+
+export interface ClineConnectionSeed {
+  clineProviderId: string;
+  clineModel: string;
+  clineReasoning: ClineReasoningEffort;
+}
+
+/**
+ * 유효한 내부 연결이 이미 있으면 보존하고, 없을 때만 카탈로그 기본값으로 채운다.
+ * 카탈로그가 비어 있으면 빈 객체를 돌려 호출자가 기존 값을 건드리지 않게 한다.
+ */
+export function seedClineConnection(
+  catalog: ClineCatalogSource & ClineProviderSource,
+  current: {
+    clineProviderId?: string | null;
+    clineModel?: string | null;
+    clineReasoning?: string | null;
+  }
+): Partial<ClineConnectionSeed> {
+  const providers = providerList(catalog);
+  const kept = providers.find((item) => item.id === current.clineProviderId?.trim());
+  const provider = kept ?? providers[0];
+  if (!provider) return {};
+  const models = clineModelsForProvider(catalog, provider.id);
+  const model = (kept && models.find((item) => item.id === current.clineModel?.trim()))
+    ?? models.find((item) => item.id === provider.defaultModelId)
+    ?? models[0];
+  if (!model) return {};
+  return {
+    clineProviderId: provider.id,
+    clineModel: model.id,
+    clineReasoning: normalizeClineReasoning(current.clineReasoning, model)
+  };
 }
 
 export function clineReasoningOptionsForModel(

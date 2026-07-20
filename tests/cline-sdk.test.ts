@@ -54,7 +54,8 @@ import {
   discoverClineCatalog,
   hasReadyClineProvider,
   normalizeClineReasoning,
-  resolveClineConnection
+  resolveClineConnection,
+  seedClineConnection
 } from "../src/cline-sdk.js";
 
 describe("Cline SDK catalog adapter", () => {
@@ -163,5 +164,57 @@ describe("Cline reasoning normalization", () => {
   it("preserves explicit off and normalizes invalid values to high", () => {
     expect(normalizeClineReasoning(catalog, "cline", "reasoning", "off")).toBe("off");
     expect(normalizeClineReasoning(catalog, "cline", "reasoning", "invalid")).toBe("high");
+  });
+});
+
+describe("Cline connection seeding", () => {
+  const catalog = {
+    providers: [
+      { id: "first", label: "First", models: 2, defaultModelId: "first-plain" },
+      { id: "second", label: "Second", models: 1, defaultModelId: "second-reasoning" }
+    ],
+    modelsByProvider: {
+      first: [
+        { id: "first-plain", label: "First plain", supportsReasoning: false },
+        { id: "first-reasoning", label: "First reasoning", supportsReasoning: true }
+      ],
+      second: [{ id: "second-reasoning", label: "Second reasoning", supportsReasoning: true }]
+    }
+  };
+
+  it("fills an empty connection with the first provider's default model", () => {
+    expect(seedClineConnection(catalog, {})).toEqual({
+      clineProviderId: "first",
+      clineModel: "first-plain",
+      clineReasoning: "off"
+    });
+  });
+
+  it("preserves a valid existing provider, model, and reasoning", () => {
+    expect(seedClineConnection(catalog, {
+      clineProviderId: "second",
+      clineModel: "second-reasoning",
+      clineReasoning: "low"
+    })).toEqual({
+      clineProviderId: "second",
+      clineModel: "second-reasoning",
+      clineReasoning: "low"
+    });
+  });
+
+  it("repairs a stale provider id instead of keeping its model", () => {
+    expect(seedClineConnection(catalog, {
+      clineProviderId: "removed",
+      clineModel: "second-reasoning"
+    })).toEqual({
+      clineProviderId: "first",
+      clineModel: "first-plain",
+      clineReasoning: "off"
+    });
+  });
+
+  it("leaves the caller's values untouched when the catalog is empty", () => {
+    expect(seedClineConnection({ providers: [], modelsByProvider: {} }, { clineProviderId: "x" }))
+      .toEqual({});
   });
 });
