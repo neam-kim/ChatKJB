@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { describeKjbWikiPostCompileConfig } from "./bot/wiki-compile.js";
+import { discoverClineCatalog } from "./cline-sdk.js";
 import { CLAUDE_OAUTH_TOKEN_PATTERN, type AppConfig } from "./config.js";
 import { buildCodexEnvironment, requireCodexSubscriptionAuth } from "./session-manager.js";
 import { StateStore } from "./store.js";
@@ -248,6 +249,19 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
         ["--version"]
       );
       return [formatAgentCliVersionLine("Grok CLI", deps.config.grokExecutable, version)];
+    }),
+    // Cline은 외부 CLI를 매 턴 스폰하지 않고 @cline/sdk를 봇 안에서 쓰므로, CLI 버전 대신
+    // 실제로 실행 가능한지를 좌우하는 provider 카탈로그 탐색 결과를 점검한다.
+    check("Cline", 8000, async () => {
+      const catalog = await discoverClineCatalog();
+      if (catalog.providers.length === 0) {
+        return ["❌ Cline: 사용 가능한 내부 제공자가 없습니다 (cline 로그인·provider 설정 확인)"];
+      }
+      const models = catalog.providers.reduce(
+        (sum, provider) => sum + (catalog.modelsByProvider[provider.id]?.length ?? 0),
+        0
+      );
+      return [`✅ Cline: 내부 제공자 ${catalog.providers.length}개 · 모델 ${models}개`];
     }),
     check("launchd", 3000, async () => {
       const uid = process.getuid?.();

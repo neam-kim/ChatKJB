@@ -1,5 +1,5 @@
 export const BOT_COMMANDS: ReadonlyArray<{ command: string; description: string; }> = [
-  { command: "new", description: "새 작업 시작 (Claude/Codex/Antigravity/Grok)" },
+  { command: "new", description: "새 작업 시작 (Claude/Codex/Antigravity/Grok/Cline)" },
   { command: "catbot", description: "프로젝트 카탈로그 즉시 갱신" },
   { command: "start", description: "도움말과 기본값 패널 표시" },
   { command: "firstp", description: "새 세션 기본 제공자 선택" },
@@ -20,7 +20,7 @@ export const BOT_COMMANDS: ReadonlyArray<{ command: string; description: string;
   { command: "ultragoal", description: "영속 목표 장부로 구현·검증 완료" },
   { command: "restop", description: "한도 회복 후 자동 재개 취소" },
   { command: "resume", description: "직전 작업을 기존 문맥에서 재개" },
-  { command: "route", description: "작업에 적합한 제공자(Claude/Codex/Antigravity/Grok) 추천" },
+  { command: "route", description: "작업에 적합한 제공자(Claude/Codex/Antigravity/Grok/Cline) 추천" },
   { command: "synth", description: "여러 제공자 답을 비교·심사 후 장점 통합" },
   { command: "query", description: "LLM-Wiki에 질문 (인용 포함 답변)" },
   { command: "compile", description: "LLM-Wiki inbox를 자동 컴파일" },

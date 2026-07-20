@@ -271,6 +271,7 @@ function modelForSession(session: SessionRecord): string | null {
   if (session.provider === "codex") return session.codexModel;
   if (session.provider === "agy") return session.agyModel;
   if (session.provider === "grok") return session.grokModel ?? null;
+  if (session.provider === "cline") return session.clineModel ?? null;
   return session.model;
 }
 
@@ -278,6 +279,7 @@ function providerLabel(provider: ProviderKind | null): string {
   if (provider === "codex") return "Codex";
   if (provider === "agy") return "Antigravity";
   if (provider === "grok") return "Grok";
+  if (provider === "cline") return "Cline";
   if (provider === "claude") return "Claude";
   return "Agent";
 }

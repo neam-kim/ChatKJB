@@ -97,7 +97,7 @@ export function classifyTaskType(prompt: string): TaskType {
 // 파일이 없거나 형식이 어긋나면 빈 맵을 돌려준다(규칙만으로 동작).
 export function parseStrengthHints(markdown: string): Partial<Record<TaskType, ProviderKind>> {
   const hints: Partial<Record<TaskType, ProviderKind>> = {};
-  const lineRe = /작업유형\s+`([a-z]+)`\s*→\s*관측상\s+(claude|codex|agy)/u;
+  const lineRe = /작업유형\s+`([a-z]+)`\s*→\s*관측상\s+(claude|codex|agy|grok|cline)/u;
   for (const line of String(markdown || "").split("\n")) {
     const m = line.match(lineRe);
     if (!m) continue;
@@ -124,7 +124,7 @@ export function loadStrengthHints(path: string): Partial<Record<TaskType, Provid
 export function routeProvider(
   prompt: string,
   hints: Partial<Record<TaskType, ProviderKind>> = {},
-  available: readonly ProviderKind[] = ["claude", "codex", "agy", "grok"]
+  available: readonly ProviderKind[] = ["claude", "codex", "agy", "grok", "cline"]
 ): RouteDecision {
   const taskType = classifyTaskType(prompt);
   const hinted = hints[taskType];
@@ -144,8 +144,8 @@ export function routeProvider(
     provider = ruleProvider;
     reason = `작업유형 '${taskType}' — 기본 규칙상 ${ruleProvider} 추천.`;
   } else {
-    // 폴백: 인증된 제공자 중 안정적인 기본 순서(claude→codex→agy→grok).
-    const fallback = (["claude", "codex", "agy", "grok"] as const).find((p) => available.includes(p));
+    // 폴백: 인증된 제공자 중 안정적인 기본 순서(claude→codex→agy→grok→cline).
+    const fallback = (["claude", "codex", "agy", "grok", "cline"] as const).find((p) => available.includes(p));
     provider = fallback ?? "claude";
     reason = `작업유형 '${taskType}' — 권장 제공자를 쓸 수 없어 ${provider}로 폴백.`;
   }

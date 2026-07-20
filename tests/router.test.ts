@@ -32,9 +32,10 @@ describe("강점 힌트 파싱", () => {
       "",
       "- 작업유형 `coding` → 관측상 codex가 가장 많이 담당 (3건).",
       "- 작업유형 `multimodal` → 관측상 agy가 가장 많이 담당 (2건).",
+      "- 작업유형 `research` → 관측상 grok가 가장 많이 담당 (4건).",
       "- 잡음 라인",
     ].join("\n");
-    expect(parseStrengthHints(md)).toEqual({ coding: "codex", multimodal: "agy" });
+    expect(parseStrengthHints(md)).toEqual({ coding: "codex", multimodal: "agy", research: "grok" });
   });
 
   it("형식이 어긋나거나 빈 입력이면 빈 맵을 돌려준다", () => {
@@ -102,5 +103,20 @@ describe("LLM-Wiki 경로", () => {
     expect(
       agentStrengthsPath({ WIKI_VAULT: "/tmp/wiki", STRENGTHS_OUT: "/tmp/out.md" } as NodeJS.ProcessEnv)
     ).toBe("/tmp/out.md");
+  });
+});
+
+describe("Cline routing coverage", () => {
+  it("parses cline strength hints", () => {
+    expect(parseStrengthHints("- 작업유형 `coding` → 관측상 cline가 가장 많이 담당 (3건)."))
+      .toEqual({ coding: "cline" });
+  });
+
+  it("falls back to cline when it is the only authenticated provider", () => {
+    expect(routeProvider("코드 수정해줘", {}, ["cline"]).provider).toBe("cline");
+  });
+
+  it("keeps cline last in the fallback order", () => {
+    expect(routeProvider("코드 수정해줘", {}, ["grok", "cline"]).provider).toBe("grok");
   });
 });

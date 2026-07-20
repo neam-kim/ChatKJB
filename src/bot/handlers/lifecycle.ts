@@ -6,7 +6,7 @@ import { fetchGrokLiveUsage } from "../../grok-live-usage.js";
 import { collectLocalTokenUsage } from "../../local-token-usage.js";
 import { appLocale, appTimeZone } from "../../localization.js";
 import { safeErrorMessage } from "../../telegram-transport.js";
-import { formatAgyAccountUsage, formatAgyUsage, formatCodexAccountUsage, formatGrokUsage, formatLocalTokenUsage, formatUsageSnapshot, parseStoredAgyUsage } from "../../usage.js";
+import { formatAgyAccountUsage, formatAgyUsage, formatClineAccountUsage, formatClineUsage, formatCodexAccountUsage, formatGrokUsage, formatLocalTokenUsage, formatUsageSnapshot, parseStoredAgyUsage, parseStoredClineUsage } from "../../usage.js";
 import type { BotDeps } from "../deps.js";
 import {
   formatDuration,
@@ -44,7 +44,7 @@ export function registerLifecycleHandlers(bot: Bot, deps: BotDeps): void {
   bot.command("start", async (ctx) => {
     const defaults = store.getSessionDefaults();
     await ctx.reply(
-      "Claude/Codex/Antigravity/Grok 세션 오케스트레이터\n\n/new 새 작업\n/firstp 인증된 기본 제공자 선택\n/reserve 예약 작업\n/cancel 예약 취소\n/status 현재 작동 상태\n/doctor 환경 진단\n/sessions 최근 세션\n/usage 한도 사용량\n/compile LLM-Wiki 자동 컴파일\n/dpbot 완료된 세션 transcript 수동 덤프\n토픽 안에서 /deepinterview, /ralplan, /ultragoal, /shotgun, /steer, /next, /goal, /restop, /stop, /reset, /fork, /compact, /memory, /mode, /provider, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론·작업량·토큰)을 클릭만으로 바꿀 수 있습니다.",
+      "Claude/Codex/Antigravity/Grok/Cline 세션 오케스트레이터\n\n/new 새 작업\n/firstp 인증된 기본 제공자 선택\n/reserve 예약 작업\n/cancel 예약 취소\n/status 현재 작동 상태\n/doctor 환경 진단\n/sessions 최근 세션\n/usage 한도 사용량\n/compile LLM-Wiki 자동 컴파일\n/dpbot 완료된 세션 transcript 수동 덤프\n토픽 안에서 /deepinterview, /ralplan, /ultragoal, /shotgun, /steer, /next, /goal, /restop, /stop, /reset, /fork, /compact, /memory, /mode, /provider, /model, /thinking, /power, /lean, /diff, /upload, /delete 사용\n\n아래 기본값 패널 버튼으로 새 세션 기본값(제공자·모델·thinking/추론·작업량·토큰)을 클릭만으로 바꿀 수 있습니다.",
       { reply_markup: defaultPanelKeyboard(defaults) }
     );
   });
@@ -295,6 +295,17 @@ export function registerLifecycleHandlers(bot: Bot, deps: BotDeps): void {
       }
       return;
     }
+    // Cline도 agy와 같이 세션 단위 누적만 있으므로 해당 토픽 안에서만 세션 값을 보여준다.
+    if (topicSession?.provider === "cline") {
+      const stored = parseStoredClineUsage(topicSession.clineUsage);
+      await ctx.reply(
+        stored
+          ? formatClineUsage(stored) + "\n원천: Cline SDK 세션 누적 측정값 (구독 한도 API 미제공)"
+          : "Cline 사용량: 측정 전\n"
+            + "(이 세션에서 아직 턴이 실행되지 않았습니다. 첫 턴 완료 후 다시 확인하세요.)"
+      );
+      return;
+    }
     // 토픽 밖 전역 호출에서는 agy 토큰 사용량(대화 단위)을 임의 세션으로 보여주지 않고,
     // 기존대로 Claude/Codex 한도(rate-limit) 스냅샷을 보여준다. agy 네이티브 토큰은
     // 해당 agy 토픽 안에서 /usage를 호출할 때만 표시한다.
@@ -304,7 +315,10 @@ export function registerLifecycleHandlers(bot: Bot, deps: BotDeps): void {
     // Claude/Codex 외에 agy·grok 사용량도 함께 표시한다. agy는 세션 단위 저장 측정값을 합산하고,
     // grok은 grok.com 과금 API에서 크레딧 한도를 실시간 조회한다.
     const grokUsage = await fetchGrokLiveUsage({ grokExecutable: config.grokExecutable });
-    const agyGrokText = `\n\n${formatAgyAccountUsage(store.listSessions(200))}\n\n${formatGrokUsage(grokUsage)}`;
+    const recentSessions = store.listSessions(200);
+    const agyGrokText = `\n\n${formatAgyAccountUsage(recentSessions)}`
+      + `\n\n${formatGrokUsage(grokUsage)}`
+      + `\n\n${formatClineAccountUsage(recentSessions)}`;
     const liveWithSnapshots = liveResults.filter((result) => result.snapshot);
     if (liveWithSnapshots.length > 0) {
       const codexSnapshots = await sessions.fetchCurrentCodexUsageSnapshots(

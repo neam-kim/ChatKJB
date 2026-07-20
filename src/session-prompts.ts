@@ -361,9 +361,10 @@ export function loadProjectInstructions(cwd: string): string {
 }
 
 /**
- * Codex/agy/Grok은 project AGENTS.md를 native harness가 읽으므로 ChatKJB는 CLAUDE.md가
- * 별도 내용일 때만 보충한다. Claude SDK는 project setting source를 의도적으로 끈 상태라
- * 기존처럼 두 파일을 모두 명시적으로 전달한다.
+ * Codex/agy/Grok/Cline은 project AGENTS.md를 native harness가 읽으므로 ChatKJB는 CLAUDE.md가
+ * 별도 내용일 때만 보충한다(Cline도 resource-sync가 AGENTS.md를 써 두는 쪽에 해당해 아래
+ * 공통 분기를 탄다). Claude SDK는 project setting source를 의도적으로 끈 상태라 기존처럼
+ * 두 파일을 모두 명시적으로 전달한다.
  */
 export function loadSupplementalProjectInstructions(
   cwd: string,

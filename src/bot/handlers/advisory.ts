@@ -58,7 +58,7 @@ export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
     if (!arg) {
       await ctx.reply(
         "작업 설명과 함께 사용하세요.\n예: /route 이 PDF를 요약해줘\n"
-        + "작업유형과 이력 기반 강점 사전을 보고 인증된 Claude·Codex·Antigravity·Grok 중 적합한 제공자를 추천합니다."
+        + "작업유형과 이력 기반 강점 사전을 보고 인증된 Claude·Codex·Antigravity·Grok·Cline 중 적합한 제공자를 추천합니다."
       );
       return;
     }
@@ -76,7 +76,7 @@ export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
     );
   });
 
-  // /synth <작업>: 병렬 종합. 인증된 Claude·Codex·Antigravity·Grok을 읽기 전용으로 동시에 시키고,
+  // /synth <작업>: 병렬 종합. 인증된 Claude·Codex·Antigravity·Grok·Cline을 읽기 전용으로 동시에 시키고,
   // 서로 비판한 뒤 원 모델들이 보완 답을 낸다. 동적으로 감지한 최신 Claude Fable 심사자가 보완 후보를
   // 승점제 리그 방식으로 비교해 최우수 답을 고른 뒤 승자가 통합해 최종답을 낸다.
   // 읽기·조언 작업 전용(파일 수정 안 함). 토큰·시간이 N배인 비싼 경로.
@@ -92,13 +92,13 @@ export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
     if (!arg) {
       await ctx.reply(
         "작업 설명과 함께 사용하세요.\n예: /synth 이 설계의 위험 요소를 분석해줘\n"
-        + "인증된 Claude·Codex·Antigravity·Grok을 읽기 전용으로 실행하고 상호 비판 → 원 모델별 보완 → 승점제 리그 심사 → 승자 통합 순서로 답합니다. "
+        + "인증된 Claude·Codex·Antigravity·Grok·Cline을 읽기 전용으로 실행하고 상호 비판 → 원 모델별 보완 → 승점제 리그 심사 → 승자 통합 순서로 답합니다. "
         + "읽기·조언 작업 전용이며 토큰·시간이 더 듭니다."
       );
       return;
     }
     await ctx.reply(
-      "병렬 종합을 시작합니다. 인증된 Claude·Codex·Antigravity·Grok 원답 → 상호 비판 → 원 모델별 보완 → 최신 Claude Fable 심사 → 통합. "
+      "병렬 종합을 시작합니다. 인증된 Claude·Codex·Antigravity·Grok·Cline 원답 → 상호 비판 → 원 모델별 보완 → 최신 Claude Fable 심사 → 통합. "
       + "잠시 걸립니다."
     );
     try {

@@ -250,6 +250,88 @@ export function formatAgyAccountUsage(sessions: SessionRecord[]): string {
     + "\n원천: Antigravity CLI 이전 API 측정값 (CLI 백엔드는 토큰 사용량 미제공)";
 }
 
+/** Cline SDK가 세션마다 누적해 주는 토큰·비용. 필드는 SDK가 주는 만큼만 채워진다. */
+export interface ClineUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  totalCost: number | null;
+}
+
+function clineNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * JSON 문자열로 저장된 clineUsage를 파싱한다. SDK는 `{usage, aggregateUsage}` 형태로 주며
+ * 누적값은 aggregateUsage 쪽이다. 둘 중 있는 것을 쓰고, 실패하면 null.
+ */
+export function parseStoredClineUsage(value: string | null | undefined): ClineUsage | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const source = (parsed["aggregateUsage"] ?? parsed["usage"] ?? parsed) as Record<string, unknown>;
+    const usage: ClineUsage = {
+      inputTokens: clineNumber(source["inputTokens"]),
+      outputTokens: clineNumber(source["outputTokens"]),
+      cacheReadTokens: clineNumber(source["cacheReadTokens"]),
+      cacheWriteTokens: clineNumber(source["cacheWriteTokens"]),
+      totalCost: clineNumber(source["totalCost"])
+    };
+    return Object.values(usage).some((field) => field !== null) ? usage : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Cline 누적 토큰·비용을 텔레그램 출력용 문자열로 포맷한다. */
+export function formatClineUsage(usage: ClineUsage): string {
+  const tok = (count: number | null): string =>
+    count !== null ? count.toLocaleString(appLocale()) : "-";
+  const lines = ["Cline 누적 사용량"];
+  // inputTokens는 캐시 read/write를 이미 포함한 전체 프롬프트 크기다(@cline/core 규약).
+  // 캐시 항목을 더하는 것으로 오해하지 않도록 포함 관계를 라벨에 드러낸다.
+  lines.push(`  입력(캐시 포함): ${tok(usage.inputTokens)}`);
+  if (usage.cacheReadTokens !== null) lines.push(`    ├ 캐시 읽기: ${tok(usage.cacheReadTokens)}`);
+  if (usage.cacheWriteTokens !== null) lines.push(`    └ 캐시 쓰기: ${tok(usage.cacheWriteTokens)}`);
+  lines.push(`  출력: ${tok(usage.outputTokens)}`);
+  if (usage.totalCost !== null) lines.push(`  비용: $${usage.totalCost.toFixed(4)}`);
+  return lines.join("\n");
+}
+
+function sumClineUsage(list: ClineUsage[]): ClineUsage {
+  const add = (key: keyof ClineUsage): number | null => {
+    const values = list.map((usage) => usage[key]).filter((value): value is number => value !== null);
+    return values.length > 0 ? values.reduce((acc, value) => acc + value, 0) : null;
+  };
+  return {
+    inputTokens: add("inputTokens"),
+    outputTokens: add("outputTokens"),
+    cacheReadTokens: add("cacheReadTokens"),
+    cacheWriteTokens: add("cacheWriteTokens"),
+    totalCost: add("totalCost")
+  };
+}
+
+/**
+ * 전역 /usage용 Cline 요약. Cline은 구독 한도 조회 API가 없고 SDK가 세션 단위 누적만
+ * 주므로, agy와 같은 방식으로 저장값이 있는 세션들을 합산해 보여 준다.
+ */
+export function formatClineAccountUsage(sessions: SessionRecord[]): string {
+  const measured = sessions
+    .filter((session) => session.provider === "cline")
+    .map((session) => parseStoredClineUsage(session.clineUsage))
+    .filter((usage): usage is ClineUsage => usage !== null);
+  if (measured.length === 0) {
+    return "Cline 사용량: 측정된 세션이 없습니다.\n"
+      + "(Cline 토픽에서 턴을 실행하면 누적 토큰이 기록됩니다.)";
+  }
+  return `Cline 사용량 · ${measured.length}개 세션 합계\n`
+    + formatClineUsage(sumClineUsage(measured))
+    + "\n원천: Cline SDK 세션 누적 측정값 (구독 한도 API 미제공)";
+}
+
 /**
  * 전역 /usage용 Grok 요약. grok CLI에는 usage/quota 서브커맨드가 없지만, CLI 자신이 크레딧
  * 잔량을 읽을 때 쓰는 grok.com 과금 API를 같은 자격증명으로 조회해 한도를 보여 준다.

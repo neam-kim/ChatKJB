@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { SessionRecord } from "../src/types.js";
 import {
   formatAgyAccountUsage,
+  formatClineAccountUsage,
+  parseStoredClineUsage,
   formatCodexAccountUsage,
   formatGrokUsage,
   formatUsageSnapshot,
@@ -282,5 +284,45 @@ describe("agy/grok usage in global /usage", () => {
     const text = formatGrokUsage({ snapshot: null, error: "인증 만료 (`grok login` 필요)" });
     expect(text).toContain("조회 실패");
     expect(text).toContain("grok login");
+  });
+});
+
+describe("Cline usage", () => {
+  const stored = JSON.stringify({
+    usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4, totalCost: 5 },
+    aggregateUsage: {
+      inputTokens: 304792, outputTokens: 9383,
+      cacheReadTokens: 269568, cacheWriteTokens: 0, totalCost: 0.32728
+    }
+  });
+  const clineSession = (clineUsage: string | null): SessionRecord =>
+    ({ provider: "cline", clineUsage }) as unknown as SessionRecord;
+
+  it("prefers aggregateUsage over the per-turn usage block", () => {
+    expect(parseStoredClineUsage(stored)).toEqual({
+      inputTokens: 304792, outputTokens: 9383,
+      cacheReadTokens: 269568, cacheWriteTokens: 0, totalCost: 0.32728
+    });
+  });
+
+  it("returns null for missing, malformed, or empty usage", () => {
+    expect(parseStoredClineUsage(null)).toBeNull();
+    expect(parseStoredClineUsage("not json")).toBeNull();
+    expect(parseStoredClineUsage("{}")).toBeNull();
+  });
+
+  it("summarizes only cline sessions and marks cache as included in input", () => {
+    const text = formatClineAccountUsage([
+      clineSession(stored),
+      clineSession(null),
+      ({ provider: "agy", agyUsage: null }) as unknown as SessionRecord
+    ]);
+    expect(text).toContain("1개 세션 합계");
+    expect(text).toContain("입력(캐시 포함)");
+    expect(text).toContain("$0.3273");
+  });
+
+  it("explains the empty case instead of printing zeros", () => {
+    expect(formatClineAccountUsage([])).toContain("측정된 세션이 없습니다");
   });
 });

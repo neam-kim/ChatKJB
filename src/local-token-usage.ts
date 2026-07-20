@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SessionRecord } from "./types.js";
-import { parseStoredAgyUsage, parseStoredGrokUsage } from "./usage.js";
+import { parseStoredAgyUsage, parseStoredClineUsage, parseStoredGrokUsage } from "./usage.js";
 
 /**
  * 이 맥미니에서 각 에이전트가 지금까지 쓴 누적 토큰을 로컬 기록만으로 집계한다(/ustoken).
@@ -15,6 +15,7 @@ import { parseStoredAgyUsage, parseStoredGrokUsage } from "./usage.js";
  *   - agy    : CLI가 사용량을 디스크에 남기지 않아 봇 DB(sessions.agy_usage)의 측정값을 합산한다.
  *   - grok   : 위와 같은 이유로 봇 DB(sessions.grok_usage)에 턴마다 누적해 둔 값을 합산한다.
  *              grok CLI 0.2.99 미만은 사용량을 주지 않으므로 그 이전 실행분은 잡히지 않는다.
+ *   - Cline  : SDK가 세션 누적을 주므로 봇 DB(sessions.cline_usage)의 저장값을 합산한다.
  */
 export interface ProviderTokenUsage {
   provider: string;
@@ -197,13 +198,35 @@ function readGrokUsage(sessions: SessionRecord[]): ProviderTokenUsage {
   };
 }
 
+function readClineUsage(sessions: SessionRecord[]): ProviderTokenUsage {
+  const acc = { ...EMPTY };
+  for (const session of sessions) {
+    const usage = parseStoredClineUsage(session.clineUsage);
+    if (!usage) continue;
+    // @cline/core services/usage.d.ts: inputTokens는 캐시 read/write를 이미 포함한 전체
+    // 프롬프트 크기다("Do not add cache fields back on top"). Codex·agy와 같은 보정을 쓴다.
+    const cached = count(usage.cacheReadTokens) + count(usage.cacheWriteTokens);
+    const input = count(usage.inputTokens);
+    acc.units += 1;
+    acc.inputTokens += Math.max(0, input - cached);
+    acc.cachedTokens += cached;
+    acc.outputTokens += count(usage.outputTokens);
+    acc.totalTokens += input + count(usage.outputTokens);
+  }
+  return {
+    provider: "Cline",
+    ...acc,
+    caveat: "봇을 통한 실행만 집계 (SDK가 사용량을 디스크에 남기지 않음)"
+  };
+}
+
 export async function collectLocalTokenUsage(
   sessions: SessionRecord[],
   home = homedir()
 ): Promise<LocalTokenUsageReport> {
   // 디스크 스캔 두 건은 서로 독립이라 함께 돌린다.
   const [claude, codex] = await Promise.all([readClaudeUsage(home), readCodexUsage(home)]);
-  const providers = [claude, codex, readAgyUsage(sessions), readGrokUsage(sessions)];
+  const providers = [claude, codex, readAgyUsage(sessions), readGrokUsage(sessions), readClineUsage(sessions)];
   return {
     capturedAt: Date.now(),
     providers,

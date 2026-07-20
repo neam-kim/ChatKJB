@@ -16,7 +16,7 @@ export function registerShotgunHandlers(bot: Bot, deps: BotDeps): void {
     const arg = ctx.match.trim();
     if (!session) {
       await ctx.reply(
-        "세션 토픽 안에서 사용하세요. `/shotgun`은 현재 Claude·Codex·Antigravity·Grok 작업을 사과 후 재검토·수정하도록 지시합니다."
+        "세션 토픽 안에서 사용하세요. `/shotgun`은 현재 Claude·Codex·Antigravity·Grok·Cline 작업을 사과 후 재검토·수정하도록 지시합니다."
       );
       return;
     }

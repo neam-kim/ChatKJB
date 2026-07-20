@@ -97,9 +97,32 @@ describe("collectLocalTokenUsage", () => {
     expect(report.totalTokens).toBe(260);
   });
 
+  it("counts cline cache reads inside inputTokens rather than adding them on top", async () => {
+    // @cline/core 규약: inputTokens는 캐시 read/write를 이미 포함한다.
+    const report = await collectLocalTokenUsage([
+      session({
+        provider: "cline",
+        clineUsage: JSON.stringify({
+          aggregateUsage: {
+            inputTokens: 100, outputTokens: 20,
+            cacheReadTokens: 70, cacheWriteTokens: 10, totalCost: 0.5
+          }
+        })
+      })
+    ], home);
+
+    const cline = report.providers.find((p) => p.provider === "Cline")!;
+    expect(cline.units).toBe(1);
+    expect(cline.cachedTokens).toBe(80);
+    expect(cline.inputTokens).toBe(20);
+    expect(cline.outputTokens).toBe(20);
+    expect(cline.totalTokens).toBe(120);
+  });
+
   it("returns zeroed providers rather than throwing when nothing is on disk", async () => {
     const report = await collectLocalTokenUsage([], home);
     expect(report.totalTokens).toBe(0);
-    expect(report.providers.map((p) => p.provider)).toEqual(["Claude", "Codex", "agy", "Grok"]);
+    expect(report.providers.map((p) => p.provider))
+      .toEqual(["Claude", "Codex", "agy", "Grok", "Cline"]);
   });
 });
