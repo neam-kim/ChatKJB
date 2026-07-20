@@ -1617,13 +1617,15 @@ describe("/compile command", () => {
     expect(texts.some((text) => String(text).includes("드라이브를 선택하세요"))).toBe(true);
   });
 
-  it("delivers a completion notice under Telegram's length limit for huge provider output", async () => {
+  it("delivers huge completion output as sequential Telegram messages without discarding content", async () => {
     const { bot, config, sessions, calls } = botSetup();
     mkdirSync(join(config.projects[0]!.cwd, ".claude", "commands"), { recursive: true });
     writeFileSync(join(config.projects[0]!.cwd, ".claude", "commands", "compile.md"), "# compile\n");
     process.env.WIKI_VAULT = config.projects[0]!.cwd;
     process.env.KJB_WIKI_POST_COMPILE_SCRIPT = "";
-    const huge = Array.from({ length: 200 }, (_, i) => `progress-${i} ${"x".repeat(500)}`).join("\n");
+    // summarizeCompileOutput keeps the last 8 lines; make those lines themselves huge so
+    // the completion notice must be split across multiple Telegram messages.
+    const huge = Array.from({ length: 8 }, (_, i) => `progress-${i} ${"x".repeat(1200)}`).join("\n");
     vi.spyOn(sessions, "runOneOffTask").mockResolvedValue(huge);
 
     await bot.handleUpdate(compileCommand("/compile"));
@@ -1634,24 +1636,29 @@ describe("/compile command", () => {
         .map((call) => String(call.payload.text));
       expect(texts.some((text) => text.includes("LLM-Wiki compile 완료"))).toBe(true);
     });
-    const completion = calls
+    const completionTexts = calls
       .filter((call) => call.method === "sendMessage")
       .map((call) => String(call.payload.text))
-      .find((text) => text.includes("LLM-Wiki compile 완료"));
-    expect(completion).toBeDefined();
-    expect(completion!.length).toBeLessThanOrEqual(4096);
+      .filter((text) => text.includes("LLM-Wiki compile 완료") || text.includes("progress-"));
+    expect(completionTexts.every((text) => text.length <= 4096)).toBe(true);
+    // 제목 조각 + 본문 조각이 순서대로 전달되고, 마지막 진행 줄이 버려지지 않는다.
+    expect(completionTexts.some((text) => text.includes("LLM-Wiki compile 완료"))).toBe(true);
+    expect(completionTexts.some((text) => text.includes("progress-7"))).toBe(true);
+    expect(completionTexts.length).toBeGreaterThan(1);
   });
 
-  it("falls back to a short completion notice when Telegram rejects a long body", async () => {
+  it("re-splits a chunk when Telegram still rejects it as too long", async () => {
     const { bot, config, sessions, calls } = botSetup({
+      // 첫 완료 통지 조각만 거절해 재분할 경로를 강제한다.
       failSendMessageWhen: (text) =>
-        text.includes("compile 완료") && !text.includes("생략되었습니다")
+        text.includes("compile 완료") && text.includes("progress-0") && text.includes("progress-7")
     });
     mkdirSync(join(config.projects[0]!.cwd, ".claude", "commands"), { recursive: true });
     writeFileSync(join(config.projects[0]!.cwd, ".claude", "commands", "compile.md"), "# compile\n");
     process.env.WIKI_VAULT = config.projects[0]!.cwd;
     process.env.KJB_WIKI_POST_COMPILE_SCRIPT = "";
-    vi.spyOn(sessions, "runOneOffTask").mockResolvedValue("compile ok\n".repeat(20));
+    const body = Array.from({ length: 8 }, (_, i) => `progress-${i} ok`).join("\n");
+    vi.spyOn(sessions, "runOneOffTask").mockResolvedValue(body);
 
     await bot.handleUpdate(compileCommand("/compile"));
 
@@ -1659,18 +1666,16 @@ describe("/compile command", () => {
       const texts = calls
         .filter((call) => call.method === "sendMessage")
         .map((call) => String(call.payload.text));
-      expect(texts.some((text) => text.includes("생략되었습니다"))).toBe(true);
+      expect(texts.some((text) => text.includes("progress-7"))).toBe(true);
     });
-    const fallback = calls
+    const completionRelated = calls
       .filter((call) => call.method === "sendMessage")
       .map((call) => String(call.payload.text))
-      .find((text) => text.includes("생략되었습니다"));
-    expect(fallback!.length).toBeLessThanOrEqual(4096);
-    // 거절된 본문 시도 + 짧은 폴백 성공이 calls에 모두 남는다.
-    expect(
-      calls.filter((call) => call.method === "sendMessage"
-        && String(call.payload.text).includes("compile 완료")).length
-    ).toBeGreaterThanOrEqual(2);
+      .filter((text) => text.includes("compile 완료") || text.includes("progress-"));
+    // 거절된 전체 본문 시도 + 재분할된 조각들이 남고, 생략 문구로 내용을 버리지 않는다.
+    expect(completionRelated.some((text) => text.includes("생략되었습니다"))).toBe(false);
+    expect(completionRelated.some((text) => text.includes("progress-0"))).toBe(true);
+    expect(completionRelated.some((text) => text.includes("progress-7"))).toBe(true);
   });
 });
 

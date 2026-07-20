@@ -8,8 +8,6 @@ const POST_COMPILE_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Telegram Bot API sendMessage 본문 상한(UTF-16 코드 유닛 기준, JS string length와 동일). */
 export const TELEGRAM_TEXT_LIMIT = 4096;
-/** 본문+제목 여유를 두고 잘릴 때 쓰는 안전 상한. */
-export const COMPILE_NOTIFY_BODY_LIMIT = 1200;
 /** 재시도해도 의미 없는 클라이언트 오류(길이 초과·잘못된 요청 등). */
 const NON_RETRYABLE_TELEGRAM_CODES = new Set([400, 401, 403, 404]);
 
@@ -33,12 +31,40 @@ export async function runConfiguredKjbWikiPostCompile(): Promise<string | undefi
   return [stdout, stderr].filter(Boolean).join("\n").trim();
 }
 
-/** Telegram 한 메시지 한도 안으로 잘라 완료 통지가 길이 초과로 유실되지 않게 한다. */
-export function fitTelegramText(text: string, limit = TELEGRAM_TEXT_LIMIT): string {
+/**
+ * Telegram 한 메시지 한도 안에서 순차 전송할 조각으로 나눈다.
+ * 가능하면 줄 경계 → 공백 경계에서 자르고, 불가피하면 하드 컷한다. 내용은 버리지 않는다.
+ */
+export function splitTelegramText(text: string, limit = TELEGRAM_TEXT_LIMIT): string[] {
   const value = String(text ?? "");
-  if (value.length <= limit) return value;
-  if (limit <= 3) return value.slice(0, limit);
-  return `${value.slice(0, limit - 3)}...`;
+  if (value.length === 0) return [""];
+  if (limit < 1) throw new Error("Telegram text limit must be at least 1");
+  if (value.length <= limit) return [value];
+
+  const chunks: string[] = [];
+  let remaining = value;
+  const minSoftCut = Math.max(1, Math.floor(limit * 0.5));
+
+  while (remaining.length > limit) {
+    // 경계 문자는 앞 조각에 포함해 join("")으로 원문을 그대로 복원 가능하게 한다.
+    let cut = remaining.lastIndexOf("\n", limit - 1);
+    if (cut >= minSoftCut) {
+      cut += 1;
+    } else {
+      cut = remaining.lastIndexOf(" ", limit - 1);
+      if (cut >= minSoftCut) {
+        cut += 1;
+      } else {
+        cut = limit;
+      }
+    }
+    chunks.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut);
+  }
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+  return chunks.length > 0 ? chunks : [""];
 }
 
 /**
@@ -64,12 +90,12 @@ export function isTransientTelegramError(error: unknown): boolean {
   return true;
 }
 
-/** 제목 + 선택 요약본을 Telegram 한도 안에서 조합한다. */
+/** 제목 + 선택 요약본을 조합한다. 길이 초과 시 호출 측에서 분할 전송한다. */
 export function buildCompileNotifyText(title: string, detail = ""): string {
   const head = String(title ?? "").trim() || "LLM-Wiki compile";
   const body = detail.trim();
-  if (!body) return fitTelegramText(head);
-  return fitTelegramText(`${head}\n\n${body}`);
+  if (!body) return head;
+  return `${head}\n\n${body}`;
 }
 
 export function summarizeCompileOutput(text: string): string {
@@ -80,11 +106,7 @@ export function summarizeCompileOutput(text: string): string {
     .filter(Boolean)
     .slice(-8)
     .join("\n");
-  if (!summary) return "";
-  // 마지막 줄(최신 요약)을 우선 보존한다. 앞에서 자르면 완료 요약이 잘린다.
-  if (summary.length <= COMPILE_NOTIFY_BODY_LIMIT) return summary;
-  const keep = COMPILE_NOTIFY_BODY_LIMIT - 3;
-  return `...${summary.slice(summary.length - keep)}`;
+  return summary;
 }
 
 export function buildWikiCompilePrompt(vault: string, arg: string): string {

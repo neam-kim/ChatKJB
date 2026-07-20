@@ -16,9 +16,9 @@ import {
 import {
   buildCompileNotifyText,
   buildWikiCompilePrompt,
-  fitTelegramText,
   isTransientTelegramError,
   runConfiguredKjbWikiPostCompile,
+  splitTelegramText,
   summarizeCompileOutput
 } from "../wiki-compile.js";
 
@@ -180,39 +180,37 @@ export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
     // fire-and-forget 체인에서 unhandledRejection으로 번져 전역 가드가 울린다. 통지는 항상
     // 삼켜서, 컴파일 자체의 성패와 무관하게 프로미스 체인이 조용히 안정 종료되게 한다.
     // compile은 수십 분이 걸리므로 완료 통지를 놓치면 사용자는 결과를 영영 알 수 없다.
-    // 네트워크 일시 단절은 지수 백오프로 재시도하되, message is too long 같은 영구 오류는
-    // 짧은 폴백 본문으로 한 번 더 보내고 같은 긴 본문으로 시간을 낭비하지 않는다.
-    const notify = async (text: string): Promise<void> => {
+    // 긴 본문은 4096자 단위로 나눠 순차 전송하고(내용 폐기 없음), 네트워크 일시 단절만
+    // 조각 단위 지수 백오프로 재시도한다. message is too long 은 더 잘게 다시 나눠 재시도한다.
+    const sendChunk = async (payload: string, label: string): Promise<void> => {
       const delaysMs = [1_000, 5_000, 15_000, 45_000, 120_000];
-      let payload = fitTelegramText(text);
-      let usedShortFallback = false;
       for (let attempt = 0; ; attempt += 1) {
         try {
           await ctx.api.sendMessage(config.chatId, payload);
-          if (attempt > 0 || usedShortFallback) {
-            console.warn(
-              `[compile] 통지 전송 성공(재시도 ${attempt}회`
-              + `${usedShortFallback ? ", 짧은 폴백" : ""})`
-            );
+          if (attempt > 0) {
+            console.warn(`[compile] 통지 전송 성공(${label}, 재시도 ${attempt}회)`);
           }
           return;
         } catch (err) {
-          const transient = isTransientTelegramError(err);
           const detail = safeErrorMessage(err);
-          // 길이 초과 등 영구 오류: 짧은 상태 문장만 남겨 한 번 더 시도한다.
-          if (!transient && !usedShortFallback) {
-            const firstLine = payload.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
-              ?? "LLM-Wiki compile 알림";
-            payload = fitTelegramText(
-              `${firstLine}\n\n(상세 요약이 Telegram 길이 제한을 넘어 생략되었습니다.)`
+          // 분할 후에도 길이 오류가 나면(이론상 드묾) 내용을 버리지 않고 더 잘게 다시 나눈다.
+          if (
+            String(detail).toLowerCase().includes("message is too long")
+            && payload.length > 1
+          ) {
+            const smaller = splitTelegramText(payload, Math.max(1, Math.floor(payload.length / 2)));
+            console.warn(
+              `[compile] 조각 ${label} 길이 거절 → ${smaller.length}개로 재분할:`,
+              detail
             );
-            usedShortFallback = true;
-            console.warn(`[compile] 통지 본문 단축 후 재전송:`, detail);
-            continue;
+            for (let sub = 0; sub < smaller.length; sub += 1) {
+              await sendChunk(smaller[sub]!, `${label}.${sub + 1}`);
+            }
+            return;
           }
-          if (!transient) {
+          if (!isTransientTelegramError(err)) {
             console.error(
-              `[compile] 통지 전송 최종 실패(비재시도): chars=${payload.length}:`,
+              `[compile] 통지 전송 최종 실패(비재시도, ${label}): chars=${payload.length}:`,
               detail
             );
             return;
@@ -220,17 +218,27 @@ export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
           const delay = delaysMs[attempt];
           if (delay === undefined) {
             console.error(
-              `[compile] 통지 전송 최종 실패: chars=${payload.length}:`,
+              `[compile] 통지 전송 최종 실패(${label}): chars=${payload.length}:`,
               detail
             );
             return;
           }
           console.warn(
-            `[compile] 통지 전송 실패, ${delay / 1_000}초 뒤 재시도:`,
+            `[compile] 통지 전송 실패(${label}), ${delay / 1_000}초 뒤 재시도:`,
             detail
           );
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
+      }
+    };
+
+    const notify = async (text: string): Promise<void> => {
+      const chunks = splitTelegramText(text);
+      if (chunks.length > 1) {
+        console.warn(`[compile] 통지 ${chunks.length}개 조각으로 순차 전송 (total=${text.length})`);
+      }
+      for (let index = 0; index < chunks.length; index += 1) {
+        await sendChunk(chunks[index]!, `${index + 1}/${chunks.length}`);
       }
     };
     if (wikiCompileRunning) {
