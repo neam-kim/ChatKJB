@@ -425,12 +425,16 @@ function selectedGrokMcpConnectors(
 
 // Cline은 내부 제공자를 그대로 노출하므로 게이트웨이가 요구하는 JSON Schema 방언이
 // 제공자마다 다르다. Moonshot(Kimi)은 `#/$defs/`로 시작하는 $ref만 허용하는데
-// apple-mail의 search-messages가 `"dateTo": {"$ref": "#/properties/dateFrom"}`을 내보내
-// 도구 목록을 실은 모든 턴이 400으로 실패한다(apple-mail-mcp 2.3.0~2.8.11 동일).
-// 실패가 조용해서 무한 대기처럼 보이므로, 허용 목록 대신 최소 제외 목록으로 막는다.
+// 도구가 하나라도 어기면 요청 전체가 400으로 거부된다. 확인된 위반 서버:
+//   apple-mail          search-messages → "#/properties/dateFrom" (2.3.0~2.8.11 동일)
+//   interactive-brokers place_order     → "#/properties/conid"
+// HTTP 커넥터 등 미검증 서버가 남아 있어 이 목록이 완전하다는 보장은 없다. 새 위반이
+// 보이면 여기 추가하거나 CLINE_MCP_EXCLUDED_SERVERS로 우회한다.
+export const CLINE_INCOMPATIBLE_MCP_SERVERS = "apple-mail,interactive-brokers";
+
 export function selectedClineMcpConnectors(
   connectors: Record<string, McpServerConfig>,
-  rawExcluded = process.env.CLINE_MCP_EXCLUDED_SERVERS ?? "apple-mail"
+  rawExcluded = process.env.CLINE_MCP_EXCLUDED_SERVERS ?? CLINE_INCOMPATIBLE_MCP_SERVERS
 ): Record<string, McpServerConfig> {
   const excluded = new Set(
     rawExcluded.split(",")

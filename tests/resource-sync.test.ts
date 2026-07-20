@@ -649,19 +649,20 @@ describe("shared resource sync", () => {
 describe("selectedClineMcpConnectors", () => {
   const connectors = {
     "apple-mail": { type: "stdio", command: "a" },
+    "interactive-brokers": { type: "stdio", command: "d" },
     "llm-wiki": { type: "stdio", command: "b" },
     obsidian: { type: "stdio", command: "c" }
   } as never;
 
-  it("drops apple-mail by default because Moonshot rejects its $ref schema", () => {
+  it("drops every known Moonshot-incompatible server by default", () => {
     const selected = selectedClineMcpConnectors(connectors);
     expect(Object.keys(selected).sort()).toEqual(["llm-wiki", "obsidian"]);
   });
 
   it("honours an explicit exclusion list and keeps everything when it is empty", () => {
     expect(Object.keys(selectedClineMcpConnectors(connectors, "obsidian")).sort())
-      .toEqual(["apple-mail", "llm-wiki"]);
+      .toEqual(["apple-mail", "interactive-brokers", "llm-wiki"]);
     expect(Object.keys(selectedClineMcpConnectors(connectors, "")).sort())
-      .toEqual(["apple-mail", "llm-wiki", "obsidian"]);
+      .toEqual(["apple-mail", "interactive-brokers", "llm-wiki", "obsidian"]);
   });
 });
