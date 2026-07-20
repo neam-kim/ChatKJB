@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 주기적 에이전트 리컨실러 — 설치된 4개 에이전트 CLI를 봇 런타임에 반영한다.
+// 주기적 에이전트 리컨실러 — 설치된 5개 에이전트 CLI를 봇 런타임에 반영한다.
 //
 // 배경(봇의 에이전트 호출 방식마다 반영 특성이 다르다):
 //   - Claude : 외부 `claude` CLI를 매 턴 스폰(pathToClaudeCodeExecutable). ~/.local/bin/claude
@@ -11,9 +11,13 @@
 //   - Codex  : codex-sdk(npm)가 codexPathOverride로 외부 codex CLI를 구동하되, SDK JS와
 //              codex CLI는 프로토콜 **락스텝**이라 버전이 어긋나면 깨진다. 전역 codex가
 //              봇 codex-sdk와 다르면 codex-sdk를 맞춰야 한다(유일한 수동성 항목).
+//   - Cline  : @cline/sdk(npm)를 봇 프로세스 안에서 직접 쓰되, 도구 실행은 전역 `cline`이
+//              띄우는 허브 데몬(`cline --cline-hub-daemon`)에 붙는다. codex와 달리 SDK와 CLI가
+//              서로 다른 버전 라인이라 **락스텝이 없다** — 전역 CLI만 최신으로 올리고, SDK는
+//              package.json 핀을 그대로 둔다(버전은 보고에만 싣는다).
 //
 // 이 스크립트의 정책:
-//   0) 먼저 4개 CLI를 최신으로 능동 업데이트한다(codex는 self-update 명령이 없어 전역 npm으로,
+//   0) 먼저 5개 CLI를 최신으로 능동 업데이트한다(codex·cline은 self-update 명령이 없어 전역 npm으로,
 //      claude/grok/agy는 각자 `update` 서브커맨드로). 각 업데이트는 타임아웃·에러 격리되어,
 //      하나가 실패해도 나머지 업데이트와 아래 리컨실 단계는 계속 진행된다.
 //   1) 업데이트로 전역 codex 버전이 봇 codex-sdk 버전과 달라지면 codex-sdk를 안전 절차로 락스텝
@@ -171,6 +175,17 @@ function resolveProviderBins(binDir = nodeBinDir, pathValue = childEnv.PATH) {
         join(home, ".local/bin/agy"),
         "/opt/homebrew/bin/agy",
         "/usr/local/bin/agy"
+      ],
+      pathValue
+    ),
+    // 전역 cline은 codex와 같이 npm -g 설치라 Node bin 형제를 우선한다.
+    cline: resolveBin(
+      "cline",
+      [
+        join(binDir, "cline"),
+        join(home, ".local/bin/cline"),
+        "/opt/homebrew/bin/cline",
+        "/usr/local/bin/cline"
       ],
       pathValue
     )
@@ -339,6 +354,43 @@ function runUpdate(name, bin, argv) {
   return { name, status: "latest", before, after };
 }
 
+// self-update 서브커맨드가 없는 CLI(codex·cline)를 전역 npm으로 올린다. 설치 후 bins[name]을
+// 다시 해석해 두어(이전에 null이었을 수 있다) 이어지는 리컨실 단계가 새 경로를 보게 한다.
+/**
+ * @param {string} name
+ * @param {string} spec  npm 패키지 스펙(@latest 포함)
+ * @param {string[]} binCandidates
+ * @returns {UpdateLine}
+ */
+function runNpmGlobalUpdate(name, spec, binCandidates) {
+  const before = binVersion(bins[name]);
+  if (!existsSync(npmCli)) {
+    const error = `npm 미발견: ${npmCli}`;
+    log(`${name} CLI 업데이트 실패(무시하고 계속): ${error}`);
+    return { name, status: "failed", before, after: before, error };
+  }
+  try {
+    execFileSync(npmCli, ["install", "-g", spec], {
+      stdio: "inherit",
+      env: childEnv,
+      timeout: UPDATE_TIMEOUT_MS
+    });
+    const bin = resolveBin(name, binCandidates.filter(Boolean), childEnv.PATH);
+    if (bin) bins[name] = bin;
+    const after = binVersion(bins[name]);
+    if (after !== before) {
+      log(`${name} CLI: ${before} → ${after}`);
+      return { name, status: "updated", before, after };
+    }
+    log(`${name} CLI: 최신(${after ?? "?"})`);
+    return { name, status: "latest", before, after };
+  } catch (e) {
+    const error = String(e?.message ?? e);
+    log(`${name} CLI 업데이트 실패(무시하고 계속): ${error}`);
+    return { name, status: "failed", before, after: binVersion(bins[name]), error };
+  }
+}
+
 /**
  * @returns {UpdateLine[]}
  */
@@ -351,52 +403,31 @@ function updateAllClis() {
       { name: "codex", status: "skipped", error: "AGENT_SYNC_SKIP_UPDATE=1" },
       { name: "claude", status: "skipped", error: "AGENT_SYNC_SKIP_UPDATE=1" },
       { name: "grok", status: "skipped", error: "AGENT_SYNC_SKIP_UPDATE=1" },
-      { name: "agy", status: "skipped", error: "AGENT_SYNC_SKIP_UPDATE=1" }
+      { name: "agy", status: "skipped", error: "AGENT_SYNC_SKIP_UPDATE=1" },
+      { name: "cline", status: "skipped", error: "AGENT_SYNC_SKIP_UPDATE=1" }
     ];
   }
 
   // codex: self-update 명령이 없어 전역 npm으로 올린다. 이후 main()의 리컨실 단계가 새 CLI
   // 버전을 감지해 codex-sdk 락스텝 + 데몬 재시작까지 자동 완결한다.
-  const codexBefore = binVersion(bins.codex);
-  if (!existsSync(npmCli)) {
-    const error = `npm 미발견: ${npmCli}`;
-    log(`codex CLI 업데이트 실패(무시하고 계속): ${error}`);
-    lines.push({ name: "codex", status: "failed", before: codexBefore, after: codexBefore, error });
-  } else {
-    try {
-      execFileSync(npmCli, ["install", "-g", "@openai/codex@latest"], {
-        stdio: "inherit",
-        env: childEnv,
-        timeout: UPDATE_TIMEOUT_MS
-      });
-      // 업데이트 직후 PATH/형제로 다시 해석(이전에 null이었을 수 있음).
-      const codexBin =
-        resolveBin(
-          "codex",
-          [join(nodeBinDir, "codex"), bins.codex, join(home, ".local/bin/codex")].filter(Boolean),
-          childEnv.PATH
-        ) ?? bins.codex;
-      if (codexBin) bins.codex = codexBin;
-      const codexAfter = binVersion(bins.codex);
-      if (codexAfter !== codexBefore) {
-        log(`codex CLI: ${codexBefore} → ${codexAfter}`);
-        lines.push({ name: "codex", status: "updated", before: codexBefore, after: codexAfter });
-      } else {
-        log(`codex CLI: 최신(${codexAfter ?? "?"})`);
-        lines.push({ name: "codex", status: "latest", before: codexBefore, after: codexAfter });
-      }
-    } catch (e) {
-      const error = String(e?.message ?? e);
-      log(`codex CLI 업데이트 실패(무시하고 계속): ${error}`);
-      lines.push({
-        name: "codex",
-        status: "failed",
-        before: codexBefore,
-        after: binVersion(bins.codex),
-        error
-      });
-    }
-  }
+  lines.push(
+    runNpmGlobalUpdate("codex", "@openai/codex@latest", [
+      join(nodeBinDir, "codex"),
+      bins.codex,
+      join(home, ".local/bin/codex")
+    ])
+  );
+
+  // cline: codex와 같이 self-update 명령이 없다. 다만 @cline/sdk와 락스텝이 아니므로
+  // 전역 CLI만 올리고 npm 작업은 여기서 끝난다(허브 데몬은 다음 스폰에 새 CLI를 쓴다).
+  lines.push(
+    runNpmGlobalUpdate("cline", "cline@latest", [
+      join(nodeBinDir, "cline"),
+      bins.cline,
+      join(home, ".local/bin/cline"),
+      "/opt/homebrew/bin/cline"
+    ])
+  );
 
   // claude/grok/agy: 각자 self-update 서브커맨드(같은 경로 in-place 갱신 → 다음 스폰 자동 반영).
   lines.push(runUpdate("claude", bins.claude, ["update"]));
@@ -467,7 +498,7 @@ function notifyTelegram(text) {
 /**
  * @param {{
  *   updates: UpdateLine[],
- *   current: { codexCli: string|null, codexSdk: string|null, claude: string|null, grok: string|null, agy: string|null },
+ *   current: { codexCli: string|null, codexSdk: string|null, claude: string|null, grok: string|null, agy: string|null, clineCli?: string|null, clineSdk?: string|null },
  *   lockstep?: { from: string|null, to: string, ok: boolean }|null,
  *   restartReason?: string|null,
  *   outcome?: string|null,
@@ -490,7 +521,8 @@ function formatAgentSyncReport(report, date = new Date()) {
   if (cur) {
     lines.push(
       `· 현재: codexCLI=${cur.codexCli ?? "null"} codexSDK=${cur.codexSdk ?? "null"} ` +
-        `claude=${cur.claude ?? "null"} grok=${cur.grok ?? "null"} agy=${cur.agy ?? "null"}`
+        `claude=${cur.claude ?? "null"} grok=${cur.grok ?? "null"} agy=${cur.agy ?? "null"} ` +
+        `clineCLI=${cur.clineCli ?? "null"} clineSDK=${cur.clineSdk ?? "null"}`
     );
   }
   if (report.lockstep) {
@@ -522,13 +554,20 @@ function main() {
   const cur = {
     codexCli: binVersion(bins.codex),
     codexSdk: pkgVersion(join(sharedNm, "@openai", "codex-sdk")),
+    // cline SDK는 락스텝 대상이 아니라 보고용으로만 읽는다. 배치에 따라 공유 dir이 아니라
+    // 프로젝트 node_modules에만 있을 수 있으므로 둘 다 본다.
+    clineSdk:
+      pkgVersion(join(sharedNm, "@cline", "sdk")) ??
+      pkgVersion(join(projectDir, "node_modules", "@cline", "sdk")),
     claude: { path: bins.claude, ver: binVersion(bins.claude) },
     grok: { path: bins.grok, ver: binVersion(bins.grok) },
-    agy: { path: bins.agy, ver: binVersion(bins.agy) }
+    agy: { path: bins.agy, ver: binVersion(bins.agy) },
+    cline: { path: bins.cline, ver: binVersion(bins.cline) }
   };
   log(
     `현재: codexCLI=${cur.codexCli} codexSDK=${cur.codexSdk} ` +
-      `claude=${cur.claude.ver} grok=${cur.grok.ver} agy=${cur.agy.ver}`
+      `claude=${cur.claude.ver} grok=${cur.grok.ver} agy=${cur.agy.ver} ` +
+      `clineCLI=${cur.cline.ver} clineSDK=${cur.clineSdk}`
   );
 
   let restartReason = null;
@@ -555,7 +594,9 @@ function main() {
           codexSdk: cur.codexSdk,
           claude: cur.claude.ver,
           grok: cur.grok.ver,
-          agy: cur.agy.ver
+          agy: cur.agy.ver,
+          clineCli: cur.cline.ver,
+          clineSdk: cur.clineSdk
         },
         lockstep,
         restartReason: null,
@@ -567,8 +608,8 @@ function main() {
     }
   }
 
-  // (2) Claude/Grok/agy — 경로가 바뀐 경우에만 재해석 위해 재시작(버전만 바뀌면 자동).
-  for (const name of ["claude", "grok", "agy"]) {
+  // (2) Claude/Grok/agy/cline — 경로가 바뀐 경우에만 재해석 위해 재시작(버전만 바뀌면 자동).
+  for (const name of ["claude", "grok", "agy", "cline"]) {
     const p = prev[name];
     if (p && p.path && cur[name].path && p.path !== cur[name].path) {
       restartReason = restartReason
@@ -602,7 +643,9 @@ function main() {
       codexSdk: cur.codexSdk,
       claude: cur.claude.ver,
       grok: cur.grok.ver,
-      agy: cur.agy.ver
+      agy: cur.agy.ver,
+      clineCli: cur.cline.ver,
+      clineSdk: cur.clineSdk
     },
     lockstep,
     restartReason,

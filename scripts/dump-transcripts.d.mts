@@ -62,5 +62,9 @@ export function ignoredMissingSourceReason(
 export function stripChatKjbTurnWrapper(text: unknown): string;
 /** grok session_docs의 평문 1행을 단일 assistant 턴으로 만든다(빈 문서는 []). */
 export function parseGrokDoc(content: unknown): TranscriptTurn[];
+/** cline CLI의 `<user_input mode="...">`·`<mode_notice>` 래퍼를 걷어낸다. */
+export function stripClineUserWrapper(text: unknown): string;
+/** cline `<id>.messages.json` 문서를 사람 대화 턴으로 변환한다(도구 블록 제외). */
+export function parseClineMessages(doc: unknown): TranscriptTurn[];
 /** LLM-Wiki /compile의 전처리 추출기·드라이버 세션이면 true(덤프 제외 대상). */
 export function isPipelineInternalSession(text: unknown): boolean;

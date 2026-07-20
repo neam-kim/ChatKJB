@@ -16,8 +16,10 @@ import {
   ignoredMissingSourceReason,
   isPipelineInternalSession,
   normalizeFingerprintText,
+  parseClineMessages,
   parseGrokDoc,
   parseResultEntries,
+  stripClineUserWrapper,
   scanEmittedResultHashes,
   scanExistingTranscriptSources,
   stripChatKjbTurnWrapper,
@@ -179,6 +181,47 @@ describe("grok and antigravity provider support", () => {
     expect(parseGrokDoc("사용자 질문\n\n답변 내용")).toEqual([
       { role: "assistant", text: "사용자 질문\n\n답변 내용" },
     ]);
+  });
+
+  it("strips the cline user_input wrapper and mode notice", () => {
+    expect(
+      stripClineUserWrapper(
+        '<user_input mode="plan"><mode_notice>switched modes</mode_notice>\n실제 질문</user_input>'
+      )
+    ).toBe("실제 질문");
+  });
+
+  it("keeps only human text turns from a cline messages document", () => {
+    expect(
+      parseClineMessages({
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  '<user_input mode="act">[CHATKJB_ORCHESTRATED_TURN]\n범위 안내\n' +
+                  "[/CHATKJB_ORCHESTRATED_TURN]\n\n[USER_REQUEST]\n덤프 봇 고쳐줘\n" +
+                  "[/USER_REQUEST]</user_input>",
+              },
+            ],
+            ts: 1,
+          },
+          { role: "assistant", content: [{ type: "tool_use", name: "read" }] },
+          { role: "assistant", content: [{ type: "text", text: "고쳤습니다" }], ts: 2 },
+          { role: "system", content: [{ type: "text", text: "무시" }] },
+        ],
+      })
+    ).toEqual([
+      { role: "user", text: "덤프 봇 고쳐줘", ts: 1 },
+      { role: "assistant", text: "고쳤습니다", ts: 2 },
+    ]);
+  });
+
+  it("treats a cline session as having a source only with a session id", () => {
+    expect(hasProviderSourceIdentifier({ provider: "cline", cline_session_id: "s1" })).toBe(true);
+    expect(hasProviderSourceIdentifier({ provider: "cline", cline_session_id: null })).toBe(false);
   });
 
   it("treats grok and antigravity desktop records as having a source", () => {

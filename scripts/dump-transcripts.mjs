@@ -11,6 +11,7 @@
 //     claude : ~/.claude/projects/<encoded-cwd>/<sdk_session_id>.jsonl
 //     codex  : ~/.codex/sessions/**/rollout-*-<thread_id>.jsonl
 //     agy    : ~/.local/share/telegram-claude-orchestrator/agy-conversations/<conv_id>.db (protobuf steps)
+//     cline  : ~/.cline/data/sessions/<session_id>/<session_id>.messages.json (JSON messages[])
 //
 //   증분/중복 방지:
 //     - 종료 상태 세션만 처리한다.
@@ -21,6 +22,7 @@
 //
 // 환경변수 오버라이드(기본값은 아래 상수):
 //   ORCH_STATE_DB, WIKI_VAULT, CLAUDE_PROJECTS_DIR, CODEX_SESSIONS_DIR, AGY_CONV_DIR
+//   CLINE_SESSIONS_DIR
 //   RESULT_SEARCH_ROOTS (macOS에서는 :로 구분), RESULT_MERGED_FILE
 //   DUMP_FORCE=1  (워터마크 무시하고 전부 재덤프)
 //   DUMP_DRY_RUN=1 (파일 쓰지 않고 계획만 출력)
@@ -146,6 +148,11 @@ const AGY_CONV_DIR =
     "telegram-claude-orchestrator",
     "agy-conversations"
   );
+// cline SDK/CLI는 data dir 아래 세션마다 폴더 하나를 만들고 대화를 JSON으로 남긴다.
+// (--data-dir 기본값 ~/.cline → 세션은 그 아래 data/sessions/)
+const CLINE_SESSIONS_DIR =
+  process.env.CLINE_SESSIONS_DIR ||
+  join(homedir(), ".cline", "data", "sessions");
 // Orca가 실행한 데스크톱 grok·antigravity 세션의 원천.
 //   grok        : ~/.grok/sessions/session_search.sqlite (session_docs: 세션당 평문 1행)
 //   antigravity : ~/.gemini/antigravity-cli/conversations/<uuid>.db (agy와 동일한 protobuf steps)
@@ -214,15 +221,38 @@ const TERMINAL_STATUSES = new Set([
 ]);
 
 // ── orchestrator 세션 DB 읽기 ──────────────────────────────────────────────
+// provider가 추가될 때마다 sessions 테이블에 열이 붙는다. 덤프는 봇보다 오래된 runtime DB를
+// 읽을 수 있으므로(마이그레이션은 봇 기동 시점에 돈다) 실제 존재하는 열만 골라 SELECT한다.
+// 없는 열을 넣으면 "no such column"으로 덤프 전체가 죽는다.
+const SESSION_COLUMNS = [
+  "id",
+  "provider",
+  "project_name",
+  "title",
+  "status",
+  "cwd",
+  "sdk_session_id",
+  "codex_thread_id",
+  "agy_conversation_id",
+  "cline_session_id",
+  "model",
+  "codex_model",
+  "agy_model",
+  "cline_model",
+  "created_at",
+  "updated_at",
+];
+
 function loadSessions() {
   const db = new DatabaseSync(STATE_DB, { readOnly: true });
   try {
+    const present = new Set(
+      db.prepare("PRAGMA table_info(sessions)").all().map((c) => c.name)
+    );
+    const columns = SESSION_COLUMNS.filter((name) => present.has(name));
     return db
       .prepare(
-        `SELECT id, provider, project_name, title, status, cwd,
-                sdk_session_id, codex_thread_id, agy_conversation_id,
-                model, codex_model, agy_model,
-                created_at, updated_at
+        `SELECT ${columns.join(", ")}
          FROM sessions
          ORDER BY updated_at ASC`
       )
@@ -644,6 +674,82 @@ function isReadable(s) {
   return ctrl / s.length < 0.15;
 }
 
+// ── cline: <sessions>/<id>/<id>.messages.json ───────────────────────────────
+function findClineFile(session) {
+  if (!session.cline_session_id) return null;
+  const id = session.cline_session_id;
+  const p = join(CLINE_SESSIONS_DIR, id, `${id}.messages.json`);
+  return existsSync(p) ? p : null;
+}
+
+// cline CLI는 사람 발화를 `<user_input mode="act|plan">…</user_input>`로 감싸고,
+// 모드 전환 시 `<mode_notice>`를 앞에 끼워 넣는다. 위키 소스로는 둘 다 노이즈다.
+function stripClineUserWrapper(text) {
+  return String(text || "")
+    .replace(/<\/?user_input(?:\s[^>]*)?>/g, "")
+    .replace(/<mode_notice>[\s\S]*?<\/mode_notice>/g, "")
+    .trim();
+}
+
+function parseCline(file) {
+  let doc;
+  try {
+    doc = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return [];
+  }
+  return parseClineMessages(doc);
+}
+
+function parseClineMessages(doc) {
+  const turns = [];
+  const messages = Array.isArray(doc?.messages) ? doc.messages : [];
+  for (const m of messages) {
+    const role = m?.role;
+    if (role !== "user" && role !== "assistant") continue;
+    // content는 [{type:"text",text}] 블록 배열. tool_use/tool_result는 사람 대화가 아니다.
+    const raw = Array.isArray(m.content)
+      ? m.content
+          .filter((c) => c?.type === "text" && typeof c.text === "string")
+          .map((c) => c.text.trim())
+          .filter(Boolean)
+          .join("\n\n")
+      : typeof m.content === "string"
+        ? m.content.trim()
+        : "";
+    if (!raw) continue;
+    const text =
+      role === "user"
+        ? stripChatKjbTurnWrapper(stripClineUserWrapper(raw))
+        : raw.trim();
+    if (!text) continue;
+    turns.push({ role, text, ts: m.ts });
+  }
+  return turns;
+}
+
+// cline 세션 폴더의 메타 JSON(<id>.json). 데스크톱 세션의 cwd/model/제목 원천.
+function scanClineMeta(dir, id) {
+  let meta;
+  try {
+    meta = JSON.parse(readFileSync(join(dir, `${id}.json`), "utf8"));
+  } catch {
+    meta = {};
+  }
+  const turns = parseCline(join(dir, `${id}.messages.json`));
+  // 저장된 제목은 첫 프롬프트 원문을 잘라낸 것이라 오케스트레이션 래퍼가 그대로 들어 있고,
+  // 잘린 탓에 닫는 태그가 없어 걷어내지지 않기도 한다. 그럴 땐 제목을 버리고 첫 발화를 쓴다.
+  const rawTitle =
+    typeof meta.metadata?.title === "string" ? meta.metadata.title : "";
+  const title = stripChatKjbTurnWrapper(stripClineUserWrapper(rawTitle));
+  return {
+    cwd: typeof meta.cwd === "string" ? meta.cwd : "",
+    model: typeof meta.model === "string" ? meta.model : "",
+    title: title.startsWith("[CHATKJB_ORCHESTRATED_TURN]") ? "" : title,
+    firstUser: turns.find((turn) => turn.role === "user")?.text || "",
+  };
+}
+
 // ── grok: session_search.sqlite의 session_docs 평문 ─────────────────────────
 // grok는 세션당 하나의 FTS 문서(사람 발화 + 어시스턴트 + 도구 텍스트가 역할 태그
 // 없이 연결됨)만 남긴다. 역할 복원이 불가능하므로 ChatKJB 턴 래퍼만 걷어내고 통째로
@@ -790,6 +896,7 @@ function kstStamp(date = new Date()) {
 function pickModel(session) {
   if (session.provider === "codex") return session.codex_model || "";
   if (session.provider === "agy") return session.agy_model || "";
+  if (session.provider === "cline") return session.cline_model || "";
   return session.model || "";
 }
 
@@ -1195,11 +1302,13 @@ function makeDesktopRecord({
     sdk_session_id: provider === "claude" ? id : null,
     codex_thread_id: provider === "codex" ? id : null,
     agy_conversation_id: provider === "agy" ? id : null,
+    cline_session_id: provider === "cline" ? id : null,
     grok_content: provider === "grok" ? grokContent || "" : null,
     antigravity_file: provider === "antigravity" ? antigravityFile || "" : null,
     model: provider === "claude" ? model || "" : "",
     codex_model: provider === "codex" ? model || "" : "",
     agy_model: provider === "agy" ? model || "" : "",
+    cline_model: provider === "cline" ? model || "" : "",
     created_at: Math.round(created),
     updated_at: Math.round(st.mtimeMs),
     desktop: true,
@@ -1216,6 +1325,9 @@ function enumerateDesktopSessions(orchestratorSessions) {
   );
   const agyOwned = new Set(
     orchestratorSessions.map((s) => s.agy_conversation_id).filter(Boolean)
+  );
+  const clineOwned = new Set(
+    orchestratorSessions.map((s) => s.cline_session_id).filter(Boolean)
   );
   const now = Date.now();
   const out = [];
@@ -1325,6 +1437,46 @@ function enumerateDesktopSessions(orchestratorSessions) {
       if (!meta.firstUser) continue;
       out.push(
         makeDesktopRecord({ provider: "agy", id, cwd: meta.cwd, st, ...meta })
+      );
+    }
+  }
+
+  // cline: ~/.cline/data/sessions/<id>/<id>.messages.json
+  if (existsSync(CLINE_SESSIONS_DIR)) {
+    for (const entry of readdirSync(CLINE_SESSIONS_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const id = entry.name;
+      if (clineOwned.has(id)) continue;
+      const dir = join(CLINE_SESSIONS_DIR, id);
+      const file = join(dir, `${id}.messages.json`);
+      let st;
+      try {
+        st = statSync(file);
+      } catch {
+        continue;
+      }
+      if (now - st.mtimeMs < DESKTOP_SETTLE_MS) continue;
+      let meta;
+      try {
+        meta = scanClineMeta(dir, id);
+      } catch {
+        continue;
+      }
+      if (!meta.firstUser) continue;
+      if (isPipelineInternalSession(meta.title) || isPipelineInternalSession(meta.firstUser)) {
+        pipelineSkipped++;
+        continue;
+      }
+      out.push(
+        makeDesktopRecord({
+          provider: "cline",
+          id,
+          cwd: meta.cwd,
+          st,
+          model: meta.model,
+          firstUser: meta.firstUser,
+          title: meta.title,
+        })
       );
     }
   }
@@ -1497,6 +1649,10 @@ function findAndParse(session) {
       const f = findAgyFile(session);
       return f ? { file: f, turns: parseAgy(f) } : null;
     }
+    if (session.provider === "cline") {
+      const f = findClineFile(session);
+      return f ? { file: f, turns: parseCline(f) } : null;
+    }
     if (session.provider === "grok") {
       const turns = parseGrokDoc(session.grok_content);
       return turns.length ? { file: GROK_SESSIONS_DB, turns } : null;
@@ -1515,6 +1671,7 @@ function hasProviderSourceIdentifier(session) {
   if (session.provider === "claude") return Boolean(session.sdk_session_id);
   if (session.provider === "codex") return Boolean(session.codex_thread_id);
   if (session.provider === "agy") return Boolean(session.agy_conversation_id);
+  if (session.provider === "cline") return Boolean(session.cline_session_id);
   if (session.provider === "grok") return Boolean(session.grok_content);
   if (session.provider === "antigravity") return Boolean(session.antigravity_file);
   return true;
@@ -1710,8 +1867,10 @@ export {
   ignoredMissingSourceReason,
   isPipelineInternalSession,
   normalizeFingerprintText,
+  parseClineMessages,
   parseGrokDoc,
   parseResultEntries,
+  stripClineUserWrapper,
   readFrontmatter,
   scanEmittedResultHashes,
   scanExistingTranscriptSources,

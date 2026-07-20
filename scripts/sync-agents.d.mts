@@ -33,6 +33,9 @@ export function formatAgentSyncReport(
       claude: string | null;
       grok: string | null;
       agy: string | null;
+      /** cline은 SDK-CLI 락스텝이 없어 보고용으로만 싣는다. */
+      clineCli?: string | null;
+      clineSdk?: string | null;
     };
     lockstep?: { from: string | null; to: string; ok: boolean; } | null;
     restartReason?: string | null;

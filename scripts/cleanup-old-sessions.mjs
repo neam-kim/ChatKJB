@@ -16,7 +16,8 @@
 //
 // 환경변수 오버라이드(기본값은 아래 상수, dump-transcripts.mjs와 동일 키 공유):
 //   ORCH_STATE_DB, CLAUDE_PROJECTS_DIR, CODEX_ACCOUNT_HOMES, CODEX_SESSIONS_DIR,
-//   GROK_SESSIONS_DIR, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+//   GROK_SESSIONS_DIR, CLINE_SESSIONS_DIR, CLINE_STATE_DB,
+//   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 //   CLEANUP_RETAIN_DAYS=7, CLEANUP_DRY_RUN=1, CLEANUP_NOTIFY=0
 //   CLEANUP_DELETE_SOURCE=0 / CLEANUP_DELETE_DB=0 / CLEANUP_DELETE_TOPIC=0 (각 단계 끄기)
 //   CLEANUP_AUDIT=1 이면 삭제 대상 경로를 한 줄씩 찍는다. CLEANUP_DRY_RUN=1과 함께 쓰면
@@ -132,6 +133,16 @@ const CODEX_SESSIONS_DIRS = (() => {
 // (chat_history.jsonl 등)을 쓴다. 정리 단위도 그 디렉터리다.
 const GROK_SESSIONS_DIR =
   process.env.GROK_SESSIONS_DIR || join(homedir(), ".grok", "sessions");
+// cline도 grok처럼 세션당 디렉터리 한 벌(<id>.json + <id>.messages.json)을 쓴다. 다만
+// 세션 id가 uuid만이 아니라 SDK가 만드는 <epoch>_<suffix> 형태도 있어 이름 패턴 대신
+// "<id>/<id>.json이 있으면 세션"으로 판별한다. 형제 db/·logs/·settings/는 세션이 아니다.
+const CLINE_SESSIONS_DIR =
+  process.env.CLINE_SESSIONS_DIR || join(homedir(), ".cline", "data", "sessions");
+// cline CLI는 세션 디렉터리와 별개로 자체 레지스트리(sessions 테이블)를 둔다. 디렉터리만
+// 지우면 행이 고아로 남으므로 같은 판정으로 함께 지운다. 기본 경로는 세션 디렉터리에서
+// 유도해 CLINE_SESSIONS_DIR만 바꿔도 짝이 유지되게 한다.
+const CLINE_STATE_DB =
+  process.env.CLINE_STATE_DB || join(dirname(CLINE_SESSIONS_DIR), "db", "sessions.db");
 const ENV_FILE = join(REPO_ROOT, ".env");
 
 const RETAIN_DAYS = Math.max(1, Number(process.env.CLEANUP_RETAIN_DAYS || 7));
@@ -330,7 +341,73 @@ function enumerateDesktopFiles(ownedClaude, ownedCodex) {
       }
     }
   }
+  // cline: <sessions>/<세션 id>/ 디렉터리 한 벌이 세션 하나다. 세션 id 형식이 여러 가지라
+  // 자기 이름과 같은 <id>.json이 있는 디렉터리만 세션으로 인정한다.
+  if (existsSync(CLINE_SESSIONS_DIR)) {
+    for (const sessionEntry of safeReadDir(CLINE_SESSIONS_DIR)) {
+      if (!sessionEntry.isDirectory()) continue;
+      const id = sessionEntry.name;
+      const dir = join(CLINE_SESSIONS_DIR, id);
+      if (!existsSync(join(dir, `${id}.json`))) continue;
+      // grok과 같이 디렉터리 안 가장 최근 수정 시각을 정착 기준으로 삼는다.
+      let mtimeMs = 0;
+      for (const file of safeReadDir(dir)) {
+        if (!file.isFile()) continue;
+        try {
+          mtimeMs = Math.max(mtimeMs, statSync(join(dir, file.name)).mtimeMs);
+        } catch {
+          /* 사라진 파일은 건너뛴다. */
+        }
+      }
+      if (mtimeMs === 0) continue;
+      out.push({ id, provider: "cline", file: dir, directory: true, mtimeMs });
+    }
+  }
   return out;
+}
+
+// ── cline 레지스트리 정리 ────────────────────────────────────────────────────
+// 지운 세션 디렉터리의 행과, 디렉터리가 이미 사라졌는데 남아 있는 고아 행을 함께 지운다.
+// 진행 중 세션은 디렉터리 mtime이 최근이라 애초에 후보에 들지 않지만, 고아 행은 mtime을
+// 볼 수 없으므로 updated_at으로 한 번 더 거른다.
+function pruneClineRegistry(deletedIds, cutoff) {
+  const result = { rowsDeleted: 0, queueRowsDeleted: 0 };
+  if (!existsSync(CLINE_STATE_DB)) return result;
+  const cutoffIso = new Date(cutoff).toISOString();
+  let db;
+  try {
+    // DRY RUN은 세기만 하므로 허브 데몬과 쓰기 락을 다툴 이유가 없다.
+    db = new DatabaseSync(CLINE_STATE_DB, { readOnly: DRY_RUN });
+  } catch (e) {
+    // 허브 데몬이 락을 잡고 있을 수 있다. 다음 실행에서 다시 시도한다.
+    log("cline 레지스트리 열기 실패:", e?.message || e);
+    return result;
+  }
+  try {
+    const doomed = new Set(deletedIds);
+    for (const row of db.prepare("SELECT session_id, updated_at FROM sessions").all()) {
+      if (doomed.has(row.session_id)) continue;
+      if (existsSync(join(CLINE_SESSIONS_DIR, String(row.session_id)))) continue;
+      if (String(row.updated_at || "") > cutoffIso) continue;
+      doomed.add(row.session_id);
+    }
+    if (doomed.size === 0) return result;
+    if (DRY_RUN) {
+      result.rowsDeleted = doomed.size;
+      return result;
+    }
+    const delSession = db.prepare("DELETE FROM sessions WHERE session_id = ?");
+    const delQueue = db.prepare("DELETE FROM subagent_spawn_queue WHERE root_session_id = ?");
+    for (const id of doomed) {
+      result.rowsDeleted += delSession.run(id).changes;
+      result.queueRowsDeleted += delQueue.run(id).changes;
+    }
+  } catch (e) {
+    log("cline 레지스트리 정리 실패:", e?.message || e);
+  } finally {
+    db.close();
+  }
+  return result;
 }
 
 function safeReadDir(dir) {
@@ -447,6 +524,8 @@ function main() {
     skippedTopicFailure: 0,
     desktopDeleted: 0,
     desktopByProvider: {},
+    clineRowDeleted: 0,
+    clineQueueRowDeleted: 0,
     skippedRecent: 0,
     skippedActive: 0,
   };
@@ -502,6 +581,7 @@ function main() {
     }
 
     // ── Pass B: 데스크톱 단독 세션(파일만) ──
+    const deletedClineIds = [];
     if (DELETE_SOURCE) {
       for (const f of enumerateDesktopFiles(ownedClaude, ownedCodex)) {
         if (f.mtimeMs > cutoff) {
@@ -513,7 +593,15 @@ function main() {
         counters.desktopDeleted++;
         counters.desktopByProvider[f.provider] =
           (counters.desktopByProvider[f.provider] || 0) + 1;
+        if (f.provider === "cline") deletedClineIds.push(f.id);
       }
+    }
+
+    // ── Pass C: cline 레지스트리 행(디렉터리 삭제와 짝) ──
+    if (DELETE_DB) {
+      const pruned = pruneClineRegistry(deletedClineIds, cutoff);
+      counters.clineRowDeleted = pruned.rowsDeleted;
+      counters.clineQueueRowDeleted = pruned.queueRowsDeleted;
     }
   } finally {
     db.close();
@@ -529,6 +617,13 @@ function main() {
           .join(" · ")})`
       : "") +
     "\n" +
+    (counters.clineRowDeleted > 0
+      ? `· cline 레지스트리: 행 ${counters.clineRowDeleted}` +
+        (counters.clineQueueRowDeleted > 0
+          ? ` · 서브에이전트 큐 ${counters.clineQueueRowDeleted}`
+          : "") +
+        "\n"
+      : "") +
     `· 보존: 최근 ${counters.skippedRecent} · 진행중 ${counters.skippedActive} · 토픽삭제 실패 ${counters.skippedTopicFailure}` +
     (DRY_RUN ? " [DRY RUN]" : "");
   log(summary.replace(/\n/g, " | "));
@@ -539,6 +634,7 @@ export {
   enumerateDesktopFiles,
   isSessionEligibleForCleanup,
   parseTelegramResponse,
+  pruneClineRegistry,
 };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

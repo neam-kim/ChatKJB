@@ -168,6 +168,7 @@ function providersMentioned(text) {
   if (lower.includes("agy") || lower.includes("gemini") || lower.includes("제미나이") || lower.includes("antigravity")) {
     found.push("agy");
   }
+  if (lower.includes("grok") || lower.includes("그록")) found.push("grok");
   return found;
 }
 

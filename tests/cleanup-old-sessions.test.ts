@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -46,10 +47,11 @@ describe("데스크톱 세션 열거 커버리지", () => {
     vi.resetModules();
   });
 
-  async function enumerateWith(claudeDir: string, grokDir: string) {
+  async function enumerateWith(claudeDir: string, grokDir: string, clineDir?: string) {
     vi.resetModules();
     process.env.CLAUDE_PROJECTS_DIR = claudeDir;
     process.env.GROK_SESSIONS_DIR = grokDir;
+    process.env.CLINE_SESSIONS_DIR = clineDir ?? join(claudeDir, "no-cline-here");
     process.env.CODEX_SESSIONS_DIR = join(claudeDir, "no-codex-here");
     process.env.CODEX_ACCOUNT_HOMES = "";
     // 모듈 최상위 상수가 import 시점 환경변수를 읽으므로 매번 새로 평가해야 한다.
@@ -101,5 +103,126 @@ describe("데스크톱 세션 열거 커버리지", () => {
       directory: true,
     });
     expect(found[0]?.mtimeMs).toBeGreaterThan(0);
+  });
+
+  it("cline 세션 디렉터리를 id 형식과 무관하게 모으고 db·logs는 남긴다", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cleanup-cline-"));
+    temporaryDirectories.push(root);
+    // SDK가 만드는 <epoch>_<suffix>와 uuid 두 형식이 섞여 있다.
+    const legacyId = "1784560110695_4f1go";
+    const uuidId = "8b8bedae-aedd-43c2-ab7f-88b9fe10ddef";
+    for (const id of [legacyId, uuidId]) {
+      const sessionDir = join(root, id);
+      mkdirSync(sessionDir, { recursive: true });
+      writeFileSync(join(sessionDir, `${id}.json`), "{}");
+      writeFileSync(join(sessionDir, `${id}.messages.json`), "[]");
+    }
+    // 형제 디렉터리(db·logs·settings)는 세션이 아니므로 자기 이름 .json이 없다.
+    mkdirSync(join(root, "logs"), { recursive: true });
+    writeFileSync(join(root, "logs", "cline.log"), "x");
+
+    const found = await enumerateWith(
+      join(root, "absent-claude"),
+      join(root, "absent-grok"),
+      root
+    );
+    expect(found).toHaveLength(2);
+    expect(found.every((entry: { provider: string; directory?: boolean; }) =>
+      entry.provider === "cline" && entry.directory === true)).toBe(true);
+    expect(found.map((entry: { id: string; }) => entry.id).sort()).toEqual(
+      [legacyId, uuidId].sort()
+    );
+    expect(found.every((entry: { mtimeMs: number; }) => entry.mtimeMs > 0)).toBe(true);
+  });
+});
+
+describe("cline 레지스트리 정리", () => {
+  const temporaryDirectories: string[] = [];
+
+  afterEach(() => {
+    for (const directory of temporaryDirectories.splice(0)) {
+      rmSync(directory, { recursive: true, force: true });
+    }
+    delete process.env.CLEANUP_DRY_RUN;
+    vi.resetModules();
+  });
+
+  const cutoff = Date.UTC(2026, 6, 14, 5, 0);
+  const stale = new Date(cutoff - 60_000).toISOString();
+  const fresh = new Date(cutoff + 60_000).toISOString();
+
+  function seedRegistry() {
+    const root = mkdtempSync(join(tmpdir(), "cleanup-cline-db-"));
+    temporaryDirectories.push(root);
+    const sessionsDir = join(root, "sessions");
+    mkdirSync(join(root, "db"), { recursive: true });
+    mkdirSync(sessionsDir, { recursive: true });
+    // 살아있는 세션(디렉터리 존재 + 최근 updated_at)은 보존되어야 한다.
+    mkdirSync(join(sessionsDir, "keep-live"), { recursive: true });
+    const databasePath = join(root, "db", "sessions.db");
+    const db = new DatabaseSync(databasePath);
+    db.exec(
+      "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, updated_at TEXT NOT NULL);" +
+        "CREATE TABLE subagent_spawn_queue (id INTEGER PRIMARY KEY AUTOINCREMENT," +
+        " root_session_id TEXT NOT NULL);"
+    );
+    const insert = db.prepare("INSERT INTO sessions VALUES (?, ?)");
+    insert.run("deleted-now", stale); // 이번 실행에서 디렉터리를 지운 세션
+    insert.run("orphan-old", stale); // 디렉터리가 이미 사라진 고아 행
+    insert.run("orphan-recent", fresh); // 디렉터리는 없지만 아직 최근 — 보존
+    insert.run("keep-live", fresh);
+    db.prepare("INSERT INTO subagent_spawn_queue (root_session_id) VALUES (?)").run(
+      "deleted-now"
+    );
+    db.close();
+    return { root, sessionsDir, databasePath };
+  }
+
+  async function loadWith(sessionsDir: string) {
+    vi.resetModules();
+    process.env.CLINE_SESSIONS_DIR = sessionsDir;
+    delete process.env.CLINE_STATE_DB; // 세션 디렉터리에서 유도되는지 함께 확인한다.
+    return import("../scripts/cleanup-old-sessions.mjs");
+  }
+
+  it("지운 세션 행과 오래된 고아 행만 제거한다", async () => {
+    const { sessionsDir, databasePath } = seedRegistry();
+    const module = await loadWith(sessionsDir);
+
+    const result = module.pruneClineRegistry(["deleted-now"], cutoff);
+    expect(result).toMatchObject({ rowsDeleted: 2, queueRowsDeleted: 1 });
+
+    const db = new DatabaseSync(databasePath);
+    const remaining = db
+      .prepare("SELECT session_id FROM sessions ORDER BY session_id")
+      .all()
+      .map((row) => row.session_id);
+    const queue = db.prepare("SELECT count(*) AS n FROM subagent_spawn_queue").get();
+    db.close();
+    expect(remaining).toEqual(["keep-live", "orphan-recent"]);
+    expect(queue?.n).toBe(0);
+  });
+
+  it("DRY RUN에서는 세어만 보고 실제로 지우지 않는다", async () => {
+    const { sessionsDir, databasePath } = seedRegistry();
+    process.env.CLEANUP_DRY_RUN = "1";
+    const module = await loadWith(sessionsDir);
+
+    expect(module.pruneClineRegistry(["deleted-now"], cutoff).rowsDeleted).toBe(2);
+
+    const db = new DatabaseSync(databasePath);
+    const count = db.prepare("SELECT count(*) AS n FROM sessions").get();
+    db.close();
+    expect(count?.n).toBe(4);
+  });
+
+  it("레지스트리 DB가 없으면 조용히 넘어간다", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cleanup-cline-nodb-"));
+    temporaryDirectories.push(root);
+    const module = await loadWith(join(root, "sessions"));
+    expect(module.pruneClineRegistry(["whatever"], cutoff)).toMatchObject({
+      rowsDeleted: 0,
+      queueRowsDeleted: 0,
+    });
   });
 });

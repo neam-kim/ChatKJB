@@ -53,6 +53,7 @@ describe("제공자 언급 추출", () => {
   it("한·영 별칭과 다중 언급을 모은다", () => {
     expect(providersMentioned("Claude·Codex 세 제공자")).toEqual(["claude", "codex"]);
     expect(providersMentioned("agy(Gemini)가 한도 소진")).toEqual(["agy"]);
+    expect(providersMentioned("Grok이 조사 작업을 담당")).toEqual(["grok"]);
     expect(providersMentioned("일반 텍스트")).toEqual([]);
   });
 });
