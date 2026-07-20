@@ -321,6 +321,7 @@ export class ClineExecutor {
     controller.signal.addEventListener("abort", abort, { once: true });
     let lastResponse = "";
     let first = session.clineSessionId == null;
+    let turnTimedOut = false;
     try {
       await this.host.safeRename(session, `[RUNNING] ${session.title}`);
       await renderer.start(false);
@@ -339,21 +340,40 @@ export class ClineExecutor {
           eventText = text;
           delivery = delivery.then(() => renderer.text(text));
         }, { sessionId: clineSessionId });
+        // 게이트웨이가 도구 스키마를 거부하는 등으로 조용히 실패하면 SDK가 응답도 오류도
+        // 돌려주지 않아 턴이 무한정 매달린다. core.abort()만으로는 대기 중인 프라미스가
+        // 풀리지 않으므로, 중단 신호와 함께 거부하는 워치독과 레이스시킨다.
+        const turnTimeoutMs = this.host.options.providerTurnTimeoutMs;
+        let timedOut = false;
+        let turnTimeout: NodeJS.Timeout | undefined;
+        const watchdog = turnTimeoutMs
+          ? new Promise<never>((_resolve, reject) => {
+            turnTimeout = setTimeout(() => {
+              timedOut = true;
+              controller.abort();
+              reject(new Error("timeout"));
+            }, turnTimeoutMs);
+          })
+          : null;
+        const guard = <T>(work: PromiseLike<T>): Promise<T> =>
+          watchdog ? Promise.race([work, watchdog]) : Promise.resolve(work);
         try {
           let result: AgentResult | undefined;
           if (first) {
-            const started = await core.start({
+            // start는 오버로드라 제네릭 추론이 unknown으로 무너진다. 타입 인자를 고정한다.
+            const started = await guard<Awaited<ReturnType<ClineCoreLike["start"]>>>(core.start({
               ...await this.config(session, clineSessionId),
               prompt
-            });
+            }));
             result = started.result;
             this.hydrated.add(clineSessionId);
             this.host.store.updateSession(session.id, { clineSessionId });
             first = false;
           } else {
-            await this.ensureHydrated(core, session, clineSessionId);
-            result = await core.send({ sessionId: clineSessionId, prompt });
+            await guard(this.ensureHydrated(core, session, clineSessionId));
+            result = await guard(core.send({ sessionId: clineSessionId, prompt }));
           }
+          if (timedOut) throw new Error("timeout");
           if (controller.signal.aborted || run.stopRequested) {
             throw new Error("aborted");
           }
@@ -373,6 +393,8 @@ export class ClineExecutor {
             ...(usage ? { clineUsage: JSON.stringify(usage) } : {})
           });
         } finally {
+          if (turnTimeout) clearTimeout(turnTimeout);
+          if (timedOut) turnTimedOut = true;
           unsubscribe();
         }
         run.pendingTurns = Math.max(0, run.pendingTurns - 1);
@@ -385,11 +407,19 @@ export class ClineExecutor {
     } catch (error) {
       if (this.host.deleting.has(session.id) || !this.host.store.getSession(session.id)) return;
       if (run.serviceShutdownRequested && controller.signal.aborted) return;
-      const aborted = controller.signal.aborted || run.stopRequested === true;
+      // 워치독이 끊은 턴은 사용자의 중단과 구분해 원인을 남긴다.
+      const aborted = !turnTimedOut && (controller.signal.aborted || run.stopRequested === true);
+      console.error(`Cline run failed (session=${session.id}):`, safeErrorMessage(error));
+      const minutes = Math.round((this.host.options.providerTurnTimeoutMs ?? 0) / 60_000);
       this.host.store.updateSession(session.id, { status: aborted ? "aborted" : "error" });
       await renderer.finish(
         aborted ? "aborted" : "error",
-        aborted ? "사용자가 작업을 중단했습니다." : `Cline 실행 실패: ${safeErrorMessage(error)}`
+        aborted
+          ? "사용자가 작업을 중단했습니다."
+          : turnTimedOut
+            ? `Cline이 ${minutes}분 동안 응답하지 않아 턴을 중단했습니다. `
+              + "제공자 게이트웨이가 도구 스키마를 거부했을 수 있으니 모델을 바꿔 다시 시도하세요."
+            : `Cline 실행 실패: ${safeErrorMessage(error)}`
       );
       await this.host.safeRename(session, `${aborted ? "[STOP]" : "[ERROR]"} ${session.title}`);
     } finally {

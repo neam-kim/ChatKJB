@@ -423,6 +423,26 @@ function selectedGrokMcpConnectors(
   );
 }
 
+// Cline은 내부 제공자를 그대로 노출하므로 게이트웨이가 요구하는 JSON Schema 방언이
+// 제공자마다 다르다. Moonshot(Kimi)은 `#/$defs/`로 시작하는 $ref만 허용하는데
+// apple-mail의 search-messages가 `"dateTo": {"$ref": "#/properties/dateFrom"}`을 내보내
+// 도구 목록을 실은 모든 턴이 400으로 실패한다(apple-mail-mcp 2.3.0~2.8.11 동일).
+// 실패가 조용해서 무한 대기처럼 보이므로, 허용 목록 대신 최소 제외 목록으로 막는다.
+export function selectedClineMcpConnectors(
+  connectors: Record<string, McpServerConfig>,
+  rawExcluded = process.env.CLINE_MCP_EXCLUDED_SERVERS ?? "apple-mail"
+): Record<string, McpServerConfig> {
+  const excluded = new Set(
+    rawExcluded.split(",")
+      .map((name) => name.trim())
+      .filter(Boolean)
+  );
+  if (excluded.size === 0) return connectors;
+  return Object.fromEntries(
+    Object.entries(connectors).filter(([name]) => !excluded.has(name))
+  );
+}
+
 /** TTL 만료 뒤에도 생성 내용이 같으면 디스크를 다시 쓰지 않는다. */
 function writeTextIfChanged(path: string, content: string, mode: number): void {
   try {
@@ -813,7 +833,7 @@ export function syncSharedResources(
     paths.connectorRegistry
   );
   syncClineMcpConfig(
-    connectors,
+    selectedClineMcpConnectors(connectors),
     paths.clineMcpConfig,
     process.execPath,
     paths.wrapperScript,

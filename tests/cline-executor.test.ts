@@ -412,4 +412,24 @@ describe("ClineExecutor", () => {
     await executor.dispose();
     f.store.close();
   });
+
+  it("aborts a hung turn with the provider turn watchdog and reports the cause", async () => {
+    const f = fixture();
+    f.host.options.providerTurnTimeoutMs = 30;
+    const fake = fakeCore("NEVER");
+    // 게이트웨이가 도구 스키마를 거부해 응답도 오류도 오지 않는 상황을 모사한다.
+    fake.start.mockImplementation(() => new Promise(() => {}) as never);
+    const executor = new ClineExecutor(f.host, dependencies(fake.core));
+    await executor.execute({ session: f.session, prompt: "hang please" });
+
+    expect(fake.abort).toHaveBeenCalled();
+    expect(f.store.getSession(f.session.id)?.status).toBe("error");
+    const sent = (f.transport.editText as any).mock.calls
+      .concat((f.transport.sendText as any).mock.calls)
+      .map((call: unknown[]) => String(call[2] ?? call[1] ?? ""))
+      .join("\n");
+    expect(sent).toContain("응답하지 않아");
+    await executor.dispose();
+    f.store.close();
+  });
 });

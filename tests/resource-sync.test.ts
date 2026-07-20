@@ -18,6 +18,7 @@ import {
   buildSharedSkillCatalog,
   clearSharedResourceSyncCache,
   defaultCodexAccountHomes,
+  selectedClineMcpConnectors,
   syncSharedResources,
   syncSharedResourcesCached
 } from "../src/resource-sync.js";
@@ -642,5 +643,25 @@ describe("shared resource sync", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("selectedClineMcpConnectors", () => {
+  const connectors = {
+    "apple-mail": { type: "stdio", command: "a" },
+    "llm-wiki": { type: "stdio", command: "b" },
+    obsidian: { type: "stdio", command: "c" }
+  } as never;
+
+  it("drops apple-mail by default because Moonshot rejects its $ref schema", () => {
+    const selected = selectedClineMcpConnectors(connectors);
+    expect(Object.keys(selected).sort()).toEqual(["llm-wiki", "obsidian"]);
+  });
+
+  it("honours an explicit exclusion list and keeps everything when it is empty", () => {
+    expect(Object.keys(selectedClineMcpConnectors(connectors, "obsidian")).sort())
+      .toEqual(["apple-mail", "llm-wiki"]);
+    expect(Object.keys(selectedClineMcpConnectors(connectors, "")).sort())
+      .toEqual(["apple-mail", "llm-wiki", "obsidian"]);
   });
 });
