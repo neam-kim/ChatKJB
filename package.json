@@ -36,6 +36,7 @@
     "nas-mirror:install-agent": "node scripts/install-nas-mirror-agent.mjs",
     "skills:add-shared": "node scripts/add-shared-skill.mjs",
     "transcripts:dump": "node scripts/dump-transcripts.mjs",
+    "resume": "node scripts/fablize-resume.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
