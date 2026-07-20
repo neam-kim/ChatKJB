@@ -16,6 +16,7 @@ import {
 import {
   buildCompileNotifyText,
   buildWikiCompilePrompt,
+  describeKjbWikiPostCompileConfig,
   isTransientTelegramError,
   runConfiguredKjbWikiPostCompile,
   splitTelegramText,
@@ -279,7 +280,13 @@ export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
         ));
         return;
       }
-      await notify(buildCompileNotifyText("LLM-Wiki compile 완료.", summary));
+      // 후처리 스크립트가 없거나 경로가 비면 배포를 건너뛴다. 예전에는 이 사실이
+      // 통지에 안 나와 "compile만 되고 kjb wiki는 안 된다"로 오인되기 쉬웠다.
+      const skip = describeKjbWikiPostCompileConfig();
+      await notify(buildCompileNotifyText(
+        "LLM-Wiki compile 완료.",
+        [summary, skip.detail].filter(Boolean).join("\n")
+      ));
     }).catch(async (error: unknown) => {
       await notify(buildCompileNotifyText(
         `LLM-Wiki compile 오류: ${safeErrorMessage(error)}`

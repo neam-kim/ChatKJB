@@ -19,13 +19,21 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launchAgentConfig } from "./launch-agent-paths.mjs";
+import { launchAgentConfig, loadDotEnv } from "./launch-agent-paths.mjs";
 import { buildDaemonApp } from "./build-daemon-app.mjs";
 
 const label = "com.chatkjb.bot";
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // 설치를 실행한 런타임이 곧 provider CLI가 설치된 Node다.
 const realNodeBin = dirname(process.execPath);
+// /compile 성공 후 KJB Wiki 공개 그래프 배포 스크립트. dotenv에만 있으면 launchd
+// 환경에는 안 보이므로, 설치 시 plist에도 넣어 두어 로딩 실패 시에도 후처리가 동작하게 한다.
+const dotenvForAgent = loadDotEnv(join(projectDir, ".env"));
+const kjbWikiPostCompileScript = (
+  process.env.KJB_WIKI_POST_COMPILE_SCRIPT
+  || dotenvForAgent.KJB_WIKI_POST_COMPILE_SCRIPT
+  || ""
+).trim();
 
 // LaunchAgent가 Node 실행 파일을 직접 실행하면 macOS 권한 화면에 "node"로만
 // 표시되어 어떤 프로세스인지 구분할 수 없다. Node를 그대로 담은 ChatKJB.app
@@ -190,7 +198,9 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <!-- 데몬은 ChatKJB.app 번들로 실행되므로 process.execPath로는 provider CLI가 설치된
          Node bin을 알 수 없다. 설치 시점의 실제 Node bin을 넘겨 PATH 조립에 쓴다. -->
     <key>CHATKJB_NODE_BIN</key>
-    <string>${xml(realNodeBin)}</string>
+    <string>${xml(realNodeBin)}</string>${kjbWikiPostCompileScript ? `
+    <key>KJB_WIKI_POST_COMPILE_SCRIPT</key>
+    <string>${xml(kjbWikiPostCompileScript)}</string>` : ""}
   </dict>
   <key>ProgramArguments</key>
   <array>

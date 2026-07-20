@@ -10,6 +10,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
+import { describeKjbWikiPostCompileConfig } from "./bot/wiki-compile.js";
 import { CLAUDE_OAUTH_TOKEN_PATTERN, type AppConfig } from "./config.js";
 import { buildCodexEnvironment, requireCodexSubscriptionAuth } from "./session-manager.js";
 import { StateStore } from "./store.js";
@@ -308,7 +309,15 @@ export async function runDoctor(deps: DoctorDeps): Promise<string> {
         deps.config.telegramBotToken,
         ...deps.config.claudeCodeOauthTokens
       ].filter((value): value is string => typeof value === "string")
-    ))
+    )),
+    check("KJB Wiki 후처리", 1000, async () => {
+      const status = describeKjbWikiPostCompileConfig();
+      if (status.configured) {
+        return [`✅ KJB Wiki 후처리: ${status.path}`];
+      }
+      // 선택 기능이지만 /compile 자동 배포를 기대하면 설정이 필요하다.
+      return [`⚠️ KJB Wiki 후처리: ${status.detail}`];
+    })
   ]);
 
   return [

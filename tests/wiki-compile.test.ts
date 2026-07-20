@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   TELEGRAM_TEXT_LIMIT,
   buildCompileNotifyText,
+  buildPostCompileEnvironment,
+  describeKjbWikiPostCompileConfig,
   isTransientTelegramError,
   splitTelegramText,
   summarizeCompileOutput
@@ -82,5 +84,39 @@ describe("isTransientTelegramError", () => {
     ))).toBe(true);
     expect(isTransientTelegramError({ error_code: 429, parameters: { retry_after: 2 } }))
       .toBe(true);
+  });
+});
+
+describe("describeKjbWikiPostCompileConfig", () => {
+  it("reports missing configuration without treating it as ready", () => {
+    const status = describeKjbWikiPostCompileConfig({
+      ...process.env,
+      KJB_WIKI_POST_COMPILE_SCRIPT: ""
+    });
+    expect(status.configured).toBe(false);
+    expect(status.detail).toContain("KJB_WIKI_POST_COMPILE_SCRIPT 미설정");
+  });
+
+  it("rejects relative paths", () => {
+    const status = describeKjbWikiPostCompileConfig({
+      ...process.env,
+      KJB_WIKI_POST_COMPILE_SCRIPT: "tools/kjb_wiki_post_compile.sh"
+    });
+    expect(status.configured).toBe(false);
+    expect(status.detail).toContain("절대경로");
+  });
+});
+
+describe("buildPostCompileEnvironment", () => {
+  it("prepends common bins and CHATKJB_NODE_BIN without dropping existing PATH", () => {
+    const env = buildPostCompileEnvironment({
+      PATH: "/custom/bin",
+      CHATKJB_NODE_BIN: "/opt/node/bin"
+    });
+    const parts = env.PATH!.split(":");
+    expect(parts[0]).toBe("/opt/node/bin");
+    expect(parts).toContain("/usr/bin");
+    expect(parts).toContain("/custom/bin");
+    expect(new Set(parts).size).toBe(parts.length);
   });
 });

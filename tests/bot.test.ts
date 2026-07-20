@@ -1537,7 +1537,11 @@ describe("/compile command", () => {
       const texts = calls
         .filter((call) => call.method === "sendMessage")
         .map((call) => String(call.payload.text));
-      expect(texts.some((text) => text.includes("LLM-Wiki compile 완료"))).toBe(true);
+      // 후처리 미설정 시에도 완료 통지에 스킵 사유를 남겨 배포 누락을 숨기지 않는다.
+      expect(texts.some((text) =>
+        text.includes("LLM-Wiki compile 완료")
+        && text.includes("KJB_WIKI_POST_COMPILE_SCRIPT 미설정")
+      )).toBe(true);
     });
   });
 

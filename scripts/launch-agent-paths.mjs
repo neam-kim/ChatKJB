@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
-function loadDotEnv(filePath) {
+export function loadDotEnv(filePath) {
   if (!existsSync(filePath)) return {};
   const out = {};
   for (const raw of readFileSync(filePath, "utf8").split(/\r?\n/)) {

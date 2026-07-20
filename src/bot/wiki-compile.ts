@@ -11,19 +11,76 @@ export const TELEGRAM_TEXT_LIMIT = 4096;
 /** 재시도해도 의미 없는 클라이언트 오류(길이 초과·잘못된 요청 등). */
 const NON_RETRYABLE_TELEGRAM_CODES = new Set([400, 401, 403, 404]);
 
-export async function runConfiguredKjbWikiPostCompile(): Promise<string | undefined> {
-  const configured = process.env.KJB_WIKI_POST_COMPILE_SCRIPT?.trim();
-  if (!configured) return undefined;
+/**
+ * launchd 데몬 PATH는 매우 짧다. 후처리 스크립트가 python3/ssh/tar를 찾을 수 있도록
+ * 흔한 시스템·Homebrew·CHATKJB_NODE_BIN 경로를 앞에 보강한다(이미 있으면 중복하지 않음).
+ */
+export function buildPostCompileEnvironment(
+  source: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  const env = { ...source };
+  const extras = [
+    source.CHATKJB_NODE_BIN?.trim(),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin"
+  ].filter((value): value is string => Boolean(value));
+  const existing = (env.PATH ?? "").split(":").filter(Boolean);
+  const merged: string[] = [];
+  for (const part of [...extras, ...existing]) {
+    if (!merged.includes(part)) merged.push(part);
+  }
+  env.PATH = merged.join(":");
+  return env;
+}
+
+/** 진단·통지용: 후처리 스크립트 설정 상태를 한 줄로 설명한다. */
+export function describeKjbWikiPostCompileConfig(
+  env: NodeJS.ProcessEnv = process.env
+): { configured: boolean; path?: string; detail: string; } {
+  const configured = env.KJB_WIKI_POST_COMPILE_SCRIPT?.trim() ?? "";
+  if (!configured) {
+    return {
+      configured: false,
+      detail: "KJB_WIKI_POST_COMPILE_SCRIPT 미설정 — /compile 후 KJB Wiki 공개 그래프 배포를 건너뜁니다."
+    };
+  }
   if (!isAbsolute(configured)) {
-    throw new Error("KJB_WIKI_POST_COMPILE_SCRIPT는 절대경로여야 합니다.");
+    return {
+      configured: false,
+      path: configured,
+      detail: `KJB_WIKI_POST_COMPILE_SCRIPT가 절대경로가 아닙니다: ${configured}`
+    };
   }
   if (!existsSync(configured)) {
-    throw new Error(`KJB Wiki 후처리 스크립트를 찾지 못했습니다: ${configured}`);
+    return {
+      configured: false,
+      path: configured,
+      detail: `KJB Wiki 후처리 스크립트를 찾지 못했습니다: ${configured}`
+    };
   }
+  return {
+    configured: true,
+    path: configured,
+    detail: `KJB Wiki 후처리 준비됨: ${configured}`
+  };
+}
 
+export async function runConfiguredKjbWikiPostCompile(): Promise<string | undefined> {
+  const status = describeKjbWikiPostCompileConfig();
+  if (!status.configured) {
+    // 설정 누락은 오류가 아니라 선택 기능 비활성. 다만 무음 스킵이면 "배포가 안 된다"로 오인된다.
+    console.warn(`[compile] ${status.detail}`);
+    return undefined;
+  }
+  const configured = status.path!;
+  console.log(`[compile] KJB Wiki 후처리 시작: ${configured} --deploy`);
   const { stdout, stderr } = await execFileAsync(configured, ["--deploy"], {
     cwd: dirname(configured),
-    env: process.env,
+    env: buildPostCompileEnvironment(),
     encoding: "utf8",
     timeout: POST_COMPILE_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024
