@@ -285,8 +285,21 @@ export function parseStoredClineUsage(value: string | null | undefined): ClineUs
   }
 }
 
-/** Cline 누적 토큰·비용을 텔레그램 출력용 문자열로 포맷한다. */
-export function formatClineUsage(usage: ClineUsage): string {
+/**
+ * ClinePass는 구독제라 종량 청구가 없다. 그런데 SDK의 totalCost는 제공자 구분 없이
+ * knownModels의 단가표로 로컬 계산한 값이라(정가 환산액), 그대로 "비용: $..."로 찍으면
+ * 구독 중인데도 종량 과금처럼 보인다. 실측: kimi-k3(입력 $3/M·출력 $15/M·캐시읽기 $0.3/M)에
+ * 저장 토큰을 대입하면 SDK가 준 totalCost와 소수점까지 일치한다.
+ */
+export function isClineSubscriptionProvider(providerId: string | null | undefined): boolean {
+  return (providerId ?? "").startsWith("cline-pass");
+}
+
+/**
+ * Cline 누적 토큰·비용을 텔레그램 출력용 문자열로 포맷한다. `subscription`이면 달러값을
+ * 청구액이 아니라 정가 환산 소비량으로 표기한다.
+ */
+export function formatClineUsage(usage: ClineUsage, subscription = false): string {
   const tok = (count: number | null): string =>
     count !== null ? count.toLocaleString(appLocale()) : "-";
   const lines = ["Cline 누적 사용량"];
@@ -296,7 +309,13 @@ export function formatClineUsage(usage: ClineUsage): string {
   if (usage.cacheReadTokens !== null) lines.push(`    ├ 캐시 읽기: ${tok(usage.cacheReadTokens)}`);
   if (usage.cacheWriteTokens !== null) lines.push(`    └ 캐시 쓰기: ${tok(usage.cacheWriteTokens)}`);
   lines.push(`  출력: ${tok(usage.outputTokens)}`);
-  if (usage.totalCost !== null) lines.push(`  비용: $${usage.totalCost.toFixed(4)}`);
+  if (usage.totalCost !== null) {
+    lines.push(
+      subscription
+        ? `  정가 환산: $${usage.totalCost.toFixed(4)} (청구액 아님 · 구독 소비량 비교용)`
+        : `  비용: $${usage.totalCost.toFixed(4)}`
+    );
+  }
   return lines.join("\n");
 }
 
@@ -315,21 +334,27 @@ function sumClineUsage(list: ClineUsage[]): ClineUsage {
 }
 
 /**
- * 전역 /usage용 Cline 요약. Cline은 구독 한도 조회 API가 없고 SDK가 세션 단위 누적만
- * 주므로, agy와 같은 방식으로 저장값이 있는 세션들을 합산해 보여 준다.
+ * 전역 /usage용 Cline 요약. Grok과 달리 구독 잔량을 실시간 조회하지는 못한다.
+ * @cline/core에 계정 API(fetchBalance/fetchCurrentUserPlan)가 있지만 providers.json에
+ * 저장된 추론용 자격증명으로는 401이라, 별도 계정 인증이 붙기 전까지는 세션 누적만 쓴다.
  */
 export function formatClineAccountUsage(sessions: SessionRecord[]): string {
-  const measured = sessions
-    .filter((session) => session.provider === "cline")
+  const clineSessions = sessions.filter((session) => session.provider === "cline");
+  const measured = clineSessions
     .map((session) => parseStoredClineUsage(session.clineUsage))
     .filter((usage): usage is ClineUsage => usage !== null);
   if (measured.length === 0) {
     return "Cline 사용량: 측정된 세션이 없습니다.\n"
       + "(Cline 토픽에서 턴을 실행하면 누적 토큰이 기록됩니다.)";
   }
+  // 합산 대상에 구독 제공자가 하나라도 섞이면 달러값을 청구액으로 읽어서는 안 된다.
+  const subscription = clineSessions.some((session) =>
+    isClineSubscriptionProvider(session.clineProviderId)
+  );
   return `Cline 사용량 · ${measured.length}개 세션 합계\n`
-    + formatClineUsage(sumClineUsage(measured))
-    + "\n원천: Cline SDK 세션 누적 측정값 (구독 한도 API 미제공)";
+    + formatClineUsage(sumClineUsage(measured), subscription)
+    + "\n원천: Cline SDK 세션 누적 측정값"
+    + (subscription ? " (ClinePass 구독 · 잔량 조회 API 미연동)" : " (구독 한도 API 미제공)");
 }
 
 /**

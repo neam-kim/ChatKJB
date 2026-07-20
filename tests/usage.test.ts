@@ -4,6 +4,7 @@ import type { SessionRecord } from "../src/types.js";
 import {
   formatAgyAccountUsage,
   formatClineAccountUsage,
+  isClineSubscriptionProvider,
   parseStoredClineUsage,
   formatCodexAccountUsage,
   formatGrokUsage,
@@ -295,8 +296,8 @@ describe("Cline usage", () => {
       cacheReadTokens: 269568, cacheWriteTokens: 0, totalCost: 0.32728
     }
   });
-  const clineSession = (clineUsage: string | null): SessionRecord =>
-    ({ provider: "cline", clineUsage }) as unknown as SessionRecord;
+  const clineSession = (clineUsage: string | null, clineProviderId = "anthropic"): SessionRecord =>
+    ({ provider: "cline", clineUsage, clineProviderId }) as unknown as SessionRecord;
 
   it("prefers aggregateUsage over the per-turn usage block", () => {
     expect(parseStoredClineUsage(stored)).toEqual({
@@ -324,5 +325,37 @@ describe("Cline usage", () => {
 
   it("explains the empty case instead of printing zeros", () => {
     expect(formatClineAccountUsage([])).toContain("측정된 세션이 없습니다");
+  });
+
+  // ClinePass는 구독제라 종량 청구가 없다. SDK의 totalCost는 제공자와 무관하게 단가표로
+  // 로컬 계산한 정가 환산액이므로, 구독 제공자에서 "비용"으로 읽히면 오표기가 된다.
+  it("labels the dollar figure as a list-price equivalent under ClinePass", () => {
+    const text = formatClineAccountUsage([clineSession(stored, "cline-pass")]);
+    expect(text).toContain("정가 환산: $0.3273");
+    expect(text).toContain("청구액 아님");
+    expect(text).not.toContain("비용: $");
+    expect(text).toContain("ClinePass 구독");
+  });
+
+  it("keeps the plain cost label for metered bring-your-own-key providers", () => {
+    const text = formatClineAccountUsage([clineSession(stored, "anthropic")]);
+    expect(text).toContain("비용: $0.3273");
+    expect(text).not.toContain("정가 환산");
+  });
+
+  it("treats a mixed set as subscription so no total reads as an amount billed", () => {
+    const text = formatClineAccountUsage([
+      clineSession(stored, "anthropic"),
+      clineSession(stored, "cline-pass")
+    ]);
+    expect(text).toContain("정가 환산");
+    expect(text).not.toContain("비용: $");
+  });
+
+  it("recognizes ClinePass provider ids only", () => {
+    expect(isClineSubscriptionProvider("cline-pass")).toBe(true);
+    expect(isClineSubscriptionProvider("anthropic")).toBe(false);
+    expect(isClineSubscriptionProvider(null)).toBe(false);
+    expect(isClineSubscriptionProvider(undefined)).toBe(false);
   });
 });

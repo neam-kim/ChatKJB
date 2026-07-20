@@ -6,7 +6,7 @@ import { fetchGrokLiveUsage } from "../../grok-live-usage.js";
 import { collectLocalTokenUsage } from "../../local-token-usage.js";
 import { appLocale, appTimeZone } from "../../localization.js";
 import { safeErrorMessage } from "../../telegram-transport.js";
-import { formatAgyAccountUsage, formatAgyUsage, formatClineAccountUsage, formatClineUsage, formatCodexAccountUsage, formatGrokUsage, formatLocalTokenUsage, formatUsageSnapshot, parseStoredAgyUsage, parseStoredClineUsage } from "../../usage.js";
+import { formatAgyAccountUsage, formatAgyUsage, formatClineAccountUsage, formatClineUsage, formatCodexAccountUsage, formatGrokUsage, formatLocalTokenUsage, formatUsageSnapshot, isClineSubscriptionProvider, parseStoredAgyUsage, parseStoredClineUsage } from "../../usage.js";
 import type { BotDeps } from "../deps.js";
 import {
   formatDuration,
@@ -298,9 +298,12 @@ export function registerLifecycleHandlers(bot: Bot, deps: BotDeps): void {
     // Cline도 agy와 같이 세션 단위 누적만 있으므로 해당 토픽 안에서만 세션 값을 보여준다.
     if (topicSession?.provider === "cline") {
       const stored = parseStoredClineUsage(topicSession.clineUsage);
+      const subscription = isClineSubscriptionProvider(topicSession.clineProviderId);
       await ctx.reply(
         stored
-          ? formatClineUsage(stored) + "\n원천: Cline SDK 세션 누적 측정값 (구독 한도 API 미제공)"
+          ? formatClineUsage(stored, subscription)
+            + "\n원천: Cline SDK 세션 누적 측정값"
+            + (subscription ? " (ClinePass 구독 · 잔량 조회 API 미연동)" : " (구독 한도 API 미제공)")
           : "Cline 사용량: 측정 전\n"
             + "(이 세션에서 아직 턴이 실행되지 않았습니다. 첫 턴 완료 후 다시 확인하세요.)"
       );
