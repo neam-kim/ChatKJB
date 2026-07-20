@@ -1,5 +1,6 @@
 import { createBot } from "./bot.js";
 import { BOT_COMMANDS } from "./bot-commands.js";
+import { reapOrphanedClineMcp } from "./cline-orphan-reaper.js";
 import { loadConfig } from "./config.js";
 import { FALLBACK_MODEL_CATALOG, loadModelCatalog } from "./model-catalog.js";
 import { syncSharedResourcesCached } from "./resource-sync.js";
@@ -23,6 +24,19 @@ async function main(): Promise<void> {
     `Shared resources → skills: ${shared.skillCount}, connectors: ${shared.connectorCount}, `
     + `providers: ${shared.providerSkillRoots}`
   );
+
+  // 크래시·SIGKILL로 죽은 직전 실행은 ClineExecutor.dispose()를 못 부르고, Cline 허브는
+  // 끊긴 클라이언트의 MCP 함대를 회수하지 않는다. launchd KeepAlive 재시작마다 한 벌씩
+  // 쌓이므로 시작 시점에 고아 함대를 정리한다.
+  const reaped = await reapOrphanedClineMcp().catch((error: unknown) => {
+    console.error(`Cline orphan MCP reap failed: ${safeErrorMessage(error)}`);
+    return null;
+  });
+  if (reaped?.reapedPids.length) {
+    console.log(`Cline orphan MCP reaped → ${reaped.reapedPids.length} process(es).`);
+  } else if (reaped?.skippedBusy) {
+    console.log("Cline orphan MCP reap skipped → hub has connected clients.");
+  }
 
   // 제공사 카탈로그(Claude=선택된 Claude CLI 경유 SDK, Codex=선택된 CLI debug models)를 읽어
   // 모델·사고(thinking)·추론(reasoning) 선택지를 동적으로 채운다. 실패하면 정적 fallback 유지.
