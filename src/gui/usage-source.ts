@@ -14,6 +14,11 @@ import { join } from "node:path";
 import { fetchCodexLiveUsage } from "../codex-live-usage.js";
 import { fetchGrokLiveUsage } from "../grok-live-usage.js";
 import { buildCodexEnvironment } from "../session-environment.js";
+import {
+  isDaemonUsageCacheStale,
+  readDaemonUsageCache,
+  type DaemonUsageCacheFile
+} from "../usage-cache.js";
 import type {
   GuiClaudeUsageDto,
   GuiCodexAccountUsageDto,
@@ -33,6 +38,8 @@ const GROK_CACHE_TTL_MS = 20_000;
 // 가장 짧은 표시 창(5시간)을 넘긴 스냅샷은 현재 창을 설명하지 못하므로 stale로 본다.
 const CLAUDE_SNAPSHOT_STALE_MS = 6 * 3_600_000;
 
+export type UsageSourceMode = "local" | "daemon-cache";
+
 export interface UsageSourceOptions {
   databasePath: string;
   codexExecutable: string;
@@ -46,6 +53,13 @@ export interface UsageSourceOptions {
   fetchCodex?: typeof fetchCodexLiveUsage;
   fetchGrok?: typeof fetchGrokLiveUsage;
   now?: () => number;
+  /**
+   * local: 이 Mac 이 데몬 호스트 — DB·CLI 직접 조회.
+   * daemon-cache: 다른 Mac 의 Terminal — 데몬이 게시한 공유 캐시만 읽어 데몬 머신 한도를 표시.
+   */
+  sourceMode?: UsageSourceMode;
+  /** 데몬 사용량 캐시 후보 경로(NAS Program 등). sourceMode=daemon-cache 일 때 사용. */
+  usageCachePaths?: readonly string[];
 }
 
 export interface UsageCacheOptions {
@@ -210,14 +224,19 @@ export function labelCodexHomes(homes: readonly string[]): Array<{ home: string;
   });
 }
 /**
- * 원시 사용량 소스. 캐시 없이 매번 실제 조회를 수행한다 — 서버는 이 제공자를
- * createCachedUsageProvider로 감싸 주입받는다.
+ * 원시 사용량 소스. 서버는 이 제공자를 createCachedUsageProvider로 감싸 주입받는다.
+ *
+ * - local: 데몬 호스트에서 DB·CLI 직접 조회(기존 동작).
+ * - daemon-cache: 다른 Mac 에서 데몬이 게시한 공유 캐시만 읽어 **데몬 머신 한도**를 표시.
+ *   로컬 CLI/DB 를 쓰지 않아 맥북 자체 사용량으로 오염되지 않는다.
  */
 export function createUsageProvider(options: UsageSourceOptions): GuiUsageProvider {
   const fetchCodex = options.fetchCodex ?? fetchCodexLiveUsage;
   const fetchGrok = options.fetchGrok ?? fetchGrokLiveUsage;
   const now = options.now ?? Date.now;
   const cwd = options.cwd ?? process.cwd();
+  const sourceMode: UsageSourceMode = options.sourceMode ?? "local";
+  const cachePaths = options.usageCachePaths ?? [];
   const codexHome = options.codexHome
     ?? (process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"));
   // 조회할 Codex 계정 홈 목록. 다계정이 지정되면 그대로, 아니면 단일 홈 하나로 폴백한다.
@@ -225,6 +244,30 @@ export function createUsageProvider(options: UsageSourceOptions): GuiUsageProvid
     ? [...options.codexAccountHomes]
     : [codexHome];
   const codexAccounts = labelCodexHomes(codexHomes);
+
+  const readCache = (): DaemonUsageCacheFile | null => {
+    if (cachePaths.length === 0) return null;
+    return readDaemonUsageCache(cachePaths);
+  };
+
+  if (sourceMode === "daemon-cache") {
+    return {
+      async fetchClaudeUsage(): Promise<GuiClaudeUsageDto> {
+        const cache = readCache();
+        if (!cache) return { ...EMPTY_CLAUDE_USAGE };
+        const stale = cache.claude.stale || isDaemonUsageCacheStale(cache, now());
+        return { ...cache.claude, stale };
+      },
+      async fetchCodexUsage(): Promise<GuiCodexUsageDto> {
+        const cache = readCache();
+        return cache?.codex ?? { accounts: [] };
+      },
+      async fetchGrokUsage(): Promise<GuiGrokUsageDto> {
+        const cache = readCache();
+        return cache?.grok ?? { ...EMPTY_GROK_USAGE };
+      }
+    };
+  }
 
   return {
     async fetchClaudeUsage(): Promise<GuiClaudeUsageDto> {

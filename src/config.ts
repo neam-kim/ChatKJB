@@ -25,6 +25,7 @@ import { FALLBACK_MODEL_CATALOG } from "./model-catalog.js";
 import { hasReadyClineProvider } from "./cline-sdk.js";
 import { projectSourceDir } from "./runtime-paths.js";
 import type { ProjectConfig, ProviderKind } from "./types.js";
+import { discoverUsageCachePaths } from "./usage-cache.js";
 
 export const CLAUDE_OAUTH_TOKEN_PATTERN = /^sk-ant-oat01-[A-Za-z0-9_-]+$/;
 const projectIdentifierPattern = /^[\p{L}\p{N}][\p{L}\p{N} _.-]*$/u;
@@ -569,6 +570,14 @@ export async function loadTelegramGuiConfig() {
     ? absolutePath(process.env.CODEX_HOME)
     : join(homedir(), ".codex");
 
+  // 봇 프로젝트·DB 가 이 Mac 에 있으면 데몬 호스트(로컬 조회). 없으면 다른 Mac 의
+  // Terminal 이므로 데몬이 게시한 공유 캐시만 읽어 **데몬 머신 사용량**을 표시한다.
+  const botProjectDir = discoverBotProjectDir();
+  const usageSourceMode = botProjectDir && existsSync(databasePath)
+    ? "local" as const
+    : "daemon-cache" as const;
+  const usageCachePaths = discoverUsageCachePaths({ projectDir: botProjectDir });
+
   return {
     apiId: env.TELEGRAM_API_ID,
     apiHash: env.TELEGRAM_API_HASH,
@@ -584,7 +593,9 @@ export async function loadTelegramGuiConfig() {
     codexAccountHomes: parseCodexAccountHomes(
       env.CODEX_ACCOUNT_HOMES,
       codexFallbackHome
-    )
+    ),
+    usageSourceMode,
+    usageCachePaths
   };
 }
 

@@ -2,6 +2,7 @@ import { createBot } from "./bot.js";
 import { BOT_COMMANDS } from "./bot-commands.js";
 import { reapOrphanedClineMcp } from "./cline-orphan-reaper.js";
 import { loadConfig } from "./config.js";
+import { startDaemonUsagePublisher } from "./daemon-usage-publisher.js";
 import { FALLBACK_MODEL_CATALOG, loadModelCatalog } from "./model-catalog.js";
 import { syncSharedResourcesCached } from "./resource-sync.js";
 import { buildServiceRecoveryPrompt } from "./session-prompts.js";
@@ -67,6 +68,16 @@ async function main(): Promise<void> {
   }
 
   const { bot, sessions, startProjectCatalog, startTopicDeletionMonitor, dispose } = createBot(config, store);
+
+  // 다른 Mac 의 Terminal 이 **이 데몬 호스트의 사용량**을 볼 수 있도록 공유 캐시에 게시.
+  // (NAS Program/chatkjb-usage.json 등 — Terminal DMG 와 같은 폴더 계열)
+  const usagePublisher = startDaemonUsagePublisher({
+    databasePath: config.databasePath,
+    codexExecutable: config.codexExecutable,
+    grokExecutable: config.grokExecutable,
+    codexAccountHomes: config.codexAccountHomes,
+    projectDir: process.env.CHATKJB_PROJECT_DIR?.trim() || process.cwd()
+  });
 
   // 전역 안전망: 단일 요청(특히 /synth의 Claude·Codex·agy·Grok 병렬 실행)에서 처리되지 못한
   // 예외가 새어 나와도 데몬 전체를 죽이지 않는다. Node 기본 동작은 uncaughtException·
@@ -148,6 +159,7 @@ async function main(): Promise<void> {
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    usagePublisher.stop();
     shutdownPromise = Promise.allSettled([
       dispose(),
       Promise.resolve().then(() => bot.stop())

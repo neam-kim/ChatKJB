@@ -441,6 +441,7 @@ function startApplication() {
     const claudeNotes = [];
     if (claude.capturedAt === null) {
       // 스냅샷 자체가 없다 — 칸은 "—"로 두고 별도 주석은 달지 않는다.
+      // (다른 Mac 에서는 데몬 공유 캐시가 아직 없거나 NAS 미마운트일 수 있다.)
     } else if (claude.stale) {
       claudeNotes.push(usageNote("대화 전 갱신"));
     }

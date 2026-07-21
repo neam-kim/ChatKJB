@@ -78,7 +78,10 @@ describe("Telegram GUI configuration", () => {
       codexExecutable: "/opt/test/bin/codex",
       grokExecutable: "/opt/test/bin/grok",
       // 머신에 ChatGPT 구독 auth.json이 있으면 폴백 홈 1개, 없으면 빈 배열.
-      codexAccountHomes: expect.any(Array)
+      codexAccountHomes: expect.any(Array),
+      // CHATKJB_PROJECT_DIR 은 테스트 격리 디렉터리. DB 파일이 없으면 daemon-cache.
+      usageSourceMode: "daemon-cache",
+      usageCachePaths: expect.any(Array)
     });
   });
 
@@ -235,7 +238,9 @@ describe("Telegram GUI configuration", () => {
       databasePath: join(configDirectory, "data", "state.sqlite"),
       codexExecutable: "/opt/test/bin/codex",
       grokExecutable: "/opt/test/bin/grok",
-      codexAccountHomes: expect.any(Array)
+      codexAccountHomes: expect.any(Array),
+      usageSourceMode: "daemon-cache",
+      usageCachePaths: expect.any(Array)
     });
   });
 });
