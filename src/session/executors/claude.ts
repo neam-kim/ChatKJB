@@ -156,11 +156,19 @@ export class ClaudeExecutor {
         if (await this.handleStreamMessage(message, ctx)) break;
       }
       if (!ctx.receivedResult) {
-        if (ctx.deferredCompletionForBackground || ctx.openTaskIds.size > 0) {
+        // 아직 열린 하위 작업이 남은 채 스트림이 끊겼다면 진짜 조기 종료(에러).
+        if (ctx.openTaskIds.size > 0) {
           throw new Error(
-            `Claude 하위 작업 ${ctx.openTaskIds.size || "?"}개가 끝나기 전에 SDK 스트림이 종료되었습니다. `
+            `Claude 하위 작업 ${ctx.openTaskIds.size}개가 끝나기 전에 SDK 스트림이 종료되었습니다. `
             + "서브에이전트 대기 중 작업이 조기 종료된 것으로 보입니다."
           );
+        }
+        // 하위 작업을 모두 마친 뒤 result를 보류했었는데 SDK가 통합 turn을 자동
+        // 재개하지 않고 스트림을 닫은 경우다. 이는 조기 종료가 아니라 정상 완료이므로,
+        // 그때까지 받은 응답으로 done 처리한다(스트림 무한 대기·미발송 방지).
+        if (ctx.deferredCompletionForBackground) {
+          await this.finalizeDeferredCompletion(ctx);
+          return;
         }
         throw new ClaudeStreamEndedWithoutResultError(ctx.receivedMessageCount);
       }
@@ -298,15 +306,23 @@ export class ClaudeExecutor {
 
   private startIdleWatchdog(ctx: ClaudeRunContext): void {
     ctx.lastActivityAt = Date.now();
+    const idleMs = this.host.options.turnIdleTimeoutMs;
     ctx.idleWatchdog = setInterval(() => {
       if (this.host.store.getSession(ctx.session.id)?.status === "waiting_approval") return;
+      const silentMs = Date.now() - ctx.lastActivityAt;
       // 서브에이전트/백그라운드 Task가 돌고 있으면 메인 스트림이 잠시 조용해도 정상이다.
-      if (ctx.openTaskIds.size > 0) return;
-      if (Date.now() - ctx.lastActivityAt <= this.host.options.turnIdleTimeoutMs) return;
+      // 다만 하위 작업이 조용히 끝났는데 완료 이벤트를 놓쳐 openTaskIds가 남는 경우
+      // 세션이 영구 running으로 갇히므로, 유휴 한도의 2배를 넘도록 완전 무활동이면
+      // 데드락으로 보고 강제 종료해 최소한 종료 신호는 발송되게 한다.
+      if (ctx.openTaskIds.size > 0) {
+        if (silentMs <= idleMs * 2) return;
+      } else if (silentMs <= idleMs) {
+        return;
+      }
       ctx.idleTimedOut = true;
       ctx.abortController.abort();
       ctx.run.query?.close();
-    }, Math.min(30_000, this.host.options.turnIdleTimeoutMs));
+    }, Math.min(30_000, idleMs));
     this.idleWatchdogs.add(ctx.idleWatchdog);
   }
 
@@ -320,7 +336,8 @@ export class ClaudeExecutor {
       return;
     }
     if (message.subtype === "task_updated" && typeof message.task_id === "string") {
-      const status = message.patch?.status;
+      // SDK가 대소문자를 섞어 보내도 종료 상태를 놓치지 않도록 소문자로 비교한다.
+      const status = message.patch?.status?.toLowerCase();
       if (status === "completed" || status === "failed" || status === "killed") {
         ctx.openTaskIds.delete(message.task_id);
       } else if (status === "pending" || status === "running" || status === "paused") {
@@ -519,6 +536,39 @@ export class ClaudeExecutor {
       const latest = this.host.store.getSession(ctx.session.id);
       if (latest) this.host.handleGoalCompletion(latest, ctx.request);
     }
+  }
+
+  /**
+   * 하위 작업을 모두 마친 뒤 SDK가 통합 result 없이 스트림을 닫은 경우의 정상 종료.
+   * finalizeTurn과 같은 종결 절차를 따르되, 최종 응답이 없어도 done으로 확정해
+   * [DONE] 발송·active 정리·목표 완료 훅이 반드시 실행되게 한다.
+   */
+  private async finalizeDeferredCompletion(ctx: ClaudeRunContext): Promise<void> {
+    if (ctx.idleTimedOut || ctx.abortController.signal.aborted) {
+      throw new Error("turn aborted");
+    }
+    ctx.finalStatus = "done";
+    ctx.run.pendingTurns = 0;
+    ctx.input.cancel();
+    if (ctx.sdkSessionId) {
+      await this.dependencies.renameSdkSession(
+        ctx.sdkSessionId,
+        ctx.session.title,
+        { dir: ctx.session.cwd }
+      ).catch(() => undefined);
+    }
+    const current = this.host.store.getSession(ctx.session.id);
+    if (current?.status === "running") {
+      this.host.store.updateSession(ctx.session.id, { status: "done" });
+      await ctx.renderer.finish(
+        "done",
+        ctx.lastAssistantText
+          || "하위 작업을 마쳤습니다. (SDK가 별도의 최종 응답을 반환하지 않아 진행 결과로 종료합니다.)"
+      );
+    }
+    await this.host.safeRename(ctx.session, `[DONE] ${ctx.session.title}`);
+    const latest = this.host.store.getSession(ctx.session.id);
+    if (latest) this.host.handleGoalCompletion(latest, ctx.request);
   }
 
   private async handleRunError(error: unknown, ctx: ClaudeRunContext): Promise<void> {

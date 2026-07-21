@@ -425,6 +425,70 @@ describe("ClaudeExecutor lifecycle", () => {
     expect(renames).toContain("[DONE] Claude executor");
   });
 
+  it("marks done when subagent tasks finish but the SDK ends without a final result", async () => {
+    // 회귀 방지: 하위 작업 완료 후 SDK가 통합 result를 자동 재개하지 않고 스트림을
+    // 닫으면, 예전에는 result 보류로 세션이 영구 running에 갇혀 [DONE]이 발송되지
+    // 않았다. 이제는 조기 종료(에러)가 아니라 정상 완료로 종결해야 한다.
+    const messages: unknown[] = [
+      {
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-open-3",
+        description: "Long review",
+        uuid: "u1",
+        session_id: "sdk-3"
+      },
+      {
+        type: "result",
+        subtype: "success",
+        duration_ms: 10,
+        duration_api_ms: 10,
+        is_error: false,
+        num_turns: 1,
+        result: "waiting on subagent",
+        stop_reason: "end_turn",
+        total_cost_usd: 0,
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0
+        },
+        modelUsage: {},
+        permission_denials: [],
+        uuid: "u2",
+        session_id: "sdk-3"
+      },
+      {
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-open-3",
+        status: "completed",
+        output_file: "/tmp/out",
+        summary: "subagent finished",
+        uuid: "u3",
+        session_id: "sdk-3"
+      }
+      // 통합 result 없이 스트림 종료(SDK가 후속 turn을 재개하지 않는 경우).
+    ];
+    const query = {
+      close() {},
+      async *[Symbol.asyncIterator]() {
+        for (const message of messages) yield message as never;
+      },
+      async getServerInfo() { return null; }
+    } as unknown as Query;
+    const { executor, renames, store } = setup(
+      undefined,
+      (() => query) as ClaudeExecutorDependencies["createQuery"]
+    );
+
+    await executor.execute({ session: store.getSession("claude-executor")!, prompt: "spawn subagent" });
+
+    expect(store.getSession("claude-executor")?.status).toBe("done");
+    expect(renames).toContain("[DONE] Claude executor");
+  });
+
   it("forks a resumed Claude session once when the SDK stream is completely empty", async () => {
     const emptyQuery = {
       close() {},
