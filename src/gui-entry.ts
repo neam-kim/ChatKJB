@@ -116,16 +116,18 @@ async function run(): Promise<void> {
   }
 
   try {
-    const [configModule, protocolModule, serverModule, clientModule] = await Promise.all([
+    const [configModule, protocolModule, serverModule, clientModule, usageSourceModule] = await Promise.all([
       import("./config.js"),
       import("./gui/protocol.js"),
       import("./gui/server.js"),
-      import("./gui/telegram-user-client.js")
+      import("./gui/telegram-user-client.js"),
+      import("./gui/usage-source.js")
     ]);
     const { loadTelegramGuiConfig } = configModule;
     const { safeTelegramErrorCode } = protocolModule;
     const { startGuiServer } = serverModule;
     const { TelegramUserClient } = clientModule;
+    const { createUsageProvider } = usageSourceModule;
     const config = await loadTelegramGuiConfig();
     client = new TelegramUserClient({
       apiId: config.apiId,
@@ -148,6 +150,12 @@ async function run(): Promise<void> {
     // 않는 유형과 코드만 stderr로 남긴다.
     server = await startGuiServer({
       client,
+      // 작성창 사용량 스트립 소스. 공유 DB read-only + codex/grok 라이브 조회.
+      usageProvider: createUsageProvider({
+        databasePath: config.databasePath,
+        codexExecutable: config.codexExecutable,
+        grokExecutable: config.grokExecutable
+      }),
       onDiagnostic: ({ type, code }) => {
         process.stderr.write(`[gui] ${type}: ${code}\n`);
       }

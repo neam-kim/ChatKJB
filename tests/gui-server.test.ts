@@ -9,6 +9,7 @@ import type {
   GuiMessage,
   GuiReplyPanel,
   GuiTopic,
+  GuiUsageProvider,
   HistoryCursor,
   TopicCursor
 } from "../src/gui/protocol.js";
@@ -242,6 +243,7 @@ async function startFixture(options: {
   diagnostics?: GuiServerDiagnostic[];
   now?: () => number;
   mutationTimeoutMs?: number;
+  usageProvider?: GuiUsageProvider;
   timeoutOverrides?: Parameters<typeof startGuiServer>[0]["timeoutOverrides"];
 } = {}): Promise<{ handle: GuiServerHandle; client: FakeGuiServerClient; diagnostics: GuiServerDiagnostic[]; }> {
   const client = options.client ?? new FakeGuiServerClient();
@@ -250,6 +252,7 @@ async function startFixture(options: {
     client,
     ...(options.now ? { now: options.now } : {}),
     ...(options.mutationTimeoutMs ? { mutationTimeoutMs: options.mutationTimeoutMs } : {}),
+    ...(options.usageProvider ? { usageProvider: options.usageProvider } : {}),
     ...(options.timeoutOverrides ? { timeoutOverrides: options.timeoutOverrides } : {}),
     onDiagnostic: (diagnostic) => diagnostics.push(diagnostic)
   });
@@ -1738,5 +1741,140 @@ describe("멈춘 Telegram 호출이 전송을 영구히 막지 않는다", () =>
     await expect(startGuiServer({ client, mutationTimeoutMs: 300_001 })).rejects.toThrow(
       "mutationTimeoutMs must be an integer from 1000 to 300000"
     );
+  });
+});
+
+describe("작성창 사용량 스트립 /api/usage", () => {
+  function usageFixture() {
+    const calls = { claude: 0, codex: 0, grok: 0 };
+    const usageProvider: GuiUsageProvider = {
+      fetchClaudeUsage: async () => {
+        calls.claude += 1;
+        return {
+          fiveHour: { utilization: 42, resetsAt: "2026-07-21T19:00:00Z" },
+          sevenDay: { utilization: 18, resetsAt: null },
+          stale: false,
+          capturedAt: 1_784_600_000_000
+        };
+      },
+      fetchCodexUsage: async () => {
+        calls.codex += 1;
+        return {
+          fiveHour: { utilization: 7, resetsAt: null },
+          sevenDay: { utilization: 33, resetsAt: null }
+        };
+      },
+      fetchGrokUsage: async () => {
+        calls.grok += 1;
+        return {
+          weekly: { utilization: 63, resetsAt: null },
+          monthly: null,
+          weeklyReceived: true,
+          monthlyReceived: false,
+          loginRequired: false
+        };
+      }
+    };
+    return { calls, usageProvider };
+  }
+
+  it("세션 쿠키·메서드·쿼리·오리진 가드를 /api/session과 같게 적용한다", async () => {
+    const { usageProvider } = usageFixture();
+    const { handle } = await startFixture({ usageProvider });
+
+    const anonymous = await fetch(`${handle.origin}/api/usage`);
+    expect(anonymous.status).toBe(401);
+
+    const session = await authenticate(handle);
+    const wrongMethod = await fetch(`${handle.origin}/api/usage`, {
+      method: "POST",
+      headers: { Origin: handle.origin, Cookie: session.cookie }
+    });
+    expect(wrongMethod.status).toBe(405);
+
+    const withQuery = await fetch(`${handle.origin}/api/usage?refresh=1`, {
+      headers: { Origin: handle.origin, Cookie: session.cookie }
+    });
+    expect(withQuery.status).toBe(400);
+
+    const hostileOrigin = await fetch(`${handle.origin}/api/usage`, {
+      headers: {
+        Origin: "https://attacker.invalid",
+        Cookie: session.cookie,
+        "Sec-Fetch-Site": "same-origin"
+      }
+    });
+    expect(hostileOrigin.status).toBe(403);
+
+    const crossSite = await fetch(`${handle.origin}/api/usage`, {
+      headers: { Cookie: session.cookie, "Sec-Fetch-Site": "cross-site" }
+    });
+    expect(crossSite.status).toBe(403);
+  });
+
+  it("주입된 소스의 3제공자 DTO를 응답한다", async () => {
+    const { usageProvider } = usageFixture();
+    const { handle } = await startFixture({ usageProvider });
+    const session = await authenticate(handle);
+    const response = await fetch(`${handle.origin}/api/usage`, {
+      headers: { Origin: handle.origin, Cookie: session.cookie }
+    });
+    expect(response.status).toBe(200);
+    expectSecurityHeaders(response);
+    const body = await response.json() as Record<string, unknown>;
+    expect(body.claude).toEqual({
+      fiveHour: { utilization: 42, resetsAt: "2026-07-21T19:00:00Z" },
+      sevenDay: { utilization: 18, resetsAt: null },
+      stale: false,
+      capturedAt: 1_784_600_000_000
+    });
+    expect(body.codex).toEqual({
+      fiveHour: { utilization: 7, resetsAt: null },
+      sevenDay: { utilization: 33, resetsAt: null }
+    });
+    expect(body.grok).toEqual({
+      weekly: { utilization: 63, resetsAt: null },
+      monthly: null,
+      weeklyReceived: true,
+      monthlyReceived: false,
+      loginRequired: false
+    });
+  });
+
+  it("연속 폴칭에서 codex/grok 조회는 캐시로 1회만 발생한다", async () => {
+    const { calls, usageProvider } = usageFixture();
+    const { handle } = await startFixture({ usageProvider });
+    const session = await authenticate(handle);
+    const poll = () => fetch(`${handle.origin}/api/usage`, {
+      headers: { Origin: handle.origin, Cookie: session.cookie }
+    });
+
+    // 다중 탭을 흉내 낸 동시 2회 + 연속 1회 폴칭.
+    const [first, second] = await Promise.all([poll(), poll()]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    const third = await poll();
+    expect(third.status).toBe(200);
+    expect(calls.codex).toBe(1);
+    expect(calls.grok).toBe(1);
+    // Claude(DB 읽기)는 저렴해 캐시하지 않으므로 매 폴칭 호출된다.
+    expect(calls.claude).toBe(3);
+  });
+
+  it("소스가 주입되지 않아도 모든 칸을 값 부재로 응답한다", async () => {
+    const { handle } = await startFixture();
+    const session = await authenticate(handle);
+    const response = await fetch(`${handle.origin}/api/usage`, {
+      headers: { Origin: handle.origin, Cookie: session.cookie }
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      claude: { capturedAt: number | null };
+      codex: { fiveHour: unknown };
+      grok: { weeklyReceived: boolean };
+    };
+    expect(body.claude.capturedAt).toBeNull();
+    expect(body.codex.fiveHour).toBeNull();
+    expect(body.grok.weeklyReceived).toBe(false);
   });
 });

@@ -115,6 +115,7 @@ function startApplication() {
     selectedFile: document.querySelector("#selected-file"),
     selectedFileLabel: document.querySelector("#selected-file-label"),
     selectedFileRemove: document.querySelector("#selected-file-remove"),
+    usageStrip: document.querySelector("#usage-strip"),
     alert: document.querySelector("#alert")
   };
 
@@ -164,7 +165,10 @@ function startApplication() {
     panelMessageId: 0,
     panelRefreshStarted: false,
     topicContextMenu: null,
-    topicDeleteInFlight: null
+    topicDeleteInFlight: null,
+    usage: null,
+    usageTimer: 0,
+    usageRefreshActive: false
   };
 
   function errorCode(error) {
@@ -338,6 +342,138 @@ function startApplication() {
     }
   }
 
+  // --- 작성창 하단 사용량 스트립 ---
+  // /api/usage를 45초마다 폴칭한다. 서버 응답은 방어적으로 파싱하고, 실패/부재 칸은
+  // "—"(.usage-unknown)로 실제 0%와 구분한다. Claude는 라이브 조회가 없어 마지막
+  // 세션 스냅샷 기반이라 stale이면 "대화 전 갱신" 주석을 단다.
+
+  function usageWindowDto(value) {
+    if (!value || typeof value !== "object") return null;
+    const utilization = Number(value.utilization);
+    return {
+      utilization: Number.isFinite(utilization) ? utilization : null,
+      resetsAt: typeof value.resetsAt === "string" ? value.resetsAt : null
+    };
+  }
+
+  function normalizeUsage(raw) {
+    const claude = raw?.claude && typeof raw.claude === "object" ? raw.claude : {};
+    const codex = raw?.codex && typeof raw.codex === "object" ? raw.codex : {};
+    const grok = raw?.grok && typeof raw.grok === "object" ? raw.grok : {};
+    return {
+      claude: {
+        fiveHour: usageWindowDto(claude.fiveHour),
+        sevenDay: usageWindowDto(claude.sevenDay),
+        stale: claude.stale === true,
+        capturedAt: Number.isFinite(Number(claude.capturedAt)) ? Number(claude.capturedAt) : null
+      },
+      codex: {
+        fiveHour: usageWindowDto(codex.fiveHour),
+        sevenDay: usageWindowDto(codex.sevenDay)
+      },
+      grok: {
+        weekly: usageWindowDto(grok.weekly),
+        monthly: usageWindowDto(grok.monthly),
+        weeklyReceived: grok.weeklyReceived === true,
+        monthlyReceived: grok.monthlyReceived === true,
+        loginRequired: grok.loginRequired === true
+      }
+    };
+  }
+
+  function usageCell(label, window, unknownText = "—") {
+    const cell = document.createElement("span");
+    cell.className = "usage-cell";
+    const value = window && Number.isFinite(window.utilization)
+      ? `${Math.round(window.utilization)}%`
+      : unknownText;
+    cell.textContent = `${label} ${value}`;
+    if (!window || !Number.isFinite(window.utilization)) cell.classList.add("usage-unknown");
+    return cell;
+  }
+
+  function usageNote(text) {
+    const note = document.createElement("span");
+    note.className = "usage-note";
+    note.textContent = text;
+    return note;
+  }
+
+  function usageLine(provider, cells, notes = []) {
+    const line = document.createElement("div");
+    line.className = "usage-line";
+    const name = document.createElement("span");
+    name.className = "usage-provider";
+    name.textContent = provider;
+    line.append(name);
+    cells.forEach((cell, index) => {
+      if (index > 0) {
+        const separator = document.createElement("span");
+        separator.className = "usage-separator";
+        separator.textContent = "·";
+        separator.setAttribute("aria-hidden", "true");
+        line.append(separator);
+      }
+      line.append(cell);
+    });
+    for (const note of notes) line.append(note);
+    return line;
+  }
+
+  function renderUsageStrip() {
+    const strip = elements.usageStrip;
+    if (!state.usage) {
+      strip.replaceChildren(usageNote("사용량 한도 불러오는 중…"));
+      strip.hidden = false;
+      return;
+    }
+    const { claude, codex, grok } = state.usage;
+    const claudeNotes = [];
+    if (claude.capturedAt === null) {
+      // 스냅샷 자체가 없다 — 칸은 "—"로 두고 별도 주석은 달지 않는다.
+    } else if (claude.stale) {
+      claudeNotes.push(usageNote("대화 전 갱신"));
+    }
+    const grokNotes = grok.loginRequired ? [usageNote("로그인 필요")] : [];
+    strip.replaceChildren(
+      usageLine("Claude", [usageCell("5h", claude.fiveHour), usageCell("1w", claude.sevenDay)], claudeNotes),
+      usageLine("Codex", [usageCell("5h", codex.fiveHour), usageCell("1w", codex.sevenDay)]),
+      usageLine("Grok", [
+        usageCell("주간", grok.weekly, grok.weeklyReceived ? "—" : "미수신"),
+        usageCell("월간", grok.monthly, grok.monthlyReceived ? "—" : "미수신")
+      ], grokNotes)
+    );
+    strip.hidden = false;
+  }
+
+  async function refreshUsage() {
+    if (!state.csrf || state.usageRefreshActive || document.hidden) return;
+    state.usageRefreshActive = true;
+    try {
+      state.usage = normalizeUsage(await requestJson("/api/usage", {}, false));
+    } catch {
+      // 첫 조회 실패라면 값 부재 상태라도 렌더해 "불러오는 중"에 머물지 않게 한다.
+      if (!state.usage) state.usage = normalizeUsage(null);
+    } finally {
+      state.usageRefreshActive = false;
+    }
+    renderUsageStrip();
+  }
+
+  function startUsagePolling() {
+    if (state.usageTimer) return;
+    // 최초 폴칭이 끝나기 전까지 "불러오는 중" 초기 상태를 보여 준다.
+    renderUsageStrip();
+    state.usageTimer = window.setInterval(refreshUsage, 45_000);
+    void refreshUsage();
+  }
+
+  function stopUsagePolling() {
+    if (!state.usageTimer) return;
+    window.clearInterval(state.usageTimer);
+    state.usageTimer = 0;
+  }
+
   function postJson(path, body, options = {}) {
     return request(path, {
       ...options,
@@ -394,7 +530,13 @@ function startApplication() {
     elements.messageInput.disabled = !ready || state.busy || state.activeTopicId === null;
     elements.attachButton.disabled = !ready || state.busy || state.activeTopicId === null;
     updateGeneralPanelState();
-    if (ready) void refreshGeneralPanelOnce();
+    if (ready) {
+      void refreshGeneralPanelOnce();
+      startUsagePolling();
+    } else {
+      // signed_out·연결 끊김에서는 사용량 폴칭도 멈춘다.
+      stopUsagePolling();
+    }
   }
 
   function panelRows(value) {
@@ -1680,6 +1822,7 @@ function startApplication() {
       setConnection(data.auth.state, data.auth.errorCode || "");
       if (data.auth.state === "ready") {
         void refreshSessionLimits();
+        void refreshUsage();
         if (state.topics.size === 0) void reconcile();
       }
     } else if (data.type === "message_upsert") {
@@ -2015,6 +2158,10 @@ function startApplication() {
     if (state.topicContextMenu.contains(event.target)) return;
     hideTopicContextMenu();
   });
+  document.addEventListener("visibilitychange", () => {
+    // 탭이 다시 보이면 지난 폴칭 스킵분을 즉시 따라잡는다.
+    if (!document.hidden && state.connection === "ready") void refreshUsage();
+  });
   window.addEventListener("blur", () => hideTopicContextMenu());
   window.addEventListener("resize", () => hideTopicContextMenu());
   window.addEventListener("keydown", (event) => {
@@ -2022,6 +2169,7 @@ function startApplication() {
   });
   window.addEventListener("pagehide", () => {
     hideTopicContextMenu();
+    stopUsagePolling();
     state.uploadAbort?.abort();
     cancelAllReadConfirmations();
     state.historyAbort?.abort();

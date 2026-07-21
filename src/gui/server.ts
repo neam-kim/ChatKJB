@@ -27,9 +27,11 @@ import {
   type GuiTelegramUpdate,
   type GuiTextEntity,
   type GuiTopic,
+  type GuiUsageProvider,
   type HistoryCursor,
   type TopicCursor
 } from "./protocol.js";
+import { createCachedUsageProvider, createEmptyUsageProvider } from "./usage-source.js";
 import {
   HistoryInvalidatedError,
   ReadConfirmationPendingError,
@@ -160,6 +162,9 @@ export interface GuiServerOptions {
   };
   // Telegram 호출이 응답하지 않을 때 동시 실행 슬롯을 되돌려주는 상한.
   mutationTimeoutMs?: number;
+  // 작성창 사용량 스트립의 소스(DI 훅). 서버는 fetch 방법을 모르고, 주입되면
+  // createCachedUsageProvider로 감싸 TTL·inflight 단일화를 적용한다.
+  usageProvider?: GuiUsageProvider;
   timeoutOverrides?: Partial<{
     ordinaryBodyInactivityMs: number;
     ordinaryBodyAbsoluteMs: number;
@@ -788,6 +793,12 @@ async function createUploadRunRoot(): Promise<string> {
 
 export async function startGuiServer(options: GuiServerOptions): Promise<GuiServerHandle> {
   const now = options.now ?? Date.now;
+  // 사용량 스트립 소스. TTL 캐시·inflight 단일화는 서버 인스턴스 단위로 감싸므로
+  // 다중 탭 폴칭이어도 codex spawn·grok HTTP가 캐시 창 안에서 1회만 발생한다.
+  const usage = createCachedUsageProvider(
+    options.usageProvider ?? createEmptyUsageProvider(),
+    { now }
+  );
   const capabilityTtlMs = options.capabilityTtlMs ?? CAPABILITY_TTL_MS;
   if (!Number.isSafeInteger(capabilityTtlMs) || capabilityTtlMs < 1_000 || capabilityTtlMs > 300_000) {
     throw new Error("capabilityTtlMs must be an integer from 1000 to 300000");
@@ -1218,6 +1229,22 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
           sseConnections: GUI_MAX_SSE_CONNECTIONS
         }
       });
+      return;
+    }
+
+    // 작성창 사용량 스트립. /api/session과 같은 읽기 전용 가드를 거치고, 제공자별
+    // 조회 실패는 라우트 밖으로 번지지 않는다(값 부재 칸으로 표현).
+    if (url.pathname === "/api/usage") {
+      methodAllowed(method, ["GET"]);
+      assertQuery(url, []);
+      authenticateApi(request, method, false);
+      checkRate(false);
+      const [claude, codex, grok] = await Promise.all([
+        usage.fetchClaudeUsage(),
+        usage.fetchCodexUsage(),
+        usage.fetchGrokUsage()
+      ]);
+      writeJson(response, 200, { claude, codex, grok });
       return;
     }
 

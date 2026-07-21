@@ -13,8 +13,7 @@ const evidenceDir = join(
   projectDir,
   ".chatkjb",
   "workflows",
-  "ralplan-20260719-1502-general-panel-portable-macos",
-  "ultragoal",
+  "ultragoal-20260721-1413-usage-strip",
   "evidence"
 );
 const chromeExecutable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -370,12 +369,54 @@ async function waitFor(predicate, label, timeoutMs = 10_000) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+// 작성창 사용량 스트립 fixture. 첫 Claude 조회를 보류해 "불러오는 중" 초기 상태를
+// 관찰하고, 이후 failClaude로 강제 실패("—")를 유발한다. 서버 캐시(TTL) 때문에
+// codex/grok은 값이 고정되어 있어 실패 주입은 캐시 없는 Claude로만 검증한다.
+class FixtureUsageProvider {
+  calls = { claude: 0, codex: 0, grok: 0 };
+  pending = true;
+  release = null;
+  failClaude = false;
+
+  async fetchClaudeUsage() {
+    this.calls.claude += 1;
+    if (this.pending) await new Promise((resolve) => { this.release = resolve; });
+    if (this.failClaude) throw new Error("claude snapshot read failed");
+    return {
+      fiveHour: { utilization: 42, resetsAt: null },
+      sevenDay: { utilization: 18, resetsAt: null },
+      stale: true,
+      capturedAt: 1_700_000_000_000
+    };
+  }
+
+  async fetchCodexUsage() {
+    this.calls.codex += 1;
+    return {
+      fiveHour: { utilization: 7, resetsAt: null },
+      sevenDay: { utilization: 33, resetsAt: null }
+    };
+  }
+
+  async fetchGrokUsage() {
+    this.calls.grok += 1;
+    return {
+      weekly: { utilization: 63, resetsAt: null },
+      monthly: null,
+      weeklyReceived: true,
+      monthlyReceived: false,
+      loginRequired: false
+    };
+  }
+}
+
 async function main() {
   mkdirSync(evidenceDir, { recursive: true });
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "chatkjb-gui-render-"));
   const client = new FixtureClient();
   client.delayNextTopicPage = true;
-  const server = await startGuiServer({ client });
+  const usageFixture = new FixtureUsageProvider();
+  const server = await startGuiServer({ client, usageProvider: usageFixture });
   server.publishAuthState({ state: "ready" });
   const chrome = spawn(chromeExecutable, [
     "--headless=new",
@@ -528,6 +569,88 @@ async function main() {
       "[...document.querySelectorAll('#general-panel button')].some((button) => button.textContent === '🧠 모델: GPT-5.6-Sol')"
     ), "dynamic General panel lookup");
     if (client.calls.panel !== 1) throw new Error(`General panel lookup count was ${client.calls.panel}, expected 1`);
+
+    // --- 작성창 하단 사용량 스트립 ---
+    // 첫 Claude 조회가 보류되어 있으므로 스트립은 "불러오는 중"이어야 한다.
+    await waitFor(() => usageFixture.calls.claude === 1, "first usage poll");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('#usage-strip')?.textContent.includes('불러오는 중') === true"
+    ), "usage strip initial loading state");
+    usageFixture.pending = false;
+    usageFixture.release?.();
+    await waitFor(async () => await evaluate(
+      "[...document.querySelectorAll('#usage-strip .usage-line')].length === 3"
+    ), "usage strip three provider lines");
+    const usagePhase1 = await evaluate(`(() => {
+      const strip = document.querySelector('#usage-strip');
+      return {
+        insideFooter: strip.closest('footer.composer-shell') !== null,
+        afterForm: strip.previousElementSibling?.id === 'composer',
+        lines: [...strip.querySelectorAll('.usage-line')].map((line) => ({
+          provider: line.querySelector('.usage-provider')?.textContent || '',
+          cells: [...line.querySelectorAll('.usage-cell')].map((cell) => ({
+            text: cell.textContent,
+            unknown: cell.classList.contains('usage-unknown')
+          })),
+          notes: [...line.querySelectorAll('.usage-note')].map((note) => note.textContent)
+        }))
+      };
+    })()`);
+    if (!usagePhase1.insideFooter || !usagePhase1.afterForm) {
+      throw new Error(`usage strip is not mounted directly after the composer form: ${JSON.stringify(usagePhase1)}`);
+    }
+    const expectedUsageLines = [
+      { provider: "Claude", cells: [["5h 42%", false], ["1w 18%", false]], notes: ["대화 전 갱신"] },
+      { provider: "Codex", cells: [["5h 7%", false], ["1w 33%", false]], notes: [] },
+      { provider: "Grok", cells: [["주간 63%", false], ["월간 미수신", true]], notes: [] }
+    ];
+    const usageMismatch = JSON.stringify(usagePhase1.lines.map((line) => [
+      line.provider,
+      line.cells.map((cell) => [cell.text, cell.unknown]),
+      line.notes
+    ])) !== JSON.stringify(expectedUsageLines.map((line) => [
+      line.provider,
+      line.cells,
+      line.notes
+    ]));
+    if (usageMismatch) {
+      throw new Error(`usage strip render mismatch: ${JSON.stringify(usagePhase1.lines)}`);
+    }
+    const usageValuesScreenshot = await cdp.send("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: false
+    }, sessionId);
+    writeFileSync(join(evidenceDir, "usage-strip-values.png"), Buffer.from(usageValuesScreenshot.data, "base64"));
+    // Claude 강제 실패: 해당 칸만 "—"(usage-unknown)로 바뀌고 캐시된 Codex는 유지되어야 한다.
+    usageFixture.failClaude = true;
+    server.publishAuthState({ state: "ready" });
+    await waitFor(async () => await evaluate(`(() => {
+      const line = document.querySelector('#usage-strip .usage-line');
+      const cells = [...(line?.querySelectorAll('.usage-cell') || [])];
+      return cells.length === 2 && cells.every((cell) => cell.textContent.endsWith('—') && cell.classList.contains('usage-unknown'));
+    })()`), "usage strip forced failure dash cells");
+    const usagePhase2 = await evaluate(`(() => {
+      const lines = [...document.querySelectorAll('#usage-strip .usage-line')];
+      return {
+        claudeNotes: [...lines[0].querySelectorAll('.usage-note')].map((note) => note.textContent),
+        codexCells: [...lines[1].querySelectorAll('.usage-cell')].map((cell) => cell.textContent)
+      };
+    })()`);
+    if (usagePhase2.claudeNotes.includes("대화 전 갱신")) {
+      throw new Error("stale note survived the forced failure");
+    }
+    if (usagePhase2.codexCells.join("|") !== "5h 7%|1w 33%") {
+      throw new Error(`codex cells regressed during claude failure: ${usagePhase2.codexCells}`);
+    }
+    if (usageFixture.calls.codex !== 1) {
+      throw new Error(`codex fetch was not cached: ${usageFixture.calls.codex} calls`);
+    }
+    usageFixture.failClaude = false;
+    const usageScreenshot = await cdp.send("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: false
+    }, sessionId);
+    writeFileSync(join(evidenceDir, "usage-strip.png"), Buffer.from(usageScreenshot.data, "base64"));
 
     const generalPanelMeasurements = [];
     for (const width of [800, 1280, 1600]) {

@@ -61,7 +61,9 @@ describe("Telegram GUI configuration", () => {
       "TELEGRAM_BOT_TOKEN=x",
       "DATABASE_PATH=",
       "PROJECTS_PATH=/definitely/missing/projects.json",
-      "CLAUDE_CODE_OAUTH_TOKEN=malformed"
+      "CLAUDE_CODE_OAUTH_TOKEN=malformed",
+      "CODEX_EXECUTABLE=/opt/test/bin/codex",
+      "GROK_EXECUTABLE=/opt/test/bin/grok"
     ]);
 
     await expect(config).resolves.toEqual({
@@ -69,7 +71,10 @@ describe("Telegram GUI configuration", () => {
       apiHash: API_HASH,
       chatId: -1_001_234_567_890,
       allowedUserIds: [123456, 987654],
-      sessionPath: join(directory, "data", "telegram-gui.session")
+      sessionPath: join(directory, "data", "telegram-gui.session"),
+      databasePath: join(directory, "data", "state.sqlite"),
+      codexExecutable: "/opt/test/bin/codex",
+      grokExecutable: "/opt/test/bin/grok"
     });
   });
 
@@ -210,9 +215,11 @@ describe("Telegram GUI configuration", () => {
     const botSession = join(directory, "bot.session");
     writeFileSync(guiSession, "gui\n", { mode: 0o600 });
     writeFileSync(botSession, "bot\n", { mode: 0o600 });
-    const { config } = await loadFromEnvironmentFile(requiredEnvironment({
+    const { config, directory: configDirectory } = await loadFromEnvironmentFile(requiredEnvironment({
       TELEGRAM_GUI_SESSION_PATH: guiSession,
-      TELEGRAM_MTPROTO_SESSION_PATH: botSession
+      TELEGRAM_MTPROTO_SESSION_PATH: botSession,
+      CODEX_EXECUTABLE: "/opt/test/bin/codex",
+      GROK_EXECUTABLE: "/opt/test/bin/grok"
     }));
 
     await expect(config).resolves.toEqual({
@@ -220,7 +227,10 @@ describe("Telegram GUI configuration", () => {
       apiHash: API_HASH,
       chatId: -1_001_234_567_890,
       allowedUserIds: [123456],
-      sessionPath: guiSession
+      sessionPath: guiSession,
+      databasePath: join(configDirectory, "data", "state.sqlite"),
+      codexExecutable: "/opt/test/bin/codex",
+      grokExecutable: "/opt/test/bin/grok"
     });
   });
 });

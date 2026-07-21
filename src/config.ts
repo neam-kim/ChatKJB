@@ -151,7 +151,10 @@ const telegramGuiEnvironmentSchema = z.object({
   DATABASE_PATH: z.preprocess(
     (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
     z.string().trim().min(1).default("./data/state.sqlite")
-  )
+  ),
+  // 작성창 사용량 스트립의 Codex/Grok 라이브 조회용 실행 파일(선택, 없으면 기본 해석).
+  CODEX_EXECUTABLE: z.string().optional(),
+  GROK_EXECUTABLE: z.string().optional()
 });
 
 const projectSchema = z.object({
@@ -473,7 +476,12 @@ export async function loadTelegramGuiConfig() {
     apiHash: env.TELEGRAM_API_HASH,
     chatId: env.TELEGRAM_CHAT_ID,
     allowedUserIds,
-    sessionPath
+    sessionPath,
+    // 작성창 사용량 스트립 소스. DB는 읽기 전용으로만 열고, 실행 파일은 메인 봇과 같은
+    // 해석 규칙을 쓴다.
+    databasePath,
+    codexExecutable: resolveCodexExecutable(env.CODEX_EXECUTABLE),
+    grokExecutable: resolveGrokExecutable(env.GROK_EXECUTABLE)
   };
 }
 

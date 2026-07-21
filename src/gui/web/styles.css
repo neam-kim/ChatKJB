@@ -334,6 +334,17 @@ a:focus-visible {
 .selected-file[hidden] { display: none; }
 .selected-file .quiet-button { flex: 0 0 auto; padding: .3rem .5rem; }
 
+/* 작성창 하단 사용량 스트립. selected-file과 같은 톤의 작은 글씨, 제공자당 1줄. */
+.usage-strip { display: grid; gap: .12rem; margin-top: .45rem; padding: .35rem .6rem; border: 1px solid var(--line); color: var(--muted); font-size: .7rem; }
+.usage-strip[hidden] { display: none; }
+.usage-line { display: flex; align-items: baseline; gap: .5rem; min-width: 0; white-space: nowrap; }
+.usage-provider { flex: 0 0 auto; min-width: 3.1rem; color: var(--text); font-weight: 700; }
+.usage-cell { flex: 0 0 auto; }
+.usage-separator { flex: 0 0 auto; color: var(--faint); }
+/* 실패/부재 "—"는 실제 0%와 구분되도록 더 옅게 한다. */
+.usage-unknown { color: var(--faint); }
+.usage-note { color: var(--faint); font-size: .65rem; }
+
 .alert { position: fixed; right: 1rem; bottom: 1rem; z-index: 20; max-width: min(28rem, calc(100vw - 2rem)); padding: .75rem .9rem; border: 1px solid #7f2d3d; background: #2b1117; color: #fecdd3; font-size: .75rem; box-shadow: 0 .6rem 2rem #000; }
 
 button:disabled { cursor: not-allowed; opacity: .55; }
