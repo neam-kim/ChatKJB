@@ -4,6 +4,7 @@
 import { hostname } from "node:os";
 import { createUsageProvider } from "./gui/usage-source.js";
 import {
+  ensureTailscaleUsageServe,
   startDaemonUsageHttpServer,
   resolveUsageHttpPort,
   type DaemonUsageHttpServerHandle
@@ -60,17 +61,20 @@ export function startDaemonUsagePublisher(
 
   if (options.enableHttp !== false) {
     const httpToken = env.CHATKJB_USAGE_HTTP_TOKEN?.trim();
+    const httpPort = resolveUsageHttpPort(env);
     void startDaemonUsageHttpServer({
       getPayload: () => latest,
-      port: resolveUsageHttpPort(env),
+      port: httpPort,
       ...(httpToken ? { token: httpToken } : {}),
       log
-    }).then((handle) => {
+    }).then(async (handle) => {
       if (stopped) {
         void handle.stop().catch(() => undefined);
         return;
       }
       httpServer = handle;
+      // 맥북은 NAS 없이 Tailscale 만 쓰므로 Serve HTTP(:80) 프록시를 유지한다.
+      await ensureTailscaleUsageServe(httpPort, log);
     }).catch((error: unknown) => {
       log(
         `Usage HTTP failed to start → ${error instanceof Error ? error.message : String(error)}`

@@ -166,7 +166,9 @@ describe("daemon usage HTTP", () => {
     })).toEqual(["http://example.test:9/v1/usage"]);
 
     const defaults = discoverUsageCacheUrls({ env: {} });
-    expect(defaults.some((url) => url.includes("neam-macmini"))).toBe(true);
+    // Tailscale Serve :80 이 첫 후보(방화벽 우회).
+    expect(defaults[0]).toBe("http://neam-macmini/v1/usage");
+    expect(defaults.some((url) => url.includes(":17846"))).toBe(true);
     expect(defaults.every((url) => url.endsWith("/v1/usage"))).toBe(true);
   });
 

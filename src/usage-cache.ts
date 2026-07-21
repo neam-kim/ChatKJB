@@ -244,15 +244,26 @@ export function discoverUsageCacheUrls(options: {
     return urls;
   }
 
+  // 명시 URL 목록(전체 URL 또는 host[:port]). 비어 있으면 기본 후보.
   const hostsRaw = env.CHATKJB_USAGE_HOSTS?.trim();
-  const hosts = hostsRaw
-    ? hostsRaw.split(",").map((part) => part.trim()).filter(Boolean)
-    // Tailscale machine name + mDNS. 맥북은 NAS 없이 Tailscale 만으로 데몬에 닿는다.
-    : ["neam-macmini", "neamui-Macmini.local", "neamui-Macmini"];
-
-  for (const host of hosts) {
-    add(`http://${host}:${port}`);
+  if (hostsRaw) {
+    for (const part of hostsRaw.split(",").map((entry) => entry.trim()).filter(Boolean)) {
+      if (/^https?:\/\//i.test(part)) add(part);
+      else if (part.includes(":")) add(`http://${part}`);
+      else add(`http://${part}:${port}`);
+    }
+    return urls;
   }
+
+  // 기본 후보:
+  // 1) Tailscale Serve HTTP(:80) — macOS 방화벽이 :17846 직접 수신을 막는 경우가 많아
+  //    `tailscale serve --bg --http=80 17846` 경유가 맥북에서 가장 안정적이다.
+  // 2) 데몬 포트 직접(방화벽 허용 시)
+  // 3) 로컬 mDNS(같은 LAN)
+  add("http://neam-macmini/v1/usage");
+  add(`http://neam-macmini:${port}/v1/usage`);
+  add(`http://neamui-Macmini.local:${port}/v1/usage`);
+  add(`http://neamui-Macmini:${port}/v1/usage`);
   return urls;
 }
 
