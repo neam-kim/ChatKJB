@@ -1040,6 +1040,49 @@ private final class AppDelegate: NSObject,
         return nil
     }
 
+    // WKWebView는 이 델리게이트가 없으면 window.alert/confirm을 조용히 무시한다.
+    // 토픽 삭제 등 확인 대화상자가 바로 false가 되어 동작하지 않던 원인이었다.
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptAlertPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping () -> Void
+    ) {
+        if noninteractive {
+            completionHandler()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "ChatKJB Terminal"
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "확인")
+        alert.beginSheetModal(for: window) { _ in
+            completionHandler()
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        if noninteractive {
+            completionHandler(false)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "확인"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "확인")
+        alert.addButton(withTitle: "취소")
+        alert.beginSheetModal(for: window) { response in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
+    }
+
     func webView(
         _ webView: WKWebView,
         runOpenPanelWith parameters: WKOpenPanelParameters,

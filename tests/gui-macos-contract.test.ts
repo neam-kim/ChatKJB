@@ -79,6 +79,16 @@ describe("ChatKJB Terminal macOS shell contract", () => {
     expect(swift).toContain("completionHandler(response == .OK ? panel.urls : nil)");
   });
 
+  it("routes window.alert and window.confirm through WKUIDelegate native panels", () => {
+    // 이 핸들러가 없으면 WKWebView에서 confirm이 즉시 false가 되어 토픽 삭제가 무동작한다.
+    expect(swift).toContain("runJavaScriptAlertPanelWithMessage message: String");
+    expect(swift).toContain("runJavaScriptConfirmPanelWithMessage message: String");
+    expect(swift).toContain("completionHandler: @escaping (Bool) -> Void");
+    expect(swift).toContain("completionHandler(response == .alertFirstButtonReturn)");
+    expect(swift).toMatch(/if noninteractive \{\s*completionHandler\(false\)/);
+    expect(web).toContain("window.confirm(");
+  });
+
   it("declares local networking without a broad ATS exception", () => {
     expect(plist).toContain("<key>NSAllowsLocalNetworking</key>");
     expect(plist).not.toContain("NSAllowsArbitraryLoads");
