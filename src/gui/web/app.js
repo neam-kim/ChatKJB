@@ -360,6 +360,19 @@ function startApplication() {
     const claude = raw?.claude && typeof raw.claude === "object" ? raw.claude : {};
     const codex = raw?.codex && typeof raw.codex === "object" ? raw.codex : {};
     const grok = raw?.grok && typeof raw.grok === "object" ? raw.grok : {};
+    // Codex는 CODEX_ACCOUNT_HOMES 다계정 지원으로 accounts[] 형태. 계정 줄이 없으면
+    // 빈 배열로 두고 렌더러가 "—" 한 줄을 만든다(구 {fiveHour,sevenDay} 형태는 무시).
+    const codexAccounts = Array.isArray(codex.accounts)
+      ? codex.accounts
+        .filter((account) => account && typeof account === "object")
+        .map((account) => ({
+          label: typeof account.label === "string" && account.label.trim()
+            ? account.label.trim()
+            : "Codex",
+          fiveHour: usageWindowDto(account.fiveHour),
+          sevenDay: usageWindowDto(account.sevenDay)
+        }))
+      : [];
     return {
       claude: {
         fiveHour: usageWindowDto(claude.fiveHour),
@@ -367,10 +380,7 @@ function startApplication() {
         stale: claude.stale === true,
         capturedAt: Number.isFinite(Number(claude.capturedAt)) ? Number(claude.capturedAt) : null
       },
-      codex: {
-        fiveHour: usageWindowDto(codex.fiveHour),
-        sevenDay: usageWindowDto(codex.sevenDay)
-      },
+      codex: { accounts: codexAccounts },
       grok: {
         weekly: usageWindowDto(grok.weekly),
         monthly: usageWindowDto(grok.monthly),
@@ -435,9 +445,26 @@ function startApplication() {
       claudeNotes.push(usageNote("대화 전 갱신"));
     }
     const grokNotes = grok.loginRequired ? [usageNote("로그인 필요")] : [];
+    // Codex 계정 수에 따라 줄을 만든다. 단일 계정은 제공자명만, 다계정이면
+    // "Codex · .codex-acct-b"처럼 레이블을 붙여 계정을 구분한다. 계정이 0개면
+    // 빈 칸 한 줄을 남겨 조회 실패/미설정을 표시한다.
+    const codexAccounts = Array.isArray(codex.accounts) ? codex.accounts : [];
+    const codexLines = (codexAccounts.length === 0
+      ? [{ label: "", fiveHour: null, sevenDay: null }]
+      : codexAccounts
+    ).map((account) => {
+      const multi = codexAccounts.length > 1;
+      const provider = multi && account.label
+        ? `Codex · ${account.label}`
+        : "Codex";
+      return usageLine(provider, [
+        usageCell("5h", account.fiveHour),
+        usageCell("1w", account.sevenDay)
+      ]);
+    });
     strip.replaceChildren(
       usageLine("Claude", [usageCell("5h", claude.fiveHour), usageCell("1w", claude.sevenDay)], claudeNotes),
-      usageLine("Codex", [usageCell("5h", codex.fiveHour), usageCell("1w", codex.sevenDay)]),
+      ...codexLines,
       usageLine("Grok", [
         usageCell("주간", grok.weekly, grok.weeklyReceived ? "—" : "미수신"),
         usageCell("월간", grok.monthly, grok.monthlyReceived ? "—" : "미수신")

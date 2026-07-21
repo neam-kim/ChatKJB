@@ -73,6 +73,10 @@ export interface ClaudeRunContext {
   rateLimitRejected: boolean;
   receivedMessageCount: number;
   receivedResult: boolean;
+  /** 아직 끝나지 않은 SDK Task/서브에이전트 id. 완료 전 세션 종료를 막는다. */
+  openTaskIds: Set<string>;
+  /** 하위 작업 대기 때문에 result를 한 번이라도 보류했는지. */
+  deferredCompletionForBackground: boolean;
 }
 
 interface ClaudeHooks {
@@ -152,6 +156,12 @@ export class ClaudeExecutor {
         if (await this.handleStreamMessage(message, ctx)) break;
       }
       if (!ctx.receivedResult) {
+        if (ctx.deferredCompletionForBackground || ctx.openTaskIds.size > 0) {
+          throw new Error(
+            `Claude 하위 작업 ${ctx.openTaskIds.size || "?"}개가 끝나기 전에 SDK 스트림이 종료되었습니다. `
+            + "서브에이전트 대기 중 작업이 조기 종료된 것으로 보입니다."
+          );
+        }
         throw new ClaudeStreamEndedWithoutResultError(ctx.receivedMessageCount);
       }
       await this.finalizeTurn(ctx);
@@ -215,7 +225,9 @@ export class ClaudeExecutor {
       hasDeliveredAssistantText: false,
       rateLimitRejected: false,
       receivedMessageCount: 0,
-      receivedResult: false
+      receivedResult: false,
+      openTaskIds: new Set(),
+      deferredCompletionForBackground: false
     };
   }
 
@@ -288,12 +300,58 @@ export class ClaudeExecutor {
     ctx.lastActivityAt = Date.now();
     ctx.idleWatchdog = setInterval(() => {
       if (this.host.store.getSession(ctx.session.id)?.status === "waiting_approval") return;
+      // 서브에이전트/백그라운드 Task가 돌고 있으면 메인 스트림이 잠시 조용해도 정상이다.
+      if (ctx.openTaskIds.size > 0) return;
       if (Date.now() - ctx.lastActivityAt <= this.host.options.turnIdleTimeoutMs) return;
       ctx.idleTimedOut = true;
       ctx.abortController.abort();
       ctx.run.query?.close();
     }, Math.min(30_000, this.host.options.turnIdleTimeoutMs));
     this.idleWatchdogs.add(ctx.idleWatchdog);
+  }
+
+  /** SDK task_started/updated/notification으로 열린 하위 작업을 추적한다. */
+  private trackTaskLifecycle(message: SDKMessage, ctx: ClaudeRunContext): void {
+    if (message.type !== "system") return;
+    if (message.subtype === "task_started" && typeof message.task_id === "string") {
+      ctx.openTaskIds.add(message.task_id);
+      const label = message.description?.trim() || message.task_id;
+      ctx.renderer.note(`Claude 하위 작업 시작: ${label}`);
+      return;
+    }
+    if (message.subtype === "task_updated" && typeof message.task_id === "string") {
+      const status = message.patch?.status;
+      if (status === "completed" || status === "failed" || status === "killed") {
+        ctx.openTaskIds.delete(message.task_id);
+      } else if (status === "pending" || status === "running" || status === "paused") {
+        ctx.openTaskIds.add(message.task_id);
+      }
+      return;
+    }
+    if (message.subtype === "task_notification" && typeof message.task_id === "string") {
+      ctx.openTaskIds.delete(message.task_id);
+      const summary = message.summary?.trim();
+      ctx.renderer.note(
+        summary
+          ? `Claude 하위 작업 ${message.status}: ${summary.slice(0, 180)}`
+          : `Claude 하위 작업 ${message.status}: ${message.task_id}`
+      );
+      return;
+    }
+    if (message.subtype === "task_progress") {
+      // 진행 이벤트만으로도 유휴 워치독 타임스탬프는 갱신된다(handleStreamMessage).
+      return;
+    }
+  }
+
+  private resultHasDeferredWork(message: SDKMessage, ctx: ClaudeRunContext): boolean {
+    if (message.type !== "result") return false;
+    // 추적 중인 하위 작업이 남아 있으면 항상 보류.
+    if (ctx.openTaskIds.size > 0) return true;
+    if (message.subtype !== "success") return false;
+    // SDK가 백그라운드 도구로 넘긴 경우(일시 정지 후 wake).
+    if (message.deferred_tool_use) return true;
+    return message.terminal_reason === "tool_deferred";
   }
 
   private handleRateLimitEvent(message: SDKMessage, ctx: ClaudeRunContext): void {
@@ -354,7 +412,6 @@ export class ClaudeExecutor {
 
   private async handleResultMessage(message: SDKMessage, ctx: ClaudeRunContext): Promise<boolean> {
     if (message.type !== "result") return false;
-    ctx.receivedResult = true;
     ctx.sdkSessionId = message.session_id;
     const serverUsage = await readUsageSnapshot(ctx.sdkQuery!);
     if (serverUsage) {
@@ -365,6 +422,28 @@ export class ClaudeExecutor {
     this.host.tokenPool.observe(ctx.oauthToken, ctx.currentTokenUsage);
     const failureText = resultFailureText(message, ctx.rateLimitRejected);
     if (failureText) throw new Error(failureText);
+
+    // 서브에이전트/백그라운드 Task가 아직 돌고 있으면 이 result는 일시 정지로 본다.
+    // 쿼리·입력 큐를 닫지 않고 스트림을 유지해 task_notification 이후 통합 턴을 받는다.
+    if (this.resultHasDeferredWork(message, ctx)) {
+      ctx.deferredCompletionForBackground = true;
+      ctx.receivedResult = false;
+      ctx.run.pendingTurns = Math.max(1, ctx.run.pendingTurns);
+      this.host.store.updateSession(ctx.session.id, {
+        sdkSessionId: ctx.sdkSessionId,
+        usageSnapshot: ctx.latestUsage,
+        status: "running"
+      });
+      const openCount = ctx.openTaskIds.size;
+      ctx.renderer.note(
+        openCount > 0
+          ? `Claude 하위 작업 ${openCount}개 완료 대기 중 — 통합 전 작업 종료를 보류합니다.`
+          : "Claude 백그라운드 작업 완료 대기 중 — 통합 전 작업 종료를 보류합니다."
+      );
+      return false;
+    }
+
+    ctx.receivedResult = true;
     ctx.lastAssistantText = await queueRequestedUserInput(
       this.host,
       ctx.session,
@@ -409,6 +488,7 @@ export class ClaudeExecutor {
       ctx.sdkSessionId = message.session_id;
       this.host.store.updateSession(ctx.session.id, { sdkSessionId: ctx.sdkSessionId });
     }
+    this.trackTaskLifecycle(message, ctx);
     this.handleRateLimitEvent(message, ctx);
     this.handleCompactBoundary(message, ctx);
     await this.renderAssistantBlocks(message, ctx);
@@ -640,8 +720,16 @@ export class ClaudeExecutor {
     };
     const stop: HookCallback = async (hookInput) => {
       if (hookInput.hook_event_name !== "Stop") return {};
-      const backgroundTasks = hookInput.background_tasks ?? [];
-      if (hookInput.stop_hook_active || backgroundTasks.length === 0) return {};
+      const backgroundTasks = (hookInput.background_tasks ?? []).filter((task) => {
+        const status = (task.status ?? "running").toLowerCase();
+        return status !== "completed"
+          && status !== "failed"
+          && status !== "killed"
+          && status !== "stopped";
+      });
+      // stop_hook_active 이어도 미완료 하위 작업이 있으면 종료를 막는다.
+      // (이전 로직은 stop_hook_active 시 무조건 허용 → 서브에이전트 대기 중 [DONE] 오판정)
+      if (backgroundTasks.length === 0) return {};
       if (!stopDeferralNoted) {
         stopDeferralNoted = true;
         renderer.note(
@@ -652,14 +740,18 @@ export class ClaudeExecutor {
         .slice(0, 5)
         .map((task) => `${task.id}: ${task.description} (${task.status})`)
         .join("\n");
+      const guidance =
+        "아직 완료되지 않은 하위 작업이 있으므로 현재 턴을 종료하지 마십시오. "
+        + "하위 작업이 끝나기를 기다려 결과를 수집·통합하고, 남은 검증까지 마친 뒤 최종 응답하십시오.\n"
+        + taskSummary;
       return {
+        // decision:block 이 확실한 중단 억제. additionalContext 는 비오류 안내 경로.
+        decision: "block",
+        reason: guidance,
         continue: true,
         hookSpecificOutput: {
           hookEventName: "Stop",
-          additionalContext:
-            "아직 완료되지 않은 하위 작업이 있으므로 현재 턴을 종료하지 마십시오. "
-            + "하위 작업이 끝나기를 기다려 결과를 수집·통합하고, 남은 검증까지 마친 뒤 최종 응답하십시오.\n"
-            + taskSummary
+          additionalContext: guidance
         }
       };
     };

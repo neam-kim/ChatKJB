@@ -8,6 +8,7 @@
 // 패키징된 GUI에서 Claude 칸이 영구 실패한다. 내장 모듈은 번들이 자동으로 external
 // 처리하므로 휘발성 앱에서도 그대로 동작한다.
 import { DatabaseSync } from "node:sqlite";
+import { basename } from "node:path";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fetchCodexLiveUsage } from "../codex-live-usage.js";
@@ -15,6 +16,7 @@ import { fetchGrokLiveUsage } from "../grok-live-usage.js";
 import { buildCodexEnvironment } from "../session-environment.js";
 import type {
   GuiClaudeUsageDto,
+  GuiCodexAccountUsageDto,
   GuiCodexUsageDto,
   GuiGrokUsageDto,
   GuiUsageProvider,
@@ -35,7 +37,10 @@ export interface UsageSourceOptions {
   databasePath: string;
   codexExecutable: string;
   grokExecutable: string;
-  // 단일 기본 CODEX_HOME만 지원한다(CODEX_ACCOUNT_HOMES 다중 계정은 미대응).
+  // Codex 구독 계정 홈(CODEX_ACCOUNT_HOMES) 목록. 각 홈마다 라이브 조회를 한 번씩 돌려
+  // 계정별 사용량 줄을 만든다. 비어 있거나 미지정이면 codexHome(또는 기본 홈) 1개만 쓴다.
+  codexAccountHomes?: readonly string[];
+  // 단일 홈 하위호환 경로. codexAccountHomes가 비었을 때만 참조한다.
   codexHome?: string;
   cwd?: string;
   fetchCodex?: typeof fetchCodexLiveUsage;
@@ -55,7 +60,6 @@ const EMPTY_CLAUDE_USAGE: GuiClaudeUsageDto = {
   stale: false,
   capturedAt: null
 };
-const EMPTY_CODEX_USAGE: GuiCodexUsageDto = { fiveHour: null, sevenDay: null };
 const EMPTY_GROK_USAGE: GuiGrokUsageDto = {
   weekly: null,
   monthly: null,
@@ -68,7 +72,7 @@ const EMPTY_GROK_USAGE: GuiGrokUsageDto = {
 export function createEmptyUsageProvider(): GuiUsageProvider {
   return {
     fetchClaudeUsage: async () => ({ ...EMPTY_CLAUDE_USAGE }),
-    fetchCodexUsage: async () => ({ ...EMPTY_CODEX_USAGE }),
+    fetchCodexUsage: async () => ({ accounts: [] }),
     fetchGrokUsage: async () => ({ ...EMPTY_GROK_USAGE })
   };
 }
@@ -83,23 +87,39 @@ function claudeWindow(window: UsageWindow | undefined): GuiUsageWindowDto | null
   };
 }
 
+function snapshotHasRateWindows(snapshot: UsageSnapshot): boolean {
+  return Boolean(snapshot.fiveHour || snapshot.sevenDay);
+}
+
 /**
- * 공유 SQLite에서 가장 최근에 갱신된 세션의 usage_snapshot 1건을 읽는다.
+ * 공유 SQLite에서 Claude 사용량 스냅샷을 읽는다.
  * 읽기 전용 핸들을 매 폴칭마다 열고 닫으므로 WAL 체크포인트와 무관하게 항상 신선값을 본다.
+ * 최근 세션 중 **한도 창(fiveHour/sevenDay)이 있는** 스냅샷을 우선하고, 없으면 최신 스냅샷을 쓴다.
+ * (rateLimitsAvailable=false 인 빈 스냅샷이 최신이면 칸이 전부 "—"가 되는 회귀를 막는다.)
  * DB 부재·스키마 미생성·JSON 파손은 모두 "스냅샷 없음"과 같게 취급한다.
  */
 function readLatestClaudeUsageSnapshot(databasePath: string): UsageSnapshot | null {
   let db: DatabaseSync | null = null;
   try {
     db = new DatabaseSync(databasePath, { readOnly: true });
-    const row = db.prepare(
-      "SELECT usage_snapshot FROM sessions WHERE usage_snapshot IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
-    ).get() as { usage_snapshot?: unknown } | undefined;
-    const raw = row?.usage_snapshot;
-    if (typeof raw !== "string" || !raw) return null;
-    const parsed = JSON.parse(raw) as UsageSnapshot;
-    if (!parsed || typeof parsed !== "object" || typeof parsed.capturedAt !== "number") return null;
-    return parsed;
+    const rows = db.prepare(
+      "SELECT usage_snapshot FROM sessions WHERE usage_snapshot IS NOT NULL ORDER BY updated_at DESC LIMIT 24"
+    ).all() as Array<{ usage_snapshot?: unknown }>;
+    let fallback: UsageSnapshot | null = null;
+    for (const row of rows) {
+      const raw = row?.usage_snapshot;
+      if (typeof raw !== "string" || !raw) continue;
+      let parsed: UsageSnapshot;
+      try {
+        parsed = JSON.parse(raw) as UsageSnapshot;
+      } catch {
+        continue;
+      }
+      if (!parsed || typeof parsed !== "object" || typeof parsed.capturedAt !== "number") continue;
+      if (!fallback) fallback = parsed;
+      if (snapshotHasRateWindows(parsed)) return parsed;
+    }
+    return fallback;
   } catch {
     return null;
   } finally {
@@ -114,6 +134,81 @@ function readLatestClaudeUsageSnapshot(databasePath: string): UsageSnapshot | nu
 function isGrokLoginError(error: string | null): boolean {
   return typeof error === "string" && /로그인|login/i.test(error);
 }
+
+/**
+ * Grok 과금 API의 periodType을 주간/월간 칸으로 정규화한다.
+ * 실측 값은 `USAGE_PERIOD_TYPE_WEEKLY` / `USAGE_PERIOD_TYPE_MONTHLY` 이고,
+ * 테스트·구버전 호환을 위해 짧은 `WEEKLY` / `MONTHLY` 도 받아들인다.
+ */
+export function grokPeriodKind(
+  periodType: string | null | undefined
+): "weekly" | "monthly" | null {
+  if (!periodType) return null;
+  const normalized = periodType.trim().toUpperCase();
+  if (
+    normalized === "WEEKLY"
+    || normalized === "USAGE_PERIOD_TYPE_WEEKLY"
+    || normalized.endsWith("_WEEKLY")
+  ) {
+    return "weekly";
+  }
+  if (
+    normalized === "MONTHLY"
+    || normalized === "USAGE_PERIOD_TYPE_MONTHLY"
+    || normalized.endsWith("_MONTHLY")
+  ) {
+    return "monthly";
+  }
+  return null;
+}
+
+/**
+ * Codex 라이브 스냅샷의 primary/secondary를 windowDurationMins로 5시간/주간에 매핑한다.
+ * 위치(primary인지 secondary인지)를 가정하지 않고, 스냅샷 부재나 매칭 실패 창은 null로 둔다.
+ */
+function codexWindows(
+  snapshot: Awaited<ReturnType<typeof fetchCodexLiveUsage>>["snapshot"]
+): { fiveHour: GuiUsageWindowDto | null; sevenDay: GuiUsageWindowDto | null } {
+  let fiveHour: GuiUsageWindowDto | null = null;
+  let sevenDay: GuiUsageWindowDto | null = null;
+  if (!snapshot) return { fiveHour, sevenDay };
+  for (const window of [snapshot.primary, snapshot.secondary]) {
+    if (!window) continue;
+    const dto: GuiUsageWindowDto = { utilization: window.usedPercent, resetsAt: window.resetsAt };
+    const mins = window.windowDurationMins;
+    // 정확 매칭 우선. 값이 비정형이어도 대략 5시간/주간으로 나눠 칸을 비우지 않는다.
+    if (mins === 300 || (mins !== null && mins > 0 && mins <= 360 && fiveHour === null)) {
+      fiveHour = dto;
+    } else if (mins === 10_080 || (mins !== null && mins >= 1_440 && sevenDay === null)) {
+      sevenDay = dto;
+    } else if (mins === null && fiveHour === null) {
+      fiveHour = dto;
+    } else if (mins === null && sevenDay === null) {
+      sevenDay = dto;
+    }
+  }
+  return { fiveHour, sevenDay };
+}
+
+/**
+ * 계정 홈 경로에 표시용 레이블을 붙인다. 기본은 홈 디렉터리 basename(예: `.codex-acct-b`).
+ * basename이 겹치면 순번(#1, #2…)을 덧붙여 사용자가 계정을 구분할 수 있게 한다.
+ */
+export function labelCodexHomes(homes: readonly string[]): Array<{ home: string; label: string }> {
+  const counts = new Map<string, number>();
+  for (const home of homes) {
+    const key = basename(home) || home;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const used = new Map<string, number>();
+  return homes.map((home) => {
+    const key = basename(home) || home;
+    if ((counts.get(key) ?? 0) <= 1) return { home, label: key };
+    const index = (used.get(key) ?? 0) + 1;
+    used.set(key, index);
+    return { home, label: `${key} #${index}` };
+  });
+}
 /**
  * 원시 사용량 소스. 캐시 없이 매번 실제 조회를 수행한다 — 서버는 이 제공자를
  * createCachedUsageProvider로 감싸 주입받는다.
@@ -125,6 +220,11 @@ export function createUsageProvider(options: UsageSourceOptions): GuiUsageProvid
   const cwd = options.cwd ?? process.cwd();
   const codexHome = options.codexHome
     ?? (process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"));
+  // 조회할 Codex 계정 홈 목록. 다계정이 지정되면 그대로, 아니면 단일 홈 하나로 폴백한다.
+  const codexHomes = options.codexAccountHomes && options.codexAccountHomes.length > 0
+    ? [...options.codexAccountHomes]
+    : [codexHome];
+  const codexAccounts = labelCodexHomes(codexHomes);
 
   return {
     async fetchClaudeUsage(): Promise<GuiClaudeUsageDto> {
@@ -139,24 +239,20 @@ export function createUsageProvider(options: UsageSourceOptions): GuiUsageProvid
     },
 
     async fetchCodexUsage(): Promise<GuiCodexUsageDto> {
-      const result = await fetchCodex({
-        cwd,
-        codexExecutable: options.codexExecutable,
-        env: buildCodexEnvironment(codexHome),
-        timeoutMs: LIVE_FETCH_TIMEOUT_MS
-      });
-      const snapshot = result.snapshot;
-      if (!snapshot) return { ...EMPTY_CODEX_USAGE };
-      // primary/secondary 위치를 가정하지 않고 windowDurationMins로 5시간/주간을 고른다.
-      let fiveHour: GuiUsageWindowDto | null = null;
-      let sevenDay: GuiUsageWindowDto | null = null;
-      for (const window of [snapshot.primary, snapshot.secondary]) {
-        if (!window) continue;
-        const dto: GuiUsageWindowDto = { utilization: window.usedPercent, resetsAt: window.resetsAt };
-        if (window.windowDurationMins === 300) fiveHour = dto;
-        else if (window.windowDurationMins === 10_080) sevenDay = dto;
+      // 계정별로 라이브 조회를 순차 실행한다 — 각 조회는 codex app-server 자식을 띄우므로
+      // 병렬 spawn으로 자원을 몰지 않고 등록 순서대로 처리한다. 한 계정의 실패는 그 계정
+      // 줄만 빈 창으로 두고 나머지 계정에는 영향을 주지 않는다.
+      const accounts: GuiCodexAccountUsageDto[] = [];
+      for (const account of codexAccounts) {
+        const result = await fetchCodex({
+          cwd,
+          codexExecutable: options.codexExecutable,
+          env: buildCodexEnvironment(account.home),
+          timeoutMs: LIVE_FETCH_TIMEOUT_MS
+        });
+        accounts.push({ label: account.label, ...codexWindows(result.snapshot) });
       }
-      return { fiveHour, sevenDay };
+      return { accounts };
     },
 
     async fetchGrokUsage(): Promise<GuiGrokUsageDto> {
@@ -172,12 +268,16 @@ export function createUsageProvider(options: UsageSourceOptions): GuiUsageProvid
         utilization: snapshot.creditUsagePercent,
         resetsAt: snapshot.periodEnd
       };
-      const periodType = snapshot.periodType?.trim().toUpperCase();
-      if (periodType === "WEEKLY") {
+      const kind = grokPeriodKind(snapshot.periodType);
+      if (kind === "weekly") {
         return { ...EMPTY_GROK_USAGE, weekly: window, weeklyReceived: true };
       }
-      if (periodType === "MONTHLY") {
+      if (kind === "monthly") {
         return { ...EMPTY_GROK_USAGE, monthly: window, monthlyReceived: true };
+      }
+      // periodType이 비어도 크레딧 %가 있으면 주간 칸에 표시(빈 스트립보다 정보가 낫다).
+      if (snapshot.creditUsagePercent !== null && Number.isFinite(snapshot.creditUsagePercent)) {
+        return { ...EMPTY_GROK_USAGE, weekly: window, weeklyReceived: true };
       }
       return { ...EMPTY_GROK_USAGE };
     }
@@ -198,7 +298,7 @@ export function createCachedUsageProvider(
   const codexTtlMs = options.codexTtlMs ?? CODEX_CACHE_TTL_MS;
   const grokTtlMs = options.grokTtlMs ?? GROK_CACHE_TTL_MS;
 
-  let codexValue: GuiCodexUsageDto = { ...EMPTY_CODEX_USAGE };
+  let codexValue: GuiCodexUsageDto = { accounts: [] };
   let codexFetchedAt = Number.NEGATIVE_INFINITY;
   let codexInflight: Promise<GuiCodexUsageDto> | null = null;
 
@@ -232,7 +332,7 @@ export function createCachedUsageProvider(
         try {
           codexValue = await provider.fetchCodexUsage();
         } catch {
-          codexValue = { ...EMPTY_CODEX_USAGE };
+          codexValue = { accounts: [] };
         } finally {
           codexFetchedAt = now();
           codexInflight = null;

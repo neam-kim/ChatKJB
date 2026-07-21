@@ -338,7 +338,8 @@ a:focus-visible {
 .usage-strip { display: grid; gap: .12rem; margin-top: .45rem; padding: .35rem .6rem; border: 1px solid var(--line); color: var(--muted); font-size: .7rem; }
 .usage-strip[hidden] { display: none; }
 .usage-line { display: flex; align-items: baseline; gap: .5rem; min-width: 0; white-space: nowrap; }
-.usage-provider { flex: 0 0 auto; min-width: 3.1rem; color: var(--text); font-weight: 700; }
+/* Codex 다계정 시 "Codex · .codex-acct-b"처럼 길어질 수 있어 min-width만 두고 넘치면 잘린다. */
+.usage-provider { flex: 0 1 auto; min-width: 3.1rem; max-width: 11rem; overflow: hidden; text-overflow: ellipsis; color: var(--text); font-weight: 700; }
 .usage-cell { flex: 0 0 auto; }
 .usage-separator { flex: 0 0 auto; color: var(--faint); }
 /* 실패/부재 "—"는 실제 0%와 구분되도록 더 옅게 한다. */

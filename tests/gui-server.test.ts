@@ -1760,8 +1760,13 @@ describe("작성창 사용량 스트립 /api/usage", () => {
       fetchCodexUsage: async () => {
         calls.codex += 1;
         return {
-          fiveHour: { utilization: 7, resetsAt: null },
-          sevenDay: { utilization: 33, resetsAt: null }
+          accounts: [
+            {
+              label: ".codex",
+              fiveHour: { utilization: 7, resetsAt: null },
+              sevenDay: { utilization: 33, resetsAt: null }
+            }
+          ]
         };
       },
       fetchGrokUsage: async () => {
@@ -1829,8 +1834,13 @@ describe("작성창 사용량 스트립 /api/usage", () => {
       capturedAt: 1_784_600_000_000
     });
     expect(body.codex).toEqual({
-      fiveHour: { utilization: 7, resetsAt: null },
-      sevenDay: { utilization: 33, resetsAt: null }
+      accounts: [
+        {
+          label: ".codex",
+          fiveHour: { utilization: 7, resetsAt: null },
+          sevenDay: { utilization: 33, resetsAt: null }
+        }
+      ]
     });
     expect(body.grok).toEqual({
       weekly: { utilization: 63, resetsAt: null },
@@ -1870,11 +1880,11 @@ describe("작성창 사용량 스트립 /api/usage", () => {
     expect(response.status).toBe(200);
     const body = await response.json() as {
       claude: { capturedAt: number | null };
-      codex: { fiveHour: unknown };
+      codex: { accounts: unknown[] };
       grok: { weeklyReceived: boolean };
     };
     expect(body.claude.capturedAt).toBeNull();
-    expect(body.codex.fiveHour).toBeNull();
+    expect(body.codex.accounts).toEqual([]);
     expect(body.grok.weeklyReceived).toBe(false);
   });
 });

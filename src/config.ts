@@ -154,7 +154,9 @@ const telegramGuiEnvironmentSchema = z.object({
   ),
   // 작성창 사용량 스트립의 Codex/Grok 라이브 조회용 실행 파일(선택, 없으면 기본 해석).
   CODEX_EXECUTABLE: z.string().optional(),
-  GROK_EXECUTABLE: z.string().optional()
+  GROK_EXECUTABLE: z.string().optional(),
+  // 사용량 스트립의 Codex 다계정 조회용 홈 목록(CSV). 미설정이면 CODEX_HOME/~.codex 단일 계정.
+  CODEX_ACCOUNT_HOMES: z.string().optional()
 });
 
 const projectSchema = z.object({
@@ -452,8 +454,98 @@ export async function loadProjects(path: string): Promise<ProjectConfig[]> {
   return validateUniqueProjects(projects);
 }
 
+/**
+ * 메인 봇 프로젝트 루트를 찾는다. Terminal GUI는 Application Support 아래에 격리된
+ * 설정만 갖고 DATABASE_PATH/CODEX_ACCOUNT_HOMES가 비는 경우가 많아, 사용량 스트립이
+ * 봇과 같은 SQLite·Codex 계정을 보려면 이 경로가 필요하다.
+ *
+ * 우선순위: CHATKJB_PROJECT_DIR → LaunchAgent com.chatkjb.bot → 소스 트리 추정.
+ */
+export function discoverBotProjectDir(env: NodeJS.ProcessEnv = process.env): string | null {
+  const fromEnv = env.CHATKJB_PROJECT_DIR?.trim();
+  if (fromEnv) {
+    const resolved = resolve(expandHome(fromEnv));
+    if (existsSync(resolved) && statSync(resolved).isDirectory()) return resolved;
+  }
+
+  const plistPath = join(homedir(), "Library/LaunchAgents/com.chatkjb.bot.plist");
+  if (existsSync(plistPath)) {
+    try {
+      const text = readFileSync(plistPath, "utf8");
+      const projectMatch = text.match(/CHATKJB_PROJECT_DIR<\/key>\s*<string>([^<]+)<\/string>/i);
+      const project = projectMatch?.[1]?.trim();
+      if (project) {
+        const resolved = resolve(expandHome(project));
+        if (existsSync(resolved) && statSync(resolved).isDirectory()) return resolved;
+      }
+      const wdMatch = text.match(/<key>\s*WorkingDirectory\s*<\/key>\s*<string>([^<]+)<\/string>/i);
+      const workingDirectory = wdMatch?.[1]?.trim();
+      if (workingDirectory) {
+        const resolved = resolve(expandHome(workingDirectory));
+        if (existsSync(resolved) && statSync(resolved).isDirectory()) return resolved;
+      }
+    } catch {
+      // plist 읽기 실패는 다음 후보로 넘어간다.
+    }
+  }
+
+  const source = projectSourceDir();
+  if (
+    existsSync(join(source, "data", "state.sqlite"))
+    || existsSync(join(source, "projects.json"))
+  ) {
+    return source;
+  }
+  return null;
+}
+
+/**
+ * Terminal GUI .env 에 빠진 사용량 관련 키를 봇 프로젝트 .env 로 채운다.
+ * Telegram 인증 키는 이미 로드된 값을 덮어쓰지 않는다(override: false).
+ */
+function loadBotUsageEnvironment(): void {
+  const projectDir = discoverBotProjectDir();
+  if (!projectDir) return;
+  if (!process.env.CHATKJB_PROJECT_DIR?.trim()) {
+    process.env.CHATKJB_PROJECT_DIR = projectDir;
+  }
+  const botEnvPath = join(projectDir, ".env");
+  if (!existsSync(botEnvPath)) return;
+  loadDotenv({ path: botEnvPath, quiet: true, override: false });
+}
+
+/**
+ * 사용량 스트립용 공유 DB 경로를 고른다.
+ * Terminal Application Support 기본값(./data/state.sqlite)은 세션 테이블이 비어 있거나
+ * 파일이 없을 수 있으므로, 그때는 봇 프로젝트 data/state.sqlite 로 폴백한다.
+ */
+export function resolveUsageDatabasePath(
+  configuredPath: string,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  const expanded = configuredPath.trim().replace(/^~(?=\/|$)/, homedir());
+  const againstConfigBase = isAbsolute(expanded)
+    ? expanded
+    : resolve(projectBaseDir(), expanded);
+  if (existsSync(againstConfigBase)) return againstConfigBase;
+
+  const botProject = discoverBotProjectDir(env);
+  if (!botProject) return againstConfigBase;
+
+  if (!isAbsolute(expanded)) {
+    const againstBot = resolve(botProject, expanded);
+    if (existsSync(againstBot)) return againstBot;
+  }
+  const defaultBotDb = join(botProject, "data", "state.sqlite");
+  if (existsSync(defaultBotDb)) return defaultBotDb;
+  return againstConfigBase;
+}
+
 export async function loadTelegramGuiConfig() {
+  // 1) Terminal/격리 설정의 .env (Telegram 인증 키)
   loadEnvironmentFromDotenv();
+  // 2) 봇 프로젝트 .env 로 사용량 관련 누락 키 보충 (DATABASE_PATH, CODEX_ACCOUNT_HOMES 등)
+  loadBotUsageEnvironment();
   const env = telegramGuiEnvironmentSchema.parse(process.env);
   const allowedUserIds = parseTelegramAllowedUserIds(
     env.TELEGRAM_ALLOWED_USER_ID,
@@ -464,12 +556,18 @@ export async function loadTelegramGuiConfig() {
   }
   const sessionPath = absolutePath(env.TELEGRAM_GUI_SESSION_PATH);
   const botSessionPath = absolutePath(env.TELEGRAM_MTPROTO_SESSION_PATH);
-  const databasePath = absolutePath(env.DATABASE_PATH);
+  // 사용량 스트립은 봇 세션 DB를 읽어야 하므로, 격리 설정 기본 경로가 비어 있으면 봇 DB로 폴백.
+  const databasePath = resolveUsageDatabasePath(env.DATABASE_PATH);
   assertDistinctGuiSessionPath(sessionPath, botSessionPath, "TELEGRAM_MTPROTO_SESSION_PATH");
   assertDistinctGuiSessionPath(sessionPath, databasePath, "DATABASE_PATH");
   for (const suffix of ["-wal", "-shm", "-journal"] as const) {
     assertDistinctGuiSessionPath(sessionPath, `${databasePath}${suffix}`, "DATABASE_PATH");
   }
+
+  // Codex 계정 홈 폴백 기준. 봇 프로젝트에서 CODEX_HOME이 오면 그쪽을, 없으면 ~/.codex.
+  const codexFallbackHome = process.env.CODEX_HOME?.trim()
+    ? absolutePath(process.env.CODEX_HOME)
+    : join(homedir(), ".codex");
 
   return {
     apiId: env.TELEGRAM_API_ID,
@@ -481,7 +579,12 @@ export async function loadTelegramGuiConfig() {
     // 해석 규칙을 쓴다.
     databasePath,
     codexExecutable: resolveCodexExecutable(env.CODEX_EXECUTABLE),
-    grokExecutable: resolveGrokExecutable(env.GROK_EXECUTABLE)
+    grokExecutable: resolveGrokExecutable(env.GROK_EXECUTABLE),
+    // 사용량 스트립 Codex 다계정 조회 대상. 메인 봇과 동일한 파싱/폴백 규칙을 쓴다.
+    codexAccountHomes: parseCodexAccountHomes(
+      env.CODEX_ACCOUNT_HOMES,
+      codexFallbackHome
+    )
   };
 }
 

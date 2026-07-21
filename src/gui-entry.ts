@@ -154,7 +154,9 @@ async function run(): Promise<void> {
       usageProvider: createUsageProvider({
         databasePath: config.databasePath,
         codexExecutable: config.codexExecutable,
-        grokExecutable: config.grokExecutable
+        grokExecutable: config.grokExecutable,
+        // Codex 다계정(CODEX_ACCOUNT_HOMES) 각각의 사용량을 계정별 줄로 표시한다.
+        codexAccountHomes: config.codexAccountHomes
       }),
       onDiagnostic: ({ type, code }) => {
         process.stderr.write(`[gui] ${type}: ${code}\n`);

@@ -393,8 +393,13 @@ class FixtureUsageProvider {
   async fetchCodexUsage() {
     this.calls.codex += 1;
     return {
-      fiveHour: { utilization: 7, resetsAt: null },
-      sevenDay: { utilization: 33, resetsAt: null }
+      accounts: [
+        {
+          label: ".codex",
+          fiveHour: { utilization: 7, resetsAt: null },
+          sevenDay: { utilization: 33, resetsAt: null }
+        }
+      ]
     };
   }
 

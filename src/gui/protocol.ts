@@ -141,9 +141,19 @@ export interface GuiClaudeUsageDto {
   capturedAt: number | null;
 }
 
-export interface GuiCodexUsageDto {
+/**
+ * Codex는 여러 ChatGPT 구독 계정(CODEX_ACCOUNT_HOMES)을 동시에 쓸 수 있어 계정마다
+ * 별도 창을 가진다. label은 표시용 계정 이름(예: 홈 디렉터리 basename), fiveHour/sevenDay는
+ * 그 계정의 rate-limit 창이다. 단일 계정이면 원소 1개짜리 배열이 된다.
+ */
+export interface GuiCodexAccountUsageDto {
+  label: string;
   fiveHour: GuiUsageWindowDto | null;
   sevenDay: GuiUsageWindowDto | null;
+}
+
+export interface GuiCodexUsageDto {
+  accounts: GuiCodexAccountUsageDto[];
 }
 
 /**

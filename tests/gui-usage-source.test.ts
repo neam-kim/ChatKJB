@@ -128,6 +128,33 @@ describe("createUsageProvider — Claude 스냅샷", () => {
     expect((await brokenProvider.fetchClaudeUsage()).capturedAt).toBeNull();
   });
 
+  it("창이 없는 최신 스냅샷보다 한도 창이 있는 최근 스냅샷을 고른다", async () => {
+    const databasePath = fixtureDatabase([
+      {
+        id: "empty-newer",
+        updatedAt: 9_000,
+        snapshot: { capturedAt: 9_000, rateLimitsAvailable: false }
+      },
+      {
+        id: "rich-older",
+        updatedAt: 8_000,
+        snapshot: {
+          capturedAt: 8_000,
+          rateLimitsAvailable: true,
+          fiveHour: { utilization: 77, resetsAt: "h" },
+          sevenDay: { utilization: 55, resetsAt: "w" }
+        }
+      }
+    ]);
+    const usage = await createUsageProvider(sourceOptions({ databasePath, now: () => 8_000 })).fetchClaudeUsage();
+    expect(usage).toEqual({
+      fiveHour: { utilization: 77, resetsAt: "h" },
+      sevenDay: { utilization: 55, resetsAt: "w" },
+      stale: false,
+      capturedAt: 8_000
+    });
+  });
+
   it("capturedAt이 stale 임계(6시간)를 넘기면 stale로 표시한다", async () => {
     const now = 10 * 3_600_000;
     const databasePath = fixtureDatabase([
@@ -159,8 +186,9 @@ describe("createUsageProvider — Codex 창 매핑", () => {
     }));
     const usage = await provider.fetchCodexUsage();
     expect(usage).toEqual({
-      fiveHour: { utilization: 42, resetsAt: "h" },
-      sevenDay: { utilization: 11, resetsAt: "w" }
+      accounts: [
+        { label: ".codex", fiveHour: { utilization: 42, resetsAt: "h" }, sevenDay: { utilization: 11, resetsAt: "w" } }
+      ]
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.timeoutMs).toBe(8_000);
@@ -176,26 +204,92 @@ describe("createUsageProvider — Codex 창 매핑", () => {
       })
     }));
     expect(await provider.fetchCodexUsage()).toEqual({
-      fiveHour: { utilization: 5, resetsAt: null },
-      sevenDay: null
+      accounts: [{ label: ".codex", fiveHour: { utilization: 5, resetsAt: null }, sevenDay: null }]
     });
   });
 
-  it("조회 실패는 두 칸 모두 null로 돌려준다", async () => {
+  it("조회 실패는 계정 줄의 두 칸 모두 null로 돌려준다", async () => {
     const provider = createUsageProvider(sourceOptions({
       fetchCodex: async () => codexResult(null)
     }));
-    expect(await provider.fetchCodexUsage()).toEqual({ fiveHour: null, sevenDay: null });
+    expect(await provider.fetchCodexUsage()).toEqual({
+      accounts: [{ label: ".codex", fiveHour: null, sevenDay: null }]
+    });
+  });
+
+  it("codexAccountHomes의 각 계정을 순서대로 별도 줄로 조회한다", async () => {
+    const seenHomes: string[] = [];
+    const byHome: Record<string, number> = {
+      "/tmp/codex-homes/.codex": 10,
+      "/tmp/codex-homes/.codex-acct-b": 40,
+      "/tmp/codex-homes/.codex-acct-c": 70
+    };
+    const provider = createUsageProvider(sourceOptions({
+      codexAccountHomes: Object.keys(byHome),
+      fetchCodex: async (options: CodexLiveUsageOptions) => {
+        const home = options.env["CODEX_HOME"]!;
+        seenHomes.push(home);
+        return codexResult({
+          primary: { usedPercent: byHome[home]!, windowDurationMins: 300, resetsAt: "h" },
+          secondary: { usedPercent: byHome[home]! + 1, windowDurationMins: 10_080, resetsAt: "w" }
+        });
+      }
+    }));
+    const usage = await provider.fetchCodexUsage();
+    expect(seenHomes).toEqual(Object.keys(byHome));
+    expect(usage.accounts.map((a) => a.label)).toEqual([".codex", ".codex-acct-b", ".codex-acct-c"]);
+    expect(usage.accounts[0]!.fiveHour).toEqual({ utilization: 10, resetsAt: "h" });
+    expect(usage.accounts[2]!.sevenDay).toEqual({ utilization: 71, resetsAt: "w" });
+  });
+
+  it("한 계정의 조회 실패가 다른 계정 줄을 가리지 않는다", async () => {
+    const provider = createUsageProvider(sourceOptions({
+      codexAccountHomes: ["/tmp/codex-homes/.codex", "/tmp/codex-homes/.codex-acct-b"],
+      fetchCodex: async (options: CodexLiveUsageOptions) =>
+        options.env["CODEX_HOME"]!.endsWith(".codex-acct-b")
+          ? codexResult(null)
+          : codexResult({ primary: { usedPercent: 33, windowDurationMins: 300, resetsAt: null } })
+    }));
+    const usage = await provider.fetchCodexUsage();
+    expect(usage.accounts).toEqual([
+      { label: ".codex", fiveHour: { utilization: 33, resetsAt: null }, sevenDay: null },
+      { label: ".codex-acct-b", fiveHour: null, sevenDay: null }
+    ]);
+  });
+
+  it("basename이 겹치는 홈은 순번 레이블로 구분한다", async () => {
+    const provider = createUsageProvider(sourceOptions({
+      codexAccountHomes: ["/a/.codex", "/b/.codex"],
+      fetchCodex: async () => codexResult({ primary: { usedPercent: 1, windowDurationMins: 300, resetsAt: null } })
+    }));
+    const usage = await provider.fetchCodexUsage();
+    expect(usage.accounts.map((a) => a.label)).toEqual([".codex #1", ".codex #2"]);
   });
 });
 
 describe("createUsageProvider — Grok periodType", () => {
-  it("WEEKLY는 주간 칸만, MONTHLY는 월간 칸만 산출한다", async () => {
+  it("WEEKLY·USAGE_PERIOD_TYPE_WEEKLY는 주간, MONTHLY 계열은 월간 칸에 매핑한다", async () => {
     const weekly = createUsageProvider(sourceOptions({
       fetchGrok: async () => grokResult({ creditUsagePercent: 63, periodType: "WEEKLY", periodEnd: "e" })
     }));
     expect(await weekly.fetchGrokUsage()).toEqual({
       weekly: { utilization: 63, resetsAt: "e" },
+      monthly: null,
+      weeklyReceived: true,
+      monthlyReceived: false,
+      loginRequired: false
+    });
+
+    // grok.com 실측 periodType (usage.ts formatGrokUsage와 동일)
+    const weeklyApi = createUsageProvider(sourceOptions({
+      fetchGrok: async () => grokResult({
+        creditUsagePercent: 69,
+        periodType: "USAGE_PERIOD_TYPE_WEEKLY",
+        periodEnd: "2026-07-25T04:24:10.645396+00:00"
+      })
+    }));
+    expect(await weeklyApi.fetchGrokUsage()).toEqual({
+      weekly: { utilization: 69, resetsAt: "2026-07-25T04:24:10.645396+00:00" },
       monthly: null,
       weeklyReceived: true,
       monthlyReceived: false,
@@ -212,14 +306,20 @@ describe("createUsageProvider — Grok periodType", () => {
       monthlyReceived: true,
       loginRequired: false
     });
+
+    const monthlyApi = createUsageProvider(sourceOptions({
+      fetchGrok: async () => grokResult({ creditUsagePercent: 40, periodType: "USAGE_PERIOD_TYPE_MONTHLY", periodEnd: "m2" })
+    }));
+    expect((await monthlyApi.fetchGrokUsage()).monthly).toEqual({ utilization: 40, resetsAt: "m2" });
   });
 
-  it("알 수 없는 periodType은 어느 칸도 갱신하지 않는다", async () => {
+  it("알 수 없는 periodType이어도 creditUsagePercent가 있으면 주간 칸에 표시한다", async () => {
     const provider = createUsageProvider(sourceOptions({
       fetchGrok: async () => grokResult({ creditUsagePercent: 50, periodType: "DAILY" })
     }));
     const usage = await provider.fetchGrokUsage();
-    expect(usage.weeklyReceived).toBe(false);
+    expect(usage.weeklyReceived).toBe(true);
+    expect(usage.weekly).toEqual({ utilization: 50, resetsAt: null });
     expect(usage.monthlyReceived).toBe(false);
   });
 
@@ -248,7 +348,7 @@ describe("createCachedUsageProvider", () => {
       },
       fetchCodexUsage: async () => {
         calls.codex += 1;
-        return { fiveHour: { utilization: 10, resetsAt: null }, sevenDay: null };
+        return { accounts: [{ label: ".codex", fiveHour: { utilization: 10, resetsAt: null }, sevenDay: null }] };
       },
       fetchGrokUsage: async () => {
         calls.grok += 1;
@@ -294,7 +394,7 @@ describe("createCachedUsageProvider", () => {
       fetchCodexUsage: () => {
         codexCount += 1;
         return new Promise((resolve) => {
-          release = () => resolve({ fiveHour: { utilization: 1, resetsAt: null }, sevenDay: null });
+          release = () => resolve({ accounts: [{ label: ".codex", fiveHour: { utilization: 1, resetsAt: null }, sevenDay: null }] });
         });
       }
     });
@@ -346,7 +446,7 @@ describe("createCachedUsageProvider", () => {
       }
     });
     const cached = createCachedUsageProvider(provider, { now: () => current });
-    expect(await cached.fetchCodexUsage()).toEqual({ fiveHour: null, sevenDay: null });
+    expect(await cached.fetchCodexUsage()).toEqual({ accounts: [] });
     await cached.fetchCodexUsage();
     expect(codexCount).toBe(1);
     current = 91_000;

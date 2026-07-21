@@ -210,10 +210,219 @@ describe("ClaudeExecutor lifecycle", () => {
     );
 
     expect(output).toMatchObject({
+      decision: "block",
       continue: true,
       hookSpecificOutput: { hookEventName: "Stop" }
     });
     expect(JSON.stringify(output)).toContain("agent-1");
+  });
+
+  it("still blocks stop when stop_hook_active and background agents remain", async () => {
+    let captured: Parameters<ClaudeExecutorDependencies["createQuery"]>[0] | undefined;
+    const emptyQuery = {
+      close() {},
+      async *[Symbol.asyncIterator]() {}
+    } as unknown as Query;
+    const createQuery = ((params) => {
+      captured = params;
+      return emptyQuery;
+    }) as ClaudeExecutorDependencies["createQuery"];
+    const { executor, store } = setup(undefined, createQuery);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await executor.execute({ session: store.getSession("claude-executor")!, prompt: "audit" });
+
+    const stopHook = captured?.options?.hooks?.Stop?.[0]?.hooks[0];
+    const output = await stopHook!(
+      {
+        hook_event_name: "Stop",
+        stop_hook_active: true,
+        session_id: "sdk-session",
+        transcript_path: "/tmp/session.jsonl",
+        cwd: store.getSession("claude-executor")!.cwd,
+        background_tasks: [{
+          id: "agent-2",
+          type: "subagent",
+          status: "running",
+          description: "Still working"
+        }]
+      } as never,
+      undefined,
+      { signal: new AbortController().signal }
+    );
+
+    expect(output).toMatchObject({ decision: "block" });
+    expect(JSON.stringify(output)).toContain("agent-2");
+  });
+
+  it("allows stop when background tasks are already finished", async () => {
+    let captured: Parameters<ClaudeExecutorDependencies["createQuery"]>[0] | undefined;
+    const emptyQuery = {
+      close() {},
+      async *[Symbol.asyncIterator]() {}
+    } as unknown as Query;
+    const createQuery = ((params) => {
+      captured = params;
+      return emptyQuery;
+    }) as ClaudeExecutorDependencies["createQuery"];
+    const { executor, store } = setup(undefined, createQuery);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await executor.execute({ session: store.getSession("claude-executor")!, prompt: "audit" });
+
+    const stopHook = captured?.options?.hooks?.Stop?.[0]?.hooks[0];
+    const output = await stopHook!(
+      {
+        hook_event_name: "Stop",
+        stop_hook_active: false,
+        session_id: "sdk-session",
+        transcript_path: "/tmp/session.jsonl",
+        cwd: store.getSession("claude-executor")!.cwd,
+        background_tasks: [{
+          id: "agent-3",
+          type: "subagent",
+          status: "completed",
+          description: "Done"
+        }]
+      } as never,
+      undefined,
+      { signal: new AbortController().signal }
+    );
+
+    expect(output).toEqual({});
+  });
+
+  it("does not mark the session done while open subagent tasks remain after a result", async () => {
+    const messages: unknown[] = [
+      {
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-open-1",
+        description: "Explore module",
+        uuid: "u1",
+        session_id: "sdk-1"
+      },
+      {
+        type: "result",
+        subtype: "success",
+        duration_ms: 10,
+        duration_api_ms: 10,
+        is_error: false,
+        num_turns: 1,
+        result: "partial",
+        stop_reason: "end_turn",
+        total_cost_usd: 0,
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0
+        },
+        modelUsage: {},
+        permission_denials: [],
+        uuid: "u2",
+        session_id: "sdk-1"
+      }
+    ];
+    const query = {
+      close() {},
+      async *[Symbol.asyncIterator]() {
+        for (const message of messages) yield message as never;
+      },
+      async getServerInfo() { return null; }
+    } as unknown as Query;
+    const { executor, renames, store } = setup(
+      undefined,
+      (() => query) as ClaudeExecutorDependencies["createQuery"]
+    );
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await executor.execute({ session: store.getSession("claude-executor")!, prompt: "spawn subagent" });
+
+    // open task 때문에 중간 result를 최종 완료로 취급하지 않아 [DONE] 이 되면 안 된다.
+    expect(renames).not.toContain("[DONE] Claude executor");
+    expect(store.getSession("claude-executor")?.status).not.toBe("done");
+  });
+
+  it("marks done after open subagent tasks complete and a final result arrives", async () => {
+    const messages: unknown[] = [
+      {
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-open-2",
+        description: "Review",
+        uuid: "u1",
+        session_id: "sdk-2"
+      },
+      {
+        type: "result",
+        subtype: "success",
+        duration_ms: 10,
+        duration_api_ms: 10,
+        is_error: false,
+        num_turns: 1,
+        result: "waiting",
+        stop_reason: "end_turn",
+        total_cost_usd: 0,
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0
+        },
+        modelUsage: {},
+        permission_denials: [],
+        uuid: "u2",
+        session_id: "sdk-2"
+      },
+      {
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-open-2",
+        status: "completed",
+        output_file: "/tmp/out",
+        summary: "review done",
+        uuid: "u3",
+        session_id: "sdk-2"
+      },
+      {
+        type: "result",
+        subtype: "success",
+        duration_ms: 20,
+        duration_api_ms: 20,
+        is_error: false,
+        num_turns: 2,
+        result: "all integrated",
+        stop_reason: "end_turn",
+        total_cost_usd: 0,
+        usage: {
+          input_tokens: 2,
+          output_tokens: 2,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0
+        },
+        modelUsage: {},
+        permission_denials: [],
+        uuid: "u4",
+        session_id: "sdk-2"
+      }
+    ];
+    const query = {
+      close() {},
+      async *[Symbol.asyncIterator]() {
+        for (const message of messages) yield message as never;
+      },
+      async getServerInfo() { return null; }
+    } as unknown as Query;
+    const { executor, renames, store } = setup(
+      undefined,
+      (() => query) as ClaudeExecutorDependencies["createQuery"]
+    );
+
+    await executor.execute({ session: store.getSession("claude-executor")!, prompt: "spawn then integrate" });
+
+    expect(store.getSession("claude-executor")?.status).toBe("done");
+    expect(renames).toContain("[DONE] Claude executor");
   });
 
   it("forks a resumed Claude session once when the SDK stream is completely empty", async () => {

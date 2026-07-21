@@ -37,6 +37,8 @@ async function loadFromEnvironmentFile(
   process.env = {
     HOME: directory,
     CHATKJB_CONFIG_BASE_DIR: directory,
+    // 테스트 격리: 실제 LaunchAgent/봇 프로젝트로 폴백하지 않도록 동일 디렉터리를 가리킨다.
+    CHATKJB_PROJECT_DIR: directory,
     CHATKJB_ENV_PATH: envPath
   };
   const { loadTelegramGuiConfig } = await import("../src/config.js");
@@ -74,7 +76,9 @@ describe("Telegram GUI configuration", () => {
       sessionPath: join(directory, "data", "telegram-gui.session"),
       databasePath: join(directory, "data", "state.sqlite"),
       codexExecutable: "/opt/test/bin/codex",
-      grokExecutable: "/opt/test/bin/grok"
+      grokExecutable: "/opt/test/bin/grok",
+      // 머신에 ChatGPT 구독 auth.json이 있으면 폴백 홈 1개, 없으면 빈 배열.
+      codexAccountHomes: expect.any(Array)
     });
   });
 
@@ -230,7 +234,8 @@ describe("Telegram GUI configuration", () => {
       sessionPath: guiSession,
       databasePath: join(configDirectory, "data", "state.sqlite"),
       codexExecutable: "/opt/test/bin/codex",
-      grokExecutable: "/opt/test/bin/grok"
+      grokExecutable: "/opt/test/bin/grok",
+      codexAccountHomes: expect.any(Array)
     });
   });
 });
