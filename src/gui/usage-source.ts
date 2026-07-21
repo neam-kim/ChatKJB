@@ -15,6 +15,7 @@ import { fetchCodexLiveUsage } from "../codex-live-usage.js";
 import { fetchGrokLiveUsage } from "../grok-live-usage.js";
 import { buildCodexEnvironment } from "../session-environment.js";
 import {
+  fetchDaemonUsageCache,
   isDaemonUsageCacheStale,
   readDaemonUsageCache,
   type DaemonUsageCacheFile
@@ -58,8 +59,14 @@ export interface UsageSourceOptions {
    * daemon-cache: 다른 Mac 의 Terminal — 데몬이 게시한 공유 캐시만 읽어 데몬 머신 한도를 표시.
    */
   sourceMode?: UsageSourceMode;
-  /** 데몬 사용량 캐시 후보 경로(NAS Program 등). sourceMode=daemon-cache 일 때 사용. */
+  /** 데몬 사용량 파일 캐시 후보 경로(NAS Program 등). sourceMode=daemon-cache 일 때 사용. */
   usageCachePaths?: readonly string[];
+  /**
+   * 데몬 사용량 HTTP URL 후보(Tailscale MagicDNS 등). NAS 미마운트 맥북용.
+   * 파일 캐시가 없거나 실패하면 순서대로 조회한다.
+   */
+  usageCacheUrls?: readonly string[];
+  usageHttpToken?: string;
 }
 
 export interface UsageCacheOptions {
@@ -237,6 +244,7 @@ export function createUsageProvider(options: UsageSourceOptions): GuiUsageProvid
   const cwd = options.cwd ?? process.cwd();
   const sourceMode: UsageSourceMode = options.sourceMode ?? "local";
   const cachePaths = options.usageCachePaths ?? [];
+  const cacheUrls = options.usageCacheUrls ?? [];
   const codexHome = options.codexHome
     ?? (process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"));
   // 조회할 Codex 계정 홈 목록. 다계정이 지정되면 그대로, 아니면 단일 홈 하나로 폴백한다.
@@ -245,25 +253,43 @@ export function createUsageProvider(options: UsageSourceOptions): GuiUsageProvid
     : [codexHome];
   const codexAccounts = labelCodexHomes(codexHomes);
 
-  const readCache = (): DaemonUsageCacheFile | null => {
-    if (cachePaths.length === 0) return null;
-    return readDaemonUsageCache(cachePaths);
+  // 파일(있으면) 우선, 없으면 Tailscale HTTP. 폴링마다 HTTP 를 치지 않도록 짧게 메모리 보관.
+  let resolvedCache: DaemonUsageCacheFile | null = null;
+  let resolvedAt = Number.NEGATIVE_INFINITY;
+  const RESOLVE_TTL_MS = 20_000;
+
+  const resolveCache = async (): Promise<DaemonUsageCacheFile | null> => {
+    if (now() - resolvedAt < RESOLVE_TTL_MS && resolvedCache) return resolvedCache;
+    const fromFile = cachePaths.length > 0 ? readDaemonUsageCache(cachePaths) : null;
+    if (fromFile) {
+      resolvedCache = fromFile;
+      resolvedAt = now();
+      return fromFile;
+    }
+    const fromHttp = cacheUrls.length > 0
+      ? await fetchDaemonUsageCache(cacheUrls, {
+        ...(options.usageHttpToken ? { token: options.usageHttpToken } : {})
+      })
+      : null;
+    resolvedCache = fromHttp;
+    resolvedAt = now();
+    return fromHttp;
   };
 
   if (sourceMode === "daemon-cache") {
     return {
       async fetchClaudeUsage(): Promise<GuiClaudeUsageDto> {
-        const cache = readCache();
+        const cache = await resolveCache();
         if (!cache) return { ...EMPTY_CLAUDE_USAGE };
         const stale = cache.claude.stale || isDaemonUsageCacheStale(cache, now());
         return { ...cache.claude, stale };
       },
       async fetchCodexUsage(): Promise<GuiCodexUsageDto> {
-        const cache = readCache();
+        const cache = await resolveCache();
         return cache?.codex ?? { accounts: [] };
       },
       async fetchGrokUsage(): Promise<GuiGrokUsageDto> {
-        const cache = readCache();
+        const cache = await resolveCache();
         return cache?.grok ?? { ...EMPTY_GROK_USAGE };
       }
     };

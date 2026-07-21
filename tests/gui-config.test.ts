@@ -81,7 +81,8 @@ describe("Telegram GUI configuration", () => {
       codexAccountHomes: expect.any(Array),
       // CHATKJB_PROJECT_DIR 은 테스트 격리 디렉터리. DB 파일이 없으면 daemon-cache.
       usageSourceMode: "daemon-cache",
-      usageCachePaths: expect.any(Array)
+      usageCachePaths: expect.any(Array),
+      usageCacheUrls: expect.any(Array)
     });
   });
 
@@ -240,7 +241,8 @@ describe("Telegram GUI configuration", () => {
       grokExecutable: "/opt/test/bin/grok",
       codexAccountHomes: expect.any(Array),
       usageSourceMode: "daemon-cache",
-      usageCachePaths: expect.any(Array)
+      usageCachePaths: expect.any(Array),
+      usageCacheUrls: expect.any(Array)
     });
   });
 });

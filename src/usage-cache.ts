@@ -169,36 +169,134 @@ function parseGrok(value: unknown): GuiGrokUsageDto | null {
   };
 }
 
+/** JSON/객체 페이로드를 검증해 캐시 구조로 만든다. 실패 시 null. */
+export function parseDaemonUsageCachePayload(raw: unknown): DaemonUsageCacheFile | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  // v2 전체 스트립. v1(Claude 스냅샷만)은 더 이상 쓰지 않는다.
+  if (record.version !== USAGE_CACHE_VERSION) return null;
+  if (typeof record.writtenAt !== "number" || !Number.isFinite(record.writtenAt)) return null;
+  const claude = parseClaude(record.claude);
+  const codex = parseCodex(record.codex);
+  const grok = parseGrok(record.grok);
+  if (!claude || !codex || !grok) return null;
+  return {
+    version: USAGE_CACHE_VERSION,
+    writtenAt: record.writtenAt,
+    host: typeof record.host === "string" ? record.host : null,
+    claude,
+    codex,
+    grok
+  };
+}
+
 /** 후보 경로 중 가장 최근 유효 캐시를 반환한다. */
 export function readDaemonUsageCache(paths: readonly string[]): DaemonUsageCacheFile | null {
   let best: DaemonUsageCacheFile | null = null;
   for (const path of paths) {
     try {
       if (!existsSync(path)) continue;
-      const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
-      if (!raw || typeof raw !== "object") continue;
-      const record = raw as Record<string, unknown>;
-      // v2 전체 스트립. v1(Claude 스냅샷만)은 더 이상 쓰지 않는다.
-      if (record.version !== USAGE_CACHE_VERSION) continue;
-      if (typeof record.writtenAt !== "number" || !Number.isFinite(record.writtenAt)) continue;
-      const claude = parseClaude(record.claude);
-      const codex = parseCodex(record.codex);
-      const grok = parseGrok(record.grok);
-      if (!claude || !codex || !grok) continue;
-      const candidate: DaemonUsageCacheFile = {
-        version: USAGE_CACHE_VERSION,
-        writtenAt: record.writtenAt,
-        host: typeof record.host === "string" ? record.host : null,
-        claude,
-        codex,
-        grok
-      };
+      const candidate = parseDaemonUsageCachePayload(JSON.parse(readFileSync(path, "utf8")) as unknown);
+      if (!candidate) continue;
       if (!best || candidate.writtenAt > best.writtenAt) best = candidate;
     } catch {
       // 개별 파일 실패는 다음 후보.
     }
   }
   return best;
+}
+
+/** 데몬 사용량 HTTP 기본 포트. Terminal 은 Tailscale MagicDNS 로 이 포트를 조회한다. */
+export const DEFAULT_USAGE_HTTP_PORT = 17_846;
+export const USAGE_HTTP_PATH = "/v1/usage";
+
+/**
+ * 맥북처럼 NAS 를 마운트하지 않는 Terminal 이 데몬 호스트 사용량을 가져올 HTTP URL 후보.
+ * 우선순위: CHATKJB_USAGE_URL → CHATKJB_USAGE_HOSTS(CSV) → 기본 Tailscale/로컬 호스트명.
+ */
+export function discoverUsageCacheUrls(options: {
+  env?: NodeJS.ProcessEnv;
+} = {}): string[] {
+  const env = options.env ?? process.env;
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  const add = (url: string) => {
+    const trimmed = url.trim().replace(/\/+$/, "");
+    if (!trimmed || seen.has(trimmed)) return;
+    // path 가 없으면 표준 경로를 붙인다.
+    const withPath = /\/v1\/usage$/i.test(trimmed)
+      ? trimmed
+      : `${trimmed}${USAGE_HTTP_PATH}`;
+    if (seen.has(withPath)) return;
+    seen.add(withPath);
+    urls.push(withPath);
+  };
+
+  const explicit = env.CHATKJB_USAGE_URL?.trim();
+  if (explicit) {
+    add(explicit);
+    return urls;
+  }
+
+  const portRaw = env.CHATKJB_USAGE_HTTP_PORT?.trim();
+  const port = portRaw && /^\d+$/.test(portRaw) ? Number(portRaw) : DEFAULT_USAGE_HTTP_PORT;
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    return urls;
+  }
+
+  const hostsRaw = env.CHATKJB_USAGE_HOSTS?.trim();
+  const hosts = hostsRaw
+    ? hostsRaw.split(",").map((part) => part.trim()).filter(Boolean)
+    // Tailscale machine name + mDNS. 맥북은 NAS 없이 Tailscale 만으로 데몬에 닿는다.
+    : ["neam-macmini", "neamui-Macmini.local", "neamui-Macmini"];
+
+  for (const host of hosts) {
+    add(`http://${host}:${port}`);
+  }
+  return urls;
+}
+
+/**
+ * HTTP 로 데몬 사용량 캐시를 가져온다. 후보 URL 을 순서대로 시도하고 첫 성공을 쓴다.
+ * 네트워크 오류·타임아웃·비-JSON 은 다음 후보로 넘어간다(예외를 밖으로 던지지 않음).
+ */
+export async function fetchDaemonUsageCache(
+  urls: readonly string[],
+  options: {
+    token?: string;
+    timeoutMs?: number;
+    fetchImpl?: typeof fetch;
+  } = {}
+): Promise<DaemonUsageCacheFile | null> {
+  if (urls.length === 0) return null;
+  const timeoutMs = options.timeoutMs ?? 4_000;
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  if (typeof fetchImpl !== "function") return null;
+
+  for (const url of urls) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const headers: Record<string, string> = { Accept: "application/json" };
+      if (options.token?.trim()) {
+        headers.Authorization = `Bearer ${options.token.trim()}`;
+      }
+      const response = await fetchImpl(url, {
+        method: "GET",
+        headers,
+        signal: controller.signal
+      });
+      if (!response.ok) continue;
+      const raw = await response.json() as unknown;
+      const parsed = parseDaemonUsageCachePayload(raw);
+      if (parsed) return parsed;
+    } catch {
+      // 다음 URL.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
 }
 
 export function writeDaemonUsageCache(

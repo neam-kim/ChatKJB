@@ -25,7 +25,7 @@ import { FALLBACK_MODEL_CATALOG } from "./model-catalog.js";
 import { hasReadyClineProvider } from "./cline-sdk.js";
 import { projectSourceDir } from "./runtime-paths.js";
 import type { ProjectConfig, ProviderKind } from "./types.js";
-import { discoverUsageCachePaths } from "./usage-cache.js";
+import { discoverUsageCachePaths, discoverUsageCacheUrls } from "./usage-cache.js";
 
 export const CLAUDE_OAUTH_TOKEN_PATTERN = /^sk-ant-oat01-[A-Za-z0-9_-]+$/;
 const projectIdentifierPattern = /^[\p{L}\p{N}][\p{L}\p{N} _.-]*$/u;
@@ -577,6 +577,9 @@ export async function loadTelegramGuiConfig() {
     ? "local" as const
     : "daemon-cache" as const;
   const usageCachePaths = discoverUsageCachePaths({ projectDir: botProjectDir });
+  // 맥북처럼 NAS 미마운트 환경: Tailscale MagicDNS(neam-macmini 등) HTTP 후보.
+  const usageCacheUrls = discoverUsageCacheUrls();
+  const usageHttpToken = process.env.CHATKJB_USAGE_HTTP_TOKEN?.trim() || undefined;
 
   return {
     apiId: env.TELEGRAM_API_ID,
@@ -595,7 +598,9 @@ export async function loadTelegramGuiConfig() {
       codexFallbackHome
     ),
     usageSourceMode,
-    usageCachePaths
+    usageCachePaths,
+    usageCacheUrls,
+    ...(usageHttpToken ? { usageHttpToken } : {})
   };
 }
 

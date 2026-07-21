@@ -4,11 +4,14 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   discoverUsageCachePaths,
+  discoverUsageCacheUrls,
+  fetchDaemonUsageCache,
   readDaemonUsageCache,
   writeDaemonUsageCache,
   USAGE_CACHE_VERSION
 } from "../src/usage-cache.js";
 import { createUsageProvider } from "../src/gui/usage-source.js";
+import { startDaemonUsageHttpServer } from "../src/daemon-usage-http.js";
 
 const directories: string[] = [];
 
@@ -155,3 +158,56 @@ describe("writeDaemonUsageCache permissions payload", () => {
     expect(parsed.writtenAt).toBe(123);
   });
 });
+
+describe("daemon usage HTTP", () => {
+  it("discoverUsageCacheUrls prefers CHATKJB_USAGE_URL and default Tailscale hosts", () => {
+    expect(discoverUsageCacheUrls({
+      env: { CHATKJB_USAGE_URL: "http://example.test:9/v1/usage" }
+    })).toEqual(["http://example.test:9/v1/usage"]);
+
+    const defaults = discoverUsageCacheUrls({ env: {} });
+    expect(defaults.some((url) => url.includes("neam-macmini"))).toBe(true);
+    expect(defaults.every((url) => url.endsWith("/v1/usage"))).toBe(true);
+  });
+
+  it("serves and fetches usage over HTTP without file mounts", async () => {
+    const payload = {
+      version: USAGE_CACHE_VERSION,
+      ...samplePayload(1_784_700_000_000)
+    };
+    const port = 18_000 + Math.floor(Math.random() * 1_000);
+    const httpServer = await startDaemonUsageHttpServer({
+      getPayload: () => payload,
+      port,
+      host: "127.0.0.1",
+      log: () => undefined
+    });
+    try {
+      const cache = await fetchDaemonUsageCache([`http://127.0.0.1:${port}/v1/usage`]);
+      expect(cache?.claude.fiveHour?.utilization).toBe(42);
+      expect(cache?.grok.weekly?.utilization).toBe(71);
+      expect(cache?.host).toBe("neamui-Macmini.local");
+
+      const provider = createUsageProvider({
+        databasePath: "/tmp/missing-chatkjb-state.sqlite",
+        codexExecutable: "codex",
+        grokExecutable: "grok",
+        sourceMode: "daemon-cache",
+        usageCachePaths: [],
+        usageCacheUrls: [`http://127.0.0.1:${port}/v1/usage`],
+        fetchCodex: async () => {
+          throw new Error("must not call local codex");
+        },
+        fetchGrok: async () => {
+          throw new Error("must not call local grok");
+        }
+      });
+      await expect(provider.fetchClaudeUsage()).resolves.toMatchObject({
+        fiveHour: { utilization: 42 }
+      });
+    } finally {
+      await httpServer.stop();
+    }
+  });
+});
+

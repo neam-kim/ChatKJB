@@ -157,9 +157,11 @@ async function run(): Promise<void> {
         grokExecutable: config.grokExecutable,
         // Codex 다계정(CODEX_ACCOUNT_HOMES) 각각의 사용량을 계정별 줄로 표시한다.
         codexAccountHomes: config.codexAccountHomes,
-        // 데몬 호스트면 local, 다른 Mac 의 Terminal 이면 데몬 공유 캐시만 읽는다.
+        // 데몬 호스트면 local, 다른 Mac 의 Terminal 이면 데몬 공유 캐시(파일 또는 HTTP)만 읽는다.
         sourceMode: config.usageSourceMode,
-        usageCachePaths: config.usageCachePaths
+        usageCachePaths: config.usageCachePaths,
+        usageCacheUrls: config.usageCacheUrls,
+        ...(config.usageHttpToken ? { usageHttpToken: config.usageHttpToken } : {})
       }),
       onDiagnostic: ({ type, code }) => {
         process.stderr.write(`[gui] ${type}: ${code}\n`);
