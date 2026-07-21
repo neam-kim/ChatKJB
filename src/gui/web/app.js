@@ -1,17 +1,3 @@
-const ALLOWED_UPLOAD_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-  "image/svg+xml",
-  "application/pdf",
-  "text/plain",
-  "application/zip",
-  "application/octet-stream",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-]);
 const MAX_CACHED_HISTORIES = 12;
 const MAX_MESSAGES_PER_HISTORY = 500;
 const MAX_HISTORY_PAGES = 5;
@@ -93,9 +79,7 @@ export function attachmentProvenanceLabel(attachment) {
 
 export function isAllowedUploadFile(file, uploadBytes) {
   if (!file || !Number.isFinite(uploadBytes) || uploadBytes < 1) return false;
-  const mimeType = file.type || "application/octet-stream";
-  return ALLOWED_UPLOAD_TYPES.has(mimeType)
-    && Number.isFinite(file.size)
+  return Number.isFinite(file.size)
     && file.size >= 1
     && file.size <= uploadBytes;
 }
@@ -1703,7 +1687,7 @@ function startApplication() {
       return;
     }
     if (!isAllowedUploadFile(file, state.limits.uploadBytes)) {
-      showAlert(`허용된 형식의 ${formatBytes(state.limits.uploadBytes)} 이하 파일 한 개만 전송할 수 있습니다.`);
+      showAlert(`${formatBytes(state.limits.uploadBytes)} 이하 파일 한 개만 전송할 수 있습니다.`);
       setSelectedFile(null);
       return;
     }

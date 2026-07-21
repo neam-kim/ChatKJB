@@ -188,7 +188,9 @@ describe("Grok executor", () => {
     expect(prompts).toHaveLength(2);
     expect(prompts[1]).toContain("후속 지시");
     expect(resumes).toEqual([false, true]);
-    expect(rules[0]).toBe(rules[1]);
+    // rules(부트스트랩)는 새 Grok 세션의 첫 턴에만 넣고 resume 턴에서는 생략한다.
+    expect(rules[0]).toContain("[MEMORY_ROUTING]");
+    expect(rules[1]).toBe("");
     expect(rules[0]).not.toContain("현재 시각은");
     expect(prompts[0]).toContain("현재 시각은");
     expect(store.getSession("grok-session")?.grokSessionId).toBe("fixed-grok-id");
@@ -196,6 +198,16 @@ describe("Grok executor", () => {
       .toBe(30);
     expect(store.getSession("grok-session")?.status).toBe("done");
     expect(active.size).toBe(0);
+
+    // 저장된 grokSessionId로 이어지는 새 execute에서도 rules는 생략된다.
+    await executeGrok(host, {
+      session: store.getSession("grok-session")!,
+      prompt: "재개 지시"
+    }, { runGrok, createSessionId: () => "fixed-grok-id" });
+
+    expect(resumes).toEqual([false, true, true]);
+    expect(rules[2]).toBe("");
+    expect(store.getSession("grok-session")?.status).toBe("done");
   });
 
   it("records a user stop as aborted and releases the active run", async () => {

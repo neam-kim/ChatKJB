@@ -342,9 +342,12 @@ export function resultText(message: SDKMessage): string {
   return message.errors.join("\n");
 }
 
-export function loadProjectInstructions(cwd: string): string {
+export function loadProjectInstructions(
+  cwd: string,
+  options: { excludeContents?: ReadonlySet<string> } = {}
+): string {
   const sections: string[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<string>(options.excludeContents ?? []);
   for (const filename of ["CLAUDE.md", "AGENTS.md"]) {
     try {
       const content = readFileSync(join(cwd, filename), "utf8").trim();
@@ -361,16 +364,38 @@ export function loadProjectInstructions(cwd: string): string {
 }
 
 /**
+ * Claude의 claude_code preset은 settingSources:["user"]로 user-scope CLAUDE.md를 system
+ * prompt에 이미 싣는다. 프로젝트 파일이 그 전역 파일과 내용이 같으면(예: resource-sync가
+ * 네이티브 harness용으로 만든 프로젝트 AGENTS.md 심링크) append에 같은 내용을 다시 싣지
+ * 않도록 제외 집합을 만든다.
+ */
+function userScopeInstructionContents(home = homedir()): Set<string> {
+  const contents = new Set<string>();
+  try {
+    const content = readFileSync(join(home, ".claude", "CLAUDE.md"), "utf8").trim();
+    if (content) contents.add(content);
+  } catch {
+    // 전역 지침 파일은 선택 사항이다.
+  }
+  return contents;
+}
+
+/**
  * Codex/agy/Grok/Cline은 project AGENTS.md를 native harness가 읽으므로 ChatKJB는 CLAUDE.md가
  * 별도 내용일 때만 보충한다(Cline도 resource-sync가 AGENTS.md를 써 두는 쪽에 해당해 아래
  * 공통 분기를 탄다). Claude SDK는 project setting source를 의도적으로 끈 상태라 기존처럼
- * 두 파일을 모두 명시적으로 전달한다.
+ * 두 파일을 모두 명시적으로 전달하되, user-scope CLAUDE.md와 동일한 내용은 제외한다.
  */
 export function loadSupplementalProjectInstructions(
   cwd: string,
-  provider: SessionRecord["provider"]
+  provider: SessionRecord["provider"],
+  options: { home?: string } = {}
 ): string {
-  if (provider === "claude") return loadProjectInstructions(cwd);
+  if (provider === "claude") {
+    return loadProjectInstructions(cwd, {
+      excludeContents: userScopeInstructionContents(options.home)
+    });
+  }
   // Grok CLI는 CLAUDE.md와 AGENTS.md를 모두 native discovery하므로 rules에 다시 싣지 않는다.
   if (provider === "grok") return "";
   try {

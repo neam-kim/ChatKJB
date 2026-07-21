@@ -1017,10 +1017,27 @@ describe("GUI REST DTO and input boundaries", () => {
     ]);
     expect(existsSync(observedPath)).toBe(false);
 
+    // Telegram 문서 업로드는 실행 파일을 포함한 모든 파일 형식을 허용한다.
+    client.sendFile.mockClear();
+    const executable = await fetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        Origin: handle.origin,
+        Cookie: session.cookie,
+        "X-ChatKJB-CSRF": session.csrf,
+        "Content-Type": "application/x-msdownload",
+        "X-ChatKJB-File-Name": base64Url("tool.exe")
+      },
+      body: bytes
+    });
+    expect(executable.status).toBe(204);
+    expect(client.sendFile).toHaveBeenCalledOnce();
+    expect(client.sendFile.mock.calls[0]![1].mimeType).toBe("application/x-msdownload");
+
     client.sendFile.mockClear();
     for (const invalid of [
       { name: "../secret.pdf", mime: "application/pdf", body: bytes, query: "" },
-      { name: "secret.exe", mime: "application/x-msdownload", body: bytes, query: "" },
+      { name: "safe.pdf", mime: "not-a-mime", body: bytes, query: "" },
       { name: "safe.pdf", mime: "application/pdf", body: new Uint8Array(), query: "" },
       { name: "safe.pdf", mime: "application/pdf", body: bytes, query: "?path=/etc/passwd" }
     ]) {

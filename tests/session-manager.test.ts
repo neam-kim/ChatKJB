@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -1091,6 +1091,28 @@ describe("project instructions", () => {
         .toContain("Claude compatibility rules");
     } finally {
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("skips Claude append content identical to the user-scope CLAUDE.md", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-dedupe-"));
+    const home = mkdtempSync(join(tmpdir(), "telegram-claude-dedupe-home-"));
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(join(home, ".claude", "CLAUDE.md"), "Global shared rules");
+      // resource-sync가 네이티브 harness용으로 만드는 프로젝트 AGENTS.md 심링크와 같은 내용.
+      writeFileSync(join(directory, "AGENTS.md"), "Global shared rules");
+      writeFileSync(join(directory, "CLAUDE.md"), "Project-only rules");
+
+      const result = loadSupplementalProjectInstructions(directory, "claude", { home });
+      expect(result).toContain("[CLAUDE.md]\nProject-only rules");
+      expect(result).not.toContain("Global shared rules");
+      // 다른 제공자는 전역 파일과의 중복 검사 없이 기존 동작을 유지한다.
+      expect(loadSupplementalProjectInstructions(directory, "codex", { home }))
+        .toContain("Project-only rules");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });

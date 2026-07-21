@@ -59,11 +59,13 @@ describe("GUI web interaction helpers", () => {
     expect(script).toMatch(/filenameSource === "generated"[\s\S]*?"문서 다운로드"/);
   });
 
-  it("accepts the Telegram Premium browser boundary and rejects one byte over", () => {
+  it("accepts any Telegram file type within the Premium browser boundary and rejects one byte over", () => {
     const limit = 4_194_304_000;
     expect(isAllowedUploadFile({ type: "image/svg+xml", size: limit }, limit)).toBe(true);
     expect(isAllowedUploadFile({ type: "image/svg+xml", size: limit + 1 }, limit)).toBe(false);
-    expect(isAllowedUploadFile({ type: "text/html", size: 1 }, limit)).toBe(false);
+    expect(isAllowedUploadFile({ type: "text/html", size: 1 }, limit)).toBe(true);
+    expect(isAllowedUploadFile({ type: "application/x-msdownload", size: 1 }, limit)).toBe(true);
+    expect(isAllowedUploadFile({ type: "", size: 1 }, limit)).toBe(true);
     expect(isAllowedUploadFile({ type: "application/pdf", size: 0 }, limit)).toBe(false);
   });
 
@@ -121,7 +123,8 @@ describe("GUI web static security and responsive contract", () => {
     expect(script).toContain("noopener noreferrer");
     expect(html).toContain('autocomplete="off"');
     expect(html).not.toContain('autocomplete="current-password"');
-    expect(html).toContain("image/svg+xml");
+    expect(html).toMatch(/<input id="file-input"[^>]*type="file"/);
+    expect(html).not.toMatch(/<input id="file-input"[^>]*accept=/);
     expect(script).toContain("formatBytes(state.limits.uploadBytes)");
     expect(script).not.toContain("file.arrayBuffer(");
     expect(script).toMatch(/body:\s*file,/);

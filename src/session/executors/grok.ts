@@ -151,7 +151,9 @@ export async function executeGrok(
           ? { timeoutMs: host.options.providerTurnTimeoutMs }
           : {}),
         permissionMode: session.permissionMode,
-        rules,
+        // rules(부트스트랩)는 새 Grok 세션의 첫 턴에만 넣는다. resume된 세션은 첫 턴의
+        // rules를 이미 대화 기록에 보유하므로 이후 턴에서는 생략한다(Codex/agy와 같은 정책).
+        ...(resume ? {} : { rules }),
         sessionId: grokSessionId,
         resume
       }, controller.signal, streamGrokProgress);

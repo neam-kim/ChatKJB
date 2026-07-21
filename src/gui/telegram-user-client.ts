@@ -38,22 +38,9 @@ export const MAX_SUPPORTED_UPLOAD_PARTS = 8_000;
 
 export const GUI_MAX_UPLOAD_BYTES = MAX_SUPPORTED_UPLOAD_PARTS * TELEGRAM_UPLOAD_PART_BYTES;
 
-export const GUI_ALLOWED_UPLOAD_MIME_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-  "image/svg+xml",
-  "application/pdf",
-  "text/plain",
-  "application/zip",
-  "application/octet-stream",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-] as const;
-
-export type TelegramUploadMimeType = typeof GUI_ALLOWED_UPLOAD_MIME_TYPES[number];
+// 업로드는 항상 forceDocument로 본문을 그대로 복사하므로 Telegram이 받는 모든 파일 형식을
+// 허용한다. MIME 값은 문서 메타데이터로만 전달되므로 형식(RFC 6838 토큰)만 검증한다.
+const UPLOAD_MIME_TYPE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9!#&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#&^_.+-]{0,126}$/;
 
 export interface TelegramUploadInput {
   name: string;
@@ -68,11 +55,10 @@ export interface TelegramUploadInput {
 
 export interface TelegramUploadMetadata {
   name: string;
-  mimeType: TelegramUploadMimeType;
+  mimeType: string;
   caption?: string;
 }
 
-const ALLOWED_UPLOAD_MIME_TYPES = new Set<string>(GUI_ALLOWED_UPLOAD_MIME_TYPES);
 const UPLOAD_INPUT_KEYS = new Set<PropertyKey>([
   "name",
   "mimeType",
@@ -97,15 +83,15 @@ export function validateTelegramUploadMetadata(
   if (name === "." || name === ".." || /[\/\\\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(name)) {
     throw new Error("Telegram upload filename must be a safe basename");
   }
-  if (typeof mimeType !== "string" || !ALLOWED_UPLOAD_MIME_TYPES.has(mimeType)) {
-    throw new Error("Telegram upload MIME type is not allowed");
+  if (typeof mimeType !== "string" || !UPLOAD_MIME_TYPE_PATTERN.test(mimeType)) {
+    throw new Error("Telegram upload MIME type is invalid");
   }
   if (caption !== undefined && (typeof caption !== "string" || caption.length > 1024)) {
     throw new Error("Telegram upload caption must contain at most 1024 characters");
   }
   return {
     name,
-    mimeType: mimeType as TelegramUploadMimeType,
+    mimeType,
     ...(caption !== undefined ? { caption } : {})
   };
 }

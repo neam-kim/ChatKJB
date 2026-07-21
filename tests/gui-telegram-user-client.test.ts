@@ -12,7 +12,6 @@ import {
   type HistoryCursor
 } from "../src/gui/protocol.js";
 import {
-  GUI_ALLOWED_UPLOAD_MIME_TYPES,
   GUI_MAX_UPLOAD_BYTES,
   MAX_SUPPORTED_UPLOAD_PARTS,
   ReadConfirmationPendingError,
@@ -1775,7 +1774,16 @@ describe("TelegramUserClient forum scope and actions", () => {
     expect(Buffer.byteLength(exactUtf8Name)).toBe(255);
     expect(validateTelegramUploadMetadata(exactUtf8Name, "application/pdf", "x".repeat(1024)))
       .toEqual({ name: exactUtf8Name, mimeType: "application/pdf", caption: "x".repeat(1024) });
-    for (const mimeType of GUI_ALLOWED_UPLOAD_MIME_TYPES) {
+    // Telegram 문서 업로드는 모든 파일 형식을 허용하므로 임의의 유효한 MIME 타입이 통과한다.
+    for (const mimeType of [
+      "application/pdf",
+      "text/html",
+      "video/mp4",
+      "application/x-msdownload",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "font/ttf",
+      `a/${"b".repeat(127)}`
+    ]) {
       expect(validateTelegramUploadMetadata("safe.bin", mimeType)).toEqual({ name: "safe.bin", mimeType });
     }
 
@@ -1794,7 +1802,19 @@ describe("TelegramUserClient forum scope and actions", () => {
     ]) {
       expect(() => validateTelegramUploadMetadata(unsafeName, "text/plain")).toThrow(/filename|basename/);
     }
-    expect(() => validateTelegramUploadMetadata("safe.txt", "text/html")).toThrow(/MIME/);
+    for (const malformedMime of [
+      "",
+      "text",
+      "text/",
+      "/html",
+      "text /html",
+      "text/html; charset=utf-8",
+      "text/	html",
+      `a/${"b".repeat(128)}`,
+      `${"a".repeat(128)}/b`
+    ]) {
+      expect(() => validateTelegramUploadMetadata("safe.txt", malformedMime)).toThrow(/MIME/);
+    }
     expect(() => validateTelegramUploadMetadata("safe.txt", "text/plain", "x".repeat(1025)))
       .toThrow(/caption/);
   });
@@ -2251,7 +2271,7 @@ describe("TelegramUserClient forum scope and actions", () => {
       { ...base, path: join(tmpdir(), "missing-chatkjb-upload") },
       { ...base, signal: {} },
       { ...base, name: "../escape.txt" },
-      { ...base, mimeType: "text/html" },
+      { ...base, mimeType: "not-a-mime" },
       { ...base, caption: "x".repeat(1025) },
       { ...base, bytes: Uint8Array.of(1) },
       ...["url", "chat", "peer", "reply"].map((field) => ({ ...base, [field]: "forbidden" }))
