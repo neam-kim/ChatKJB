@@ -66,6 +66,11 @@ export interface ActiveRun {
   codexTimers: Map<string, NodeJS.Timeout>;
   codexStarts: Map<string, number>;
   mcpFailures: Map<string, number>;
+  /** Cockpit ledger hook for /steer and other control-plane decisions. */
+  progressNote?: (message: string) => void;
+  progressDecision?: (message: string) => void;
+  /** Force cockpit status flush (e.g. waiting_approval transition). */
+  progressFlush?: () => void;
 }
 
 /** 제공자별 파일에 private 필드를 공개하지 않고 필요한 참조만 전달하는 내부 계약. */

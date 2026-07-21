@@ -17,6 +17,10 @@ import { safeErrorMessage } from "../../telegram-transport.js";
 import { addGrokUsage, parseStoredGrokUsage } from "../../usage.js";
 import { promptForCodexRequest, type RunRequest } from "../prompt-builders.js";
 import {
+  degradedPlanForProvider,
+  steerCapabilityNote
+} from "../provider-progress.js";
+import {
   queueRequestedUserInput,
   type ActiveRun,
   type BaseExecutorHost
@@ -76,7 +80,11 @@ export async function executeGrok(
   const session = host.store.getSession(request.session.id);
   if (!session || host.deleting.has(session.id)) return;
   request = host.applyHandoffSummary(request, session);
-  const renderer = new StreamRenderer(session, host.transport, host.options.debounceMs);
+  const renderer = new StreamRenderer(session, host.transport, host.options.debounceMs, {
+    resolveStatus: () => host.store.getSession(session.id)?.status
+  });
+  renderer.setRemainingPlan(degradedPlanForProvider("grok"));
+  renderer.note(steerCapabilityNote("grok"));
   const controller = new AbortController();
   const input = new MessageQueue();
   input.push(buildUserMessage(promptForCodexRequest(request)));
@@ -87,7 +95,10 @@ export async function executeGrok(
     startedAt: Date.now(),
     codexTimers: new Map(),
     codexStarts: new Map(),
-    mcpFailures: new Map()
+    mcpFailures: new Map(),
+    progressNote: (message) => renderer.note(message),
+    progressDecision: (message) => renderer.decision(message),
+    progressFlush: () => renderer.flushNow()
   };
   host.active.set(session.id, run);
   host.store.updateSession(session.id, { status: "running" });

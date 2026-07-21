@@ -32,7 +32,10 @@ import {
   promptForCodexRequest,
   type RunRequest
 } from "../prompt-builders.js";
-import { codexProgress } from "../provider-progress.js";
+import {
+  degradedPlanForProvider,
+  normalizeCodexItem
+} from "../provider-progress.js";
 import { StreamRenderer } from "../../stream-renderer.js";
 import { safeErrorMessage } from "../../telegram-transport.js";
 import type { SessionRecord } from "../../types.js";
@@ -190,8 +193,12 @@ export class CodexExecutor {
     const renderer = new StreamRenderer(
       session,
       this.host.transport,
-      this.host.options.debounceMs
+      this.host.options.debounceMs,
+      {
+        resolveStatus: () => this.host.store.getSession(session.id)?.status
+      }
     );
+    renderer.setRemainingPlan(degradedPlanForProvider("codex"));
     const controller = new AbortController();
     const input = new MessageQueue();
     input.push(buildUserMessage(promptForCodexRequest(request)));
@@ -202,7 +209,10 @@ export class CodexExecutor {
       startedAt: Date.now(),
       codexTimers: new Map(),
       codexStarts: new Map(),
-      mcpFailures: new Map()
+      mcpFailures: new Map(),
+      progressNote: (message) => renderer.note(message),
+      progressDecision: (message) => renderer.decision(message),
+      progressFlush: () => renderer.flushNow()
     };
     this.host.active.set(session.id, run);
     return {
@@ -323,10 +333,18 @@ export class CodexExecutor {
               ctx.lastAgentMessage = event.item.text;
               await ctx.renderer.text(event.item.text);
             }
-            const progress = codexProgress(event.item);
+            const progress = normalizeCodexItem(event.item);
             if (progress) {
               hasVisibleOutput = true;
-              ctx.renderer.note(progress);
+              if (progress.remainingPlan) {
+                ctx.renderer.setRemainingPlan(progress.remainingPlan);
+              }
+              if (progress.kind === "plan") {
+                ctx.renderer.setActivity(progress.summary);
+                ctx.renderer.note(progress.summary);
+              } else {
+                ctx.renderer.note(progress.summary);
+              }
             }
           } else if (event.type === "item.updated") {
             if (event.item.type === "agent_message") {

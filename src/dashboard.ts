@@ -8,6 +8,14 @@ import type {
   UsageSnapshot
 } from "./types.js";
 import { formatUsageSnapshot } from "./usage.js";
+import {
+  emptyRemainingPlan,
+  ledgerKindPrefix,
+  snapshotCockpit,
+  type LedgerEntry,
+  type RemainingPlan,
+  type WaitReason
+} from "./session/progress-model.js";
 
 export type DashboardTaskStatus =
   | "queued"
@@ -67,6 +75,26 @@ export interface RunningStatusInput {
   usageSnapshot?: UsageSnapshot | null;
   recentActivity?: string;
   partialPreview?: string;
+  /** Live cockpit fields (COCKPIT_V2). When absent, legacy formatting is used if V2 is off. */
+  currentActivity?: string | null;
+  waitReason?: WaitReason | null;
+  ledgerEntries?: LedgerEntry[] | null;
+  remainingPlan?: RemainingPlan | null;
+  /** Force cockpit layout regardless of env (tests). */
+  cockpitV2?: boolean;
+}
+
+/** Telegram message hard limit is 4096; keep a safety margin for markup/keyboard. */
+export const RUNNING_STATUS_MAX_CHARS = 3900;
+
+/**
+ * Live cockpit is on by default. Set CHATKJB_COCKPIT_V2=0 to roll back to the
+ * pre-cockpit formatRunningStatus layout.
+ */
+export function isCockpitV2Enabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.CHATKJB_COCKPIT_V2?.trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "off" || raw === "no") return false;
+  return true;
 }
 
 const ACTIVE_STATUSES = new Set<SessionStatus>([
@@ -185,6 +213,14 @@ export function formatDashboard(cards: DashboardTaskCard[], now: number = Date.n
 }
 
 export function formatRunningStatus(input: RunningStatusInput): string {
+  const useCockpit = input.cockpitV2 === true
+    || (input.cockpitV2 !== false && isCockpitV2Enabled());
+  if (useCockpit) return formatCockpitRunningStatus(input);
+  return formatLegacyRunningStatus(input);
+}
+
+/** Pre-cockpit layout — preserved for COCKPIT_V2=0 rollback. */
+export function formatLegacyRunningStatus(input: RunningStatusInput): string {
   const now = input.now ?? Date.now();
   const usageText = input.usageSnapshot ? compactUsageText(input.usageSnapshot) : null;
   const card: DashboardTaskCard = {
@@ -211,6 +247,99 @@ export function formatRunningStatus(input: RunningStatusInput): string {
     ? `\n\n${truncate(input.partialPreview, 1200, "tail")}`
     : "";
   return `${formatDashboardCard(card, now)}${preview}`;
+}
+
+/**
+ * Four-pane live cockpit: current activity · wait reason · ledger · remaining plan.
+ * Truncation priority when over budget: preview → ledger → plan (header kept).
+ */
+export function formatCockpitRunningStatus(input: RunningStatusInput): string {
+  const now = input.now ?? Date.now();
+  const usageText = input.usageSnapshot ? compactUsageText(input.usageSnapshot) : null;
+  const cockpit = snapshotCockpit({
+    currentActivity: input.currentActivity
+      ?? input.recentActivity
+      ?? (input.status === "queued" ? "같은 프로젝트의 앞선 작업을 기다리는 중" : null),
+    waitReason: input.waitReason ?? {
+      kind: input.status === "queued" ? "queue" : "none",
+      label: input.status === "queued"
+        ? "같은 프로젝트의 앞선 작업 대기"
+        : "대기 아님 · 실행 중"
+    },
+    ledger: input.ledgerEntries ?? [],
+    remainingPlan: input.remainingPlan ?? emptyRemainingPlan(true)
+  });
+
+  const headerLines = [
+    `[${input.status === "queued" ? "QUEUED" : "RUNNING"}] ${providerLabel(input.session.provider)} · ${input.session.projectName}`,
+    `작업: ${input.session.title}`
+  ];
+  if (input.branch) headerLines.push(`브랜치: ${input.branch}`);
+  const model = modelForSession(input.session);
+  if (model) headerLines.push(`모델: ${model}`);
+  const elapsed = `경과: ${formatShortDuration(now - input.startedAt)}`;
+  const queue = (input.pendingTurns ?? 0) > 0 ? `대기 턴: ${input.pendingTurns}` : null;
+  headerLines.push([elapsed, queue].filter(Boolean).join(" · "));
+  if (usageText) headerLines.push(`사용량: ${usageText}`);
+  headerLines.push(
+    input.status === "queued" ? "다음 액션: 대기 취소는 /stop" : "다음 액션: 완료 대기 또는 /steer"
+  );
+
+  let ledgerLines = cockpit.ledger.map(
+    (entry) => `- ${ledgerKindPrefix(entry.kind)}${entry.summary}`
+  );
+  let planSection = formatPlanSection(cockpit.remainingPlan);
+  let preview = input.partialPreview?.trim()
+    ? truncate(input.partialPreview.trim(), 1200, "tail")
+    : "";
+
+  const build = (): string => {
+    const body = [
+      headerLines.join("\n"),
+      "",
+      "① 현재 단계·행동",
+      cockpit.currentActivity,
+      "",
+      "② 대기 사유",
+      cockpit.waitReason.label,
+      "",
+      "③ 지금까지 한 일",
+      ledgerLines.length > 0 ? ledgerLines.join("\n") : "- (아직 기록 없음)",
+      "",
+      "④ 남은 계획·진행률",
+      planSection
+    ];
+    if (preview) body.push("", "미리보기", preview);
+    return body.join("\n");
+  };
+
+  let text = build();
+  // Truncation priority: preview → ledger → plan
+  if (text.length > RUNNING_STATUS_MAX_CHARS && preview) {
+    const over = text.length - RUNNING_STATUS_MAX_CHARS;
+    preview = truncate(preview, Math.max(40, preview.length - over - 8), "tail");
+    text = build();
+  }
+  while (text.length > RUNNING_STATUS_MAX_CHARS && ledgerLines.length > 1) {
+    ledgerLines = ledgerLines.slice(1);
+    text = build();
+  }
+  if (text.length > RUNNING_STATUS_MAX_CHARS) {
+    planSection = truncate(planSection, 80, "head");
+    text = build();
+  }
+  if (text.length > RUNNING_STATUS_MAX_CHARS) {
+    text = truncate(text, RUNNING_STATUS_MAX_CHARS, "head");
+  }
+  return text;
+}
+
+function formatPlanSection(plan: RemainingPlan): string {
+  const lines = [plan.label];
+  for (const item of plan.items.slice(0, 6)) {
+    lines.push(`- ${item}`);
+  }
+  return lines.join("\n");
 }
 
 export function inferWaitingReason(

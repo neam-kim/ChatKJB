@@ -327,6 +327,16 @@ export class SessionManager {
       onExhaustionChange: () => this.persistClaudeTokenState()
     });
     this.restoreClaudeTokenState();
+    this.permissions.setProgressHook((sessionId, phase) => {
+      const run = this.active.get(sessionId);
+      if (!run) return;
+      if (phase === "waiting") {
+        run.progressNote?.("승인 대기 중 — 토픽에서 허용/거절");
+      } else {
+        run.progressNote?.("승인 응답 반영 — 작업 재개");
+      }
+      run.progressFlush?.();
+    });
     this.claudeExecutor = new ClaudeExecutor({
       ...this.baseExecutorHost(),
       permissions: this.permissions,
@@ -1680,13 +1690,25 @@ export class SessionManager {
     if (session?.provider === "codex" && run.codexCurrentPrompt) {
       const base = run.codexRestartPrompt ?? run.codexCurrentPrompt;
       run.codexRestartPrompt = buildOrchestratedTurnPrompt(buildCodexSteeredPrompt(base, clean));
+      run.progressDecision?.(`조향(Codex 재시작): ${clean.slice(0, 160)}`);
+      run.progressFlush?.();
       run.controller.abort();
       return "restarted";
     }
     run.pendingTurns += 1;
     if (run.input.push(buildUserMessage(buildOrchestratedTurnPrompt(clean, {
       includeDate: session?.provider !== "claude"
-    }), "now"))) return "queued";
+    }), "now"))) {
+      const provider = session?.provider ?? "claude";
+      const label = provider === "claude"
+        ? "조향(라이브 주입)"
+        : provider === "codex"
+          ? "조향(큐)"
+          : `조향(큐 · ${provider} 라이브 제한)`;
+      run.progressDecision?.(`${label}: ${clean.slice(0, 160)}`);
+      run.progressFlush?.();
+      return "queued";
+    }
     run.pendingTurns -= 1;
     return false;
   }
@@ -1730,6 +1752,9 @@ export class SessionManager {
       ? (this.codexAccountPool.size > 1 ? "모든 Codex 계정이 한도에 도달했습니다." : "Codex 계정이 한도에 도달했습니다.")
       : (this.tokenPool.size > 1 ? "모든 계정 토큰이 한도에 도달했습니다." : "토큰이 한도에 도달했습니다.");
     this.store.updateSession(session.id, { status: "waiting_limit" });
+    const limitRun = this.active.get(session.id);
+    limitRun?.progressNote?.("한도 회복 대기");
+    limitRun?.progressFlush?.();
     void this.transport.sendText(
       session.chatId,
       session.topicId,

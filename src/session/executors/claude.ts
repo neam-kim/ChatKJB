@@ -31,7 +31,10 @@ import {
   resolveThinkingConfig,
   type RunRequest
 } from "../prompt-builders.js";
-import { resultFailureText } from "../provider-progress.js";
+import {
+  degradedPlanForProvider,
+  resultFailureText
+} from "../provider-progress.js";
 import { StreamRenderer } from "../../stream-renderer.js";
 import { safeErrorMessage } from "../../telegram-transport.js";
 import type { TokenPool } from "../../token-pool.js";
@@ -194,8 +197,12 @@ export class ClaudeExecutor {
     const renderer = new StreamRenderer(
       session,
       this.host.transport,
-      this.host.options.debounceMs
+      this.host.options.debounceMs,
+      {
+        resolveStatus: () => this.host.store.getSession(session.id)?.status
+      }
     );
+    renderer.setRemainingPlan(degradedPlanForProvider("claude"));
     const abortController = new AbortController();
     const input = new MessageQueue();
     input.push(buildUserMessage(promptForClaudeRequest(request)));
@@ -206,7 +213,10 @@ export class ClaudeExecutor {
       startedAt: Date.now(),
       codexTimers: new Map(),
       codexStarts: new Map(),
-      mcpFailures: new Map()
+      mcpFailures: new Map(),
+      progressNote: (message) => renderer.note(message),
+      progressDecision: (message) => renderer.decision(message),
+      progressFlush: () => renderer.flushNow()
     };
     this.host.active.set(session.id, run);
     return {
@@ -333,6 +343,7 @@ export class ClaudeExecutor {
       ctx.openTaskIds.add(message.task_id);
       const label = message.description?.trim() || message.task_id;
       ctx.renderer.note(`Claude 하위 작업 시작: ${label}`);
+      this.syncSubagentWait(ctx);
       return;
     }
     if (message.subtype === "task_updated" && typeof message.task_id === "string") {
@@ -343,6 +354,7 @@ export class ClaudeExecutor {
       } else if (status === "pending" || status === "running" || status === "paused") {
         ctx.openTaskIds.add(message.task_id);
       }
+      this.syncSubagentWait(ctx);
       return;
     }
     if (message.subtype === "task_notification" && typeof message.task_id === "string") {
@@ -353,11 +365,23 @@ export class ClaudeExecutor {
           ? `Claude 하위 작업 ${message.status}: ${summary.slice(0, 180)}`
           : `Claude 하위 작업 ${message.status}: ${message.task_id}`
       );
+      this.syncSubagentWait(ctx);
       return;
     }
     if (message.subtype === "task_progress") {
       // 진행 이벤트만으로도 유휴 워치독 타임스탬프는 갱신된다(handleStreamMessage).
       return;
+    }
+  }
+
+  private syncSubagentWait(ctx: ClaudeRunContext): void {
+    if (ctx.openTaskIds.size > 0) {
+      ctx.renderer.setWaitReason({
+        kind: "subagent",
+        label: `서브에이전트 대기 (${ctx.openTaskIds.size}개)`
+      });
+    } else {
+      ctx.renderer.setWaitReason(null);
     }
   }
 

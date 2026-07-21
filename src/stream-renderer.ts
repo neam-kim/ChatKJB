@@ -1,8 +1,17 @@
 import { InlineKeyboard } from "grammy";
 import { createHash } from "node:crypto";
 import { formatRunningStatus, readGitBranch } from "./dashboard.js";
+import {
+  activityFromTool,
+  emptyRemainingPlan,
+  TaskLedger,
+  waitReasonFromSessionStatus,
+  type LedgerEntryKind,
+  type RemainingPlan,
+  type WaitReason
+} from "./session/progress-model.js";
 import { safeErrorMessage } from "./telegram-transport.js";
-import type { MessageTransport, SessionRecord, UsageSnapshot } from "./types.js";
+import type { MessageTransport, SessionRecord, SessionStatus, UsageSnapshot } from "./types.js";
 import { resolveUploadPath } from "./upload-path.js";
 import { formatUsageSnapshot } from "./usage.js";
 import { stripUserInputRequestBlocks } from "./user-input-protocol.js";
@@ -29,17 +38,32 @@ function chunks(text: string, size = 3900): string[] {
   return result;
 }
 
+export interface StreamRendererOptions {
+  /**
+   * Read-only session status lookup so flush can show live wait reasons
+   * (waiting_approval / waiting_limit) without hardcoding.
+   */
+  resolveStatus?: () => SessionStatus | null | undefined;
+  /** Optional live counts for subagent / tool waits. */
+  resolveWaitOverrides?: () => { openSubagents?: number; toolWaiting?: boolean; };
+}
+
 export class StreamRenderer {
   private static readonly heartbeatMs = 30_000;
   private static readonly maxRememberedTexts = 64;
   private readonly startedAt = Date.now();
+  /** @deprecated Prefer TaskLedger; kept for finish() tool-call count and legacy tests. */
   private readonly events: string[] = [];
+  private readonly ledger = new TaskLedger();
   private statusMessageId: number | null = null;
   private timer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private typingTimer: NodeJS.Timeout | null = null;
   private lastRendered = "";
   private partialText = "";
+  private currentActivity = "세션 시작";
+  private remainingPlan: RemainingPlan = emptyRemainingPlan(true);
+  private waitOverride: WaitReason | null = null;
   private readonly sentTextDigests = new Set<string>();
   private readonly sentTextOrder: string[] = [];
   private readonly deliveredFiles = new Set<string>();
@@ -49,28 +73,31 @@ export class StreamRenderer {
   private usageSnapshot: UsageSnapshot | null;
   private finished = false;
   private readonly branch: string | null;
+  private readonly resolveStatus: (() => SessionStatus | null | undefined) | undefined;
+  private readonly resolveWaitOverrides: (() => {
+    openSubagents?: number;
+    toolWaiting?: boolean;
+  }) | undefined;
 
   constructor(
     private readonly session: SessionRecord,
     private readonly transport: MessageTransport,
-    private readonly debounceMs: number
+    private readonly debounceMs: number,
+    options: StreamRendererOptions = {}
   ) {
     this.usageSnapshot = session.usageSnapshot;
     this.branch = readGitBranch(session.cwd);
+    this.resolveStatus = options.resolveStatus;
+    this.resolveWaitOverrides = options.resolveWaitOverrides;
   }
 
   async start(queued = false): Promise<void> {
     const keyboard = new InlineKeyboard().text("중단", `stop:${this.session.id}`);
+    this.currentActivity = queued
+      ? "같은 프로젝트의 앞선 작업을 기다리는 중"
+      : "세션 시작";
     this.statusMessageId = await this.sendText(
-      formatRunningStatus({
-        session: this.session,
-        status: queued ? "queued" : "running",
-        startedAt: this.startedAt,
-        pendingTurns: queued ? 1 : 0,
-        branch: this.branch,
-        usageSnapshot: this.usageSnapshot,
-        recentActivity: queued ? "같은 프로젝트의 앞선 작업을 기다리는 중" : "세션 시작"
-      }),
+      this.renderStatusText(queued ? "queued" : "running"),
       "status",
       keyboard
     );
@@ -87,12 +114,36 @@ export class StreamRenderer {
 
   tool(toolName: string, input: Record<string, unknown>): void {
     const target = input.file_path ?? input.path ?? input.command ?? input.query ?? "";
-    this.note(`${toolName}${target ? `: ${String(target).slice(0, 180)}` : ""}`);
+    const targetText = target ? String(target).slice(0, 180) : "";
+    this.currentActivity = activityFromTool(toolName, targetText || undefined);
+    this.appendLedger("tool", `${toolName}${targetText ? `: ${targetText}` : ""}`);
   }
 
   note(message: string): void {
-    this.events.push(message);
-    if (this.events.length > 8) this.events.shift();
+    this.appendLedger("note", message);
+  }
+
+  /** Record a user/system decision (e.g. /steer) in the cockpit ledger. */
+  decision(message: string): void {
+    this.currentActivity = `조향 반영: ${message.slice(0, 80)}`;
+    this.appendLedger("decision", message);
+  }
+
+  setActivity(activity: string): void {
+    const clean = activity.trim();
+    if (!clean) return;
+    this.currentActivity = clean.slice(0, 200);
+    this.schedule();
+  }
+
+  setRemainingPlan(plan: RemainingPlan): void {
+    this.remainingPlan = plan;
+    this.schedule();
+  }
+
+  /** Explicit wait reason override (e.g. subagent) until cleared with null. */
+  setWaitReason(reason: WaitReason | null): void {
+    this.waitOverride = reason;
     this.schedule();
   }
 
@@ -102,6 +153,9 @@ export class StreamRenderer {
     const next = stripUserInputRequestBlocks(fullTextSoFar).trimEnd();
     if (!next || next === this.partialText) return;
     this.partialText = next;
+    if (!this.currentActivity || this.currentActivity === "세션 시작" || this.currentActivity === "응답 대기 중") {
+      this.currentActivity = "응답 작성 중";
+    }
     this.schedule();
   }
 
@@ -115,6 +169,20 @@ export class StreamRenderer {
     for (const part of chunks(clean)) {
       await this.sendText(part, "progress");
     }
+  }
+
+  private appendLedger(kind: LedgerEntryKind, message: string): void {
+    this.events.push(message);
+    this.ledger.append(kind, message);
+    if (kind !== "decision") {
+      // Keep activity in sync with latest meaningful note when not a pure decision.
+      if (kind === "tool" || kind === "subagent" || kind === "command" || kind === "file") {
+        // activity already set by tool()/callers
+      } else if (message.trim()) {
+        this.currentActivity = message.slice(0, 200);
+      }
+    }
+    this.schedule();
   }
 
   private async sendText(
@@ -226,6 +294,18 @@ export class StreamRenderer {
     }
   }
 
+  /**
+   * Force an immediate status flush (e.g. when entering waiting_approval).
+   * Survives even if debounce would otherwise delay the edit.
+   */
+  flushNow(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.requestFlush();
+  }
+
   private schedule(): void {
     if (this.finished) return;
     if (this.timer) return;
@@ -251,18 +331,35 @@ export class StreamRenderer {
       });
   }
 
-  private async flushOnce(): Promise<void> {
-    if (this.finished || this.statusMessageId === null) return;
-    const recent = this.events.map((event) => `- ${event}`).join("\n");
-    const text = formatRunningStatus({
+  private resolveWaitReason(): WaitReason {
+    if (this.waitOverride) return this.waitOverride;
+    const status = this.resolveStatus?.() ?? this.session.status;
+    const overrides = this.resolveWaitOverrides?.();
+    return waitReasonFromSessionStatus(status, overrides);
+  }
+
+  private renderStatusText(status: "queued" | "running"): string {
+    const waitReason = this.resolveWaitReason();
+    const recent = this.ledger.formatLines().map((line) => `- ${line}`).join("\n")
+      || this.events.map((event) => `- ${event}`).join("\n");
+    return formatRunningStatus({
       session: this.session,
-      status: "running",
+      status,
       startedAt: this.startedAt,
       branch: this.branch,
       usageSnapshot: this.usageSnapshot,
-      recentActivity: recent || "응답 대기 중",
-      partialPreview: this.partialText
+      recentActivity: this.currentActivity || recent || "응답 대기 중",
+      partialPreview: this.partialText,
+      currentActivity: this.currentActivity || "응답 대기 중",
+      waitReason,
+      ledgerEntries: this.ledger.displayEntries(),
+      remainingPlan: this.remainingPlan
     });
+  }
+
+  private async flushOnce(): Promise<void> {
+    if (this.finished || this.statusMessageId === null) return;
+    const text = this.renderStatusText("running");
     if (text === this.lastRendered) return;
     this.lastRendered = text;
     const keyboard = new InlineKeyboard().text("중단", `stop:${this.session.id}`);
@@ -293,8 +390,12 @@ export class StreamRenderer {
 
   private releaseBuffers(): void {
     this.events.length = 0;
+    this.ledger.clear();
     this.partialText = "";
     this.lastRendered = "";
+    this.currentActivity = "세션 시작";
+    this.remainingPlan = emptyRemainingPlan(true);
+    this.waitOverride = null;
     this.sentTextDigests.clear();
     this.sentTextOrder.length = 0;
     this.deliveredFiles.clear();

@@ -35,6 +35,10 @@ import { safeErrorMessage } from "../../telegram-transport.js";
 import type { SessionRecord } from "../../types.js";
 import { promptForCodexRequest, type RunRequest } from "../prompt-builders.js";
 import {
+  degradedPlanForProvider,
+  steerCapabilityNote
+} from "../provider-progress.js";
+import {
   queueRequestedUserInput,
   type ActiveRun,
   type BaseExecutorHost
@@ -305,7 +309,11 @@ export class ClineExecutor {
     if (!session || this.host.deleting.has(session.id)) return;
     request = this.host.applyHandoffSummary(request, session);
     session = this.host.store.getSession(session.id) ?? session;
-    const renderer = new StreamRenderer(session, this.host.transport, this.host.options.debounceMs);
+    const renderer = new StreamRenderer(session, this.host.transport, this.host.options.debounceMs, {
+      resolveStatus: () => this.host.store.getSession(session.id)?.status
+    });
+    renderer.setRemainingPlan(degradedPlanForProvider("cline"));
+    renderer.note(steerCapabilityNote("cline"));
     const controller = new AbortController();
     const input = new MessageQueue();
     input.push(buildUserMessage(promptForCodexRequest(request)));
@@ -316,7 +324,10 @@ export class ClineExecutor {
       startedAt: Date.now(),
       codexTimers: new Map(),
       codexStarts: new Map(),
-      mcpFailures: new Map()
+      mcpFailures: new Map(),
+      progressNote: (message) => renderer.note(message),
+      progressDecision: (message) => renderer.decision(message),
+      progressFlush: () => renderer.flushNow()
     };
     this.host.active.set(session.id, run);
     this.host.store.updateSession(session.id, { status: "running" });

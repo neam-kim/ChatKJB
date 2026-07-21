@@ -93,12 +93,20 @@ export class PermissionBroker {
   private readonly approvals = new Map<string, PendingApproval>();
   private readonly questions = new Map<string, QuestionFlow>();
   private readonly questionBySession = new Map<string, string>();
+  /** Optional cockpit flush when entering/leaving approval wait. */
+  private progressHook: ((sessionId: string, phase: "waiting" | "resolved") => void) | null = null;
 
   constructor(
     private readonly store: StateStore,
     private readonly transport: MessageTransport,
     private readonly timeoutMs: number
   ) {}
+
+  setProgressHook(
+    hook: ((sessionId: string, phase: "waiting" | "resolved") => void) | null
+  ): void {
+    this.progressHook = hook;
+  }
 
   dispose(): void {
     for (const id of [...this.approvals.keys()]) {
@@ -249,6 +257,7 @@ export class PermissionBroker {
     );
 
     this.store.updateSession(session.id, { status: "waiting_approval" });
+    this.progressHook?.(session.id, "waiting");
     this.store.createApproval({
       nonce: id,
       toolUseId: options.toolUseID,
@@ -345,6 +354,7 @@ export class PermissionBroker {
     if (!(result.behavior === "deny" && result.interrupt)) {
       this.store.updateSession(pending.session.id, { status: "running" });
     }
+    this.progressHook?.(pending.session.id, "resolved");
     pending.resolve(result);
   }
 
@@ -393,6 +403,7 @@ export class PermissionBroker {
       this.questions.set(id, flow);
       this.questionBySession.set(session.id, id);
       this.store.updateSession(session.id, { status: "waiting_approval" });
+      this.progressHook?.(session.id, "waiting");
       void this.advanceQuestion(flow).catch((error: unknown) => {
         this.finishQuestions(id, {
           behavior: "deny",
@@ -544,6 +555,7 @@ export class PermissionBroker {
     if (!(result.behavior === "deny" && result.interrupt)) {
       this.store.updateSession(flow.session.id, { status: "running" });
     }
+    this.progressHook?.(flow.session.id, "resolved");
     if (result.behavior === "allow") {
       void this.transport.sendText(
         flow.session.chatId,

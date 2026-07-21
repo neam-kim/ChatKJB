@@ -387,7 +387,8 @@ describe("StreamRenderer text deduplication", () => {
 
     expect(sent[0]).toContain("[RUNNING] Codex · test");
     expect(sent[0]).toContain("작업: test");
-    expect(sent[0]).toContain("대기 사유: 응답 생성 중");
+    expect(sent[0]).toContain("① 현재 단계·행동");
+    expect(sent[0]).toContain("② 대기 사유");
     expect(sent[0]).toContain("다음 액션: 완료 대기 또는 /steer");
     renderer.dispose();
   });
@@ -493,6 +494,88 @@ describe("StreamRenderer user-input control block", () => {
 
     expect(sent).toEqual(["선택이 필요합니다."]);
     expect(files).toHaveLength(0);
+    renderer.dispose();
+  });
+
+  it("renders cockpit four panes and live wait reason from status callback", async () => {
+    vi.useFakeTimers();
+    let status: SessionRecord["status"] = "running";
+    const edited: string[] = [];
+    const transport: MessageTransport = {
+      async sendText(_chatId, _topicId, text) {
+        edited.push(text);
+        return 1;
+      },
+      async editText(_chatId, _messageId, text) {
+        edited.push(text);
+      },
+      async createTopic() { return 1; },
+      async renameTopic() {},
+      async deleteTopic() {},
+      async sendDocument() {},
+      async sendChatAction() {},
+      async sendFile() {}
+    };
+    const renderer = new StreamRenderer(makeSession(), transport, 1, {
+      resolveStatus: () => status
+    });
+    await renderer.start();
+    renderer.tool("Read", { file_path: "src/a.ts" });
+    renderer.decision("조향: 테스트 추가");
+    renderer.setRemainingPlan({
+      items: ["남은 작업"],
+      completed: 0,
+      total: 1,
+      percent: 0,
+      degraded: false,
+      label: "0/1 완료 (0%) · ETA 미제공"
+    });
+    await vi.advanceTimersByTimeAsync(5);
+    const mid = edited.at(-1) ?? "";
+    expect(mid).toContain("① 현재 단계·행동");
+    expect(mid).toContain("② 대기 사유");
+    expect(mid).toContain("③ 지금까지 한 일");
+    expect(mid).toContain("④ 남은 계획·진행률");
+    expect(mid).toContain("조향: 테스트 추가");
+    expect(mid).toContain("Read");
+
+    status = "waiting_approval";
+    renderer.flushNow();
+    await vi.advanceTimersByTimeAsync(5);
+    const waiting = edited.at(-1) ?? "";
+    expect(waiting).toContain("사용자 승인 필요");
+
+    // Unchanged content must not re-edit (rate-limit guard).
+    const before = edited.length;
+    renderer.flushNow();
+    await vi.advanceTimersByTimeAsync(5);
+    expect(edited.length).toBe(before);
+    renderer.dispose();
+  });
+
+  it("keeps ledger beyond the old 8-event hard cap", async () => {
+    vi.useFakeTimers();
+    const edited: string[] = [];
+    const transport: MessageTransport = {
+      async sendText() { return 1; },
+      async editText(_chatId, _messageId, text) { edited.push(text); },
+      async createTopic() { return 1; },
+      async renameTopic() {},
+      async deleteTopic() {},
+      async sendDocument() {},
+      async sendChatAction() {},
+      async sendFile() {}
+    };
+    const renderer = new StreamRenderer(makeSession(), transport, 1);
+    await renderer.start();
+    for (let i = 0; i < 20; i += 1) {
+      renderer.note(`event-${i}`);
+    }
+    await vi.advanceTimersByTimeAsync(5);
+    const text = edited.at(-1) ?? "";
+    // Display is capped, but recent events survive (not only last 8 of a shift-queue).
+    expect(text).toContain("event-19");
+    expect(text).toContain("event-10");
     renderer.dispose();
   });
 });

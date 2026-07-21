@@ -18,7 +18,12 @@ import {
   buildUserMessage
 } from "../../session-prompts.js";
 import { promptForRequest, type RunRequest } from "../prompt-builders.js";
-import { agyFailureFromLog, agyRequestsProceed } from "../provider-progress.js";
+import {
+  agyFailureFromLog,
+  agyRequestsProceed,
+  degradedPlanForProvider,
+  steerCapabilityNote
+} from "../provider-progress.js";
 import { StreamRenderer } from "../../stream-renderer.js";
 import { safeErrorMessage } from "../../telegram-transport.js";
 import type { SessionRecord } from "../../types.js";
@@ -273,8 +278,13 @@ export class AgyExecutor {
     const renderer = new StreamRenderer(
       session,
       this.host.transport,
-      this.host.options.debounceMs
+      this.host.options.debounceMs,
+      {
+        resolveStatus: () => this.host.store.getSession(session.id)?.status
+      }
     );
+    renderer.setRemainingPlan(degradedPlanForProvider("agy"));
+    renderer.note(steerCapabilityNote("agy"));
     const controller = new AbortController();
     const input = new MessageQueue();
     // conversationId는 저장소와 계정 재시작을 가로질러 유지된다. 별도 Set을 쌓지 않고
@@ -293,7 +303,10 @@ export class AgyExecutor {
       startedAt: Date.now(),
       codexTimers: new Map(),
       codexStarts: new Map(),
-      mcpFailures: new Map()
+      mcpFailures: new Map(),
+      progressNote: (message) => renderer.note(message),
+      progressDecision: (message) => renderer.decision(message),
+      progressFlush: () => renderer.flushNow()
     };
     this.host.active.set(session.id, run);
     return {
