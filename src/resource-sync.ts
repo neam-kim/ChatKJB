@@ -557,7 +557,7 @@ export function buildSharedPolicyText(paths: SharedMemoryTextPaths & { home: str
     "",
     "## ChatKJB Presentation Decks",
     "",
-    `For any ChatKJB PowerPoint, PPTX, Google Slides, slide-deck creation, editing, conversion, redesign, or review task, first read ${join(paths.home, ".claude", "skills", "chatkjb-science-presentation-format", "SKILL.md")} and consult ${paths.skillCatalog}.`,
+    `For any ChatKJB PowerPoint, PPTX, Google Slides, slide-deck creation, editing, conversion, redesign, or review task, first read ${join(paths.home, ".claude", "skills", "chatkjb-presentation-format", "SKILL.md")} and consult ${paths.skillCatalog}.`,
     "Do not create or judge ChatKJB presentation design without that skill unless the user explicitly requests a different non-ChatKJB style.",
     "When editing an existing deck, modify only the slides explicitly requested. Preserve every other slide's content, layout, images, notes, metadata, order, and formatting, and create a backup or otherwise ensure untouched slides can be restored before saving.",
     "",
