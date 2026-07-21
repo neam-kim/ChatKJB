@@ -173,6 +173,21 @@ describe("GUI web static security and responsive contract", () => {
     expect(css).toMatch(/\.general-panel\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
   });
 
+  it("offers sidebar topic deletion through a right-click context menu", () => {
+    const script = readFileSync(resolve(webDirectory, "app.js"), "utf8");
+    const css = readFileSync(resolve(webDirectory, "styles.css"), "utf8");
+    expect(script).toContain('addEventListener("contextmenu"');
+    expect(script).toContain("showTopicContextMenu");
+    expect(script).toContain("hideTopicContextMenu");
+    expect(script).toContain("토픽 삭제");
+    expect(script).toContain('request(`/api/topics/${topicId}`, { method: "DELETE" })');
+    expect(script).toContain("연결된 ChatKJB 세션이 있으면 함께 삭제됩니다");
+    expect(script).toContain("topic.id !== GENERAL_TOPIC_ID");
+    expect(script).toContain("removeTopicLocally");
+    expect(css).toContain(".topic-context-menu");
+    expect(css).toContain(".topic-context-item-danger");
+  });
+
   it("retries only pending read confirmations and cancels stale read work", () => {
     const script = readFileSync(resolve(webDirectory, "app.js"), "utf8");
     expect(script).toContain("latestUnreadMessageId");

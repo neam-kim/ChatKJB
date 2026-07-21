@@ -138,6 +138,7 @@ export interface GuiServerClient {
   pressCallback(messageId: number, callbackData: string): Promise<unknown>;
   markRead(topicId: number, maxMessageId: number): Promise<void>;
   setTyping(topicId: number, active: boolean): Promise<void>;
+  deleteTopic(topicId: number): Promise<void>;
   logOut(): Promise<void>;
 }
 
@@ -1291,6 +1292,23 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
         nextCursor: nextCursorToken("topics", page.nextCursor),
         checkpointEventId
       });
+      return;
+    }
+
+    // 사이드바 우클릭 삭제: Telegram 포럼 토픽 제거.
+    // 연결된 봇 세션은 토픽 삭제 후 봇 MTProto monitor가 정리한다.
+    const topicDeleteMatch = url.pathname.match(/^\/api\/topics\/(\d+)$/);
+    if (topicDeleteMatch) {
+      methodAllowed(method, ["DELETE"]);
+      assertQuery(url, []);
+      const topicId = positiveInteger(Number(topicDeleteMatch[1]), "INVALID_TOPIC_ID");
+      if (topicId === GENERAL_TOPIC_ID) {
+        throw new HttpFailure(400, "GENERAL_TOPIC_NOT_DELETABLE");
+      }
+      const body = await readBody(request, 0, ordinaryTimeouts);
+      if (body.length !== 0) throw new HttpFailure(400, "DELETE_BODY_NOT_ALLOWED");
+      await mutation(() => options.client.deleteTopic(topicId));
+      writeNoContent(response);
       return;
     }
 

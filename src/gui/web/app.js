@@ -162,7 +162,9 @@ function startApplication() {
     readStates: new Map(),
     generalPanelRows: GENERAL_PANEL_FALLBACK_ROWS.map((row) => [...row]),
     panelMessageId: 0,
-    panelRefreshStarted: false
+    panelRefreshStarted: false,
+    topicContextMenu: null,
+    topicDeleteInFlight: null
   };
 
   function errorCode(error) {
@@ -1141,6 +1143,85 @@ function startApplication() {
     }
   }
 
+  function hideTopicContextMenu() {
+    if (!state.topicContextMenu) return;
+    state.topicContextMenu.remove();
+    state.topicContextMenu = null;
+  }
+
+  function positionTopicContextMenu(menu, clientX, clientY) {
+    const padding = 8;
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    const maxX = Math.max(padding, window.innerWidth - width - padding);
+    const maxY = Math.max(padding, window.innerHeight - height - padding);
+    menu.style.left = `${Math.min(Math.max(padding, clientX), maxX)}px`;
+    menu.style.top = `${Math.min(Math.max(padding, clientY), maxY)}px`;
+  }
+
+  function showTopicContextMenu(topicId, clientX, clientY) {
+    hideTopicContextMenu();
+    if (topicId === GENERAL_TOPIC_ID || !state.topics.has(topicId) || state.connection !== "ready") {
+      return;
+    }
+    const menu = document.createElement("div");
+    menu.className = "topic-context-menu";
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "토픽 메뉴");
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "topic-context-item topic-context-item-danger";
+    deleteButton.setAttribute("role", "menuitem");
+    deleteButton.textContent = "토픽 삭제";
+    deleteButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      hideTopicContextMenu();
+      void deleteTopic(topicId);
+    });
+    menu.append(deleteButton);
+    document.body.append(menu);
+    positionTopicContextMenu(menu, clientX, clientY);
+    state.topicContextMenu = menu;
+  }
+
+  function removeTopicLocally(topicId) {
+    cancelReadConfirmation(topicId);
+    state.topics.delete(topicId);
+    state.histories.delete(topicId);
+    state.readStates.delete(topicId);
+    renderTopics();
+    if (state.activeTopicId === topicId) {
+      state.activeTopicId = null;
+      updateGeneralPanelState();
+      void reconcile();
+    }
+  }
+
+  async function deleteTopic(topicId) {
+    if (
+      topicId === GENERAL_TOPIC_ID
+      || !state.topics.has(topicId)
+      || state.connection !== "ready"
+      || state.topicDeleteInFlight === topicId
+    ) return;
+    const topic = state.topics.get(topicId);
+    const title = topic?.title || `토픽 ${topicId}`;
+    const confirmed = window.confirm(
+      `「${title}」토픽을 삭제할까요?\n연결된 ChatKJB 세션이 있으면 함께 삭제됩니다. 되돌릴 수 없습니다.`
+    );
+    if (!confirmed) return;
+    state.topicDeleteInFlight = topicId;
+    try {
+      await request(`/api/topics/${topicId}`, { method: "DELETE" });
+      removeTopicLocally(topicId);
+    } catch (error) {
+      showAlert(`토픽을 삭제하지 못했습니다 · ${errorCode(error)}`);
+    } finally {
+      if (state.topicDeleteInFlight === topicId) state.topicDeleteInFlight = null;
+    }
+  }
+
   function renderTopics(focusTopicId = null) {
     const fragment = document.createDocumentFragment();
     for (const topic of state.topics.values()) {
@@ -1170,6 +1251,13 @@ function startApplication() {
         button.append(count);
       }
       button.addEventListener("click", () => void selectTopic(topic.id));
+      if (topic.id !== GENERAL_TOPIC_ID) {
+        button.addEventListener("contextmenu", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          showTopicContextMenu(topic.id, event.clientX, event.clientY);
+        });
+      }
       item.append(button);
       fragment.append(item);
     }
@@ -1599,15 +1687,7 @@ function startApplication() {
     } else if (data.type === "message_delete") {
       applyMessageDelete(data.topicId, data.messageIds);
     } else if (data.type === "topic_delete") {
-      cancelReadConfirmation(data.topicId);
-      state.topics.delete(data.topicId);
-      state.histories.delete(data.topicId);
-      renderTopics();
-      if (state.activeTopicId === data.topicId) {
-        state.activeTopicId = null;
-        updateGeneralPanelState();
-        void reconcile();
-      }
+      removeTopicLocally(data.topicId);
     } else if (data.type === "reconcile_required") {
       void reconcile();
     }
@@ -1930,7 +2010,18 @@ function startApplication() {
       showAlert(`로그인을 취소하지 못했습니다 · ${errorCode(error)}`);
     }
   });
+  document.addEventListener("pointerdown", (event) => {
+    if (!state.topicContextMenu) return;
+    if (state.topicContextMenu.contains(event.target)) return;
+    hideTopicContextMenu();
+  });
+  window.addEventListener("blur", () => hideTopicContextMenu());
+  window.addEventListener("resize", () => hideTopicContextMenu());
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hideTopicContextMenu();
+  });
   window.addEventListener("pagehide", () => {
+    hideTopicContextMenu();
     state.uploadAbort?.abort();
     cancelAllReadConfirmations();
     state.historyAbort?.abort();

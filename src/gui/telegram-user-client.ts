@@ -222,6 +222,7 @@ export interface TelegramUserAdapter {
   pressCallback(peer: unknown, messageId: number, data: Uint8Array): Promise<unknown>;
   markTopicRead(peer: unknown, topicId: number, maxMessageId: number): Promise<void>;
   setTyping(peer: unknown, topicId: number, active: boolean): Promise<void>;
+  deleteTopic(peer: unknown, topicId: number): Promise<void>;
   addRawUpdateHandler(handler: (update: unknown) => void): void;
   catchUp(): Promise<void>;
   logOut(): Promise<boolean | void>;
@@ -1004,6 +1005,26 @@ export class TelegramUserClient {
     await this.requireReadyAdapter().setTyping(this.peer, topicId, active);
   }
 
+  /**
+   * 포럼 토픽을 Telegram에서 삭제한다. General(1)은 거부한다.
+   * 연결된 ChatKJB 봇 세션은 봇 쪽 MTProto topic-deletion monitor가
+   * UpdateDeleteChannelMessages를 보고 정리한다(세션이 없으면 토픽만 삭제).
+   */
+  async deleteTopic(topicId: number): Promise<void> {
+    this.requireKnownTopic(topicId);
+    if (topicId === GENERAL_TOPIC_ID) {
+      throw new Error("General topic cannot be deleted");
+    }
+    await this.requireReadyAdapter().deleteTopic(this.peer, topicId);
+    // 업데이트 지연 시에도 사이드바가 즉시 반영되도록 로컬 상태를 정리한다.
+    // 이후 UpdateDeleteChannelMessages가 와도 topic_delete는 멱등이다.
+    if (this.topicIds.has(topicId)) {
+      this.topicIds.delete(topicId);
+      this.topicStaging?.ids.delete(topicId);
+      this.options.onUpdate?.({ type: "topic_delete", topicId });
+    }
+  }
+
   logOut(): Promise<void> {
     return this.close("logout");
   }
@@ -1590,6 +1611,17 @@ async function createTeleprotoUserAdapter(input: {
           ? new teleproto.Api.SendMessageTypingAction()
           : new teleproto.Api.SendMessageCancelAction()
       }));
+    },
+    async deleteTopic(peer, topicId) {
+      // messages.DeleteTopicHistory는 offset이 0이 될 때까지 반복해야 전체 토픽이 지워진다.
+      for (;;) {
+        const result = await client.invoke(new teleproto.Api.messages.DeleteTopicHistory({
+          peer: peer as never,
+          topMsgId: topicId
+        }));
+        const offset = Number((result as { offset?: unknown; } | null | undefined)?.offset ?? 0);
+        if (!Number.isFinite(offset) || offset === 0) break;
+      }
     },
     addRawUpdateHandler(handler) {
       client.addEventHandler((update) => {

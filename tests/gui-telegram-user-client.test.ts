@@ -228,6 +228,7 @@ class FakeAdapter implements TelegramUserAdapter {
   readonly pressCallback = vi.fn(async () => ({ message: "ok" }));
   readonly markTopicRead = vi.fn(async () => undefined);
   readonly setTyping = vi.fn(async () => undefined);
+  readonly deleteTopic = vi.fn(async () => undefined);
   readonly catchUp = vi.fn(async () => undefined);
   readonly logOut = vi.fn(async () => undefined);
   readonly disconnect = vi.fn(async () => undefined);
@@ -1492,6 +1493,27 @@ describe("TelegramUserClient forum scope and actions", () => {
       [adapter.resolved.peer, [42]]
     ]);
     expect(adapter.setTyping).toHaveBeenCalledWith(adapter.resolved.peer, 42, true);
+    await client.stop();
+  });
+
+  it("deletes forum topics via DeleteTopicHistory and rejects General", async () => {
+    const updates: GuiTelegramUpdate[] = [];
+    const { client, adapter } = setup(undefined, {
+      onUpdate: (update) => updates.push(update)
+    });
+    await client.start();
+    await client.listTopics();
+
+    await expect(client.deleteTopic(GENERAL_TOPIC_ID)).rejects.toThrow(/General topic cannot be deleted/);
+    expect(adapter.deleteTopic).not.toHaveBeenCalled();
+
+    await client.deleteTopic(42);
+    expect(adapter.deleteTopic).toHaveBeenCalledWith(adapter.resolved.peer, 42);
+    expect(updates).toContainEqual({ type: "topic_delete", topicId: 42 });
+    await expect(client.sendText(42, "gone")).rejects.toThrow(/verified forum topic set/);
+    // 이미 로컬 집합에서 빠진 토픽은 재삭제 요청을 보내지 않는다.
+    await expect(client.deleteTopic(42)).rejects.toThrow(/verified forum topic set/);
+    expect(adapter.deleteTopic).toHaveBeenCalledTimes(1);
     await client.stop();
   });
 

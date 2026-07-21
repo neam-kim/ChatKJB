@@ -102,6 +102,7 @@ class FakeGuiServerClient implements GuiServerClient {
   readonly pressCallback = vi.fn(async (_messageId: number, _callbackData: string) => this.callbackResult);
   readonly markRead = vi.fn(async (_topicId: number, _maxMessageId: number) => undefined);
   readonly setTyping = vi.fn(async (_topicId: number, _active: boolean) => undefined);
+  readonly deleteTopic = vi.fn(async (_topicId: number) => undefined);
   readonly logOut = vi.fn(async () => undefined);
   readonly stop = vi.fn(async () => undefined);
 }
@@ -1434,6 +1435,50 @@ describe("GUI REST DTO and input boundaries", () => {
       { type: "upstream_failure", code: "TELEGRAM_OPERATION_FAILED" },
       { type: "request_rejected", code: "TELEGRAM_OPERATION_FAILED" }
     ]);
+  });
+
+  it("deletes forum topics through DELETE /api/topics/:id and rejects General", async () => {
+    const client = new FakeGuiServerClient();
+    const { handle, diagnostics } = await startFixture({ client });
+    const session = await authenticate(handle);
+    const headers = {
+      Origin: handle.origin,
+      "X-ChatKJB-CSRF": session.csrf,
+      Cookie: session.cookie
+    };
+
+    const deleted = await fetch(`${handle.origin}/api/topics/42`, {
+      method: "DELETE",
+      headers
+    });
+    expect(deleted.status).toBe(204);
+    expect(client.deleteTopic).toHaveBeenCalledWith(42);
+
+    const general = await fetch(`${handle.origin}/api/topics/1`, {
+      method: "DELETE",
+      headers
+    });
+    expect(general.status).toBe(400);
+    expect(await general.json()).toEqual({ error: { code: "GENERAL_TOPIC_NOT_DELETABLE" } });
+    expect(client.deleteTopic).toHaveBeenCalledTimes(1);
+
+    const withBody = await fetch(`${handle.origin}/api/topics/42`, {
+      method: "DELETE",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: "{}"
+    });
+    // Content-Length > 0은 limit 0 본문 상한에서 BODY_TOO_LARGE로 거절된다.
+    expect(withBody.status).toBe(413);
+    expect(await withBody.json()).toEqual({ error: { code: "BODY_TOO_LARGE" } });
+
+    client.deleteTopic.mockRejectedValueOnce(new Error("no admin rights"));
+    const failed = await fetch(`${handle.origin}/api/topics/77`, {
+      method: "DELETE",
+      headers
+    });
+    expect(failed.status).toBe(502);
+    expect(await failed.json()).toEqual({ error: { code: "TELEGRAM_OPERATION_FAILED" } });
+    expect(diagnostics).toContainEqual({ type: "upstream_failure", code: "TELEGRAM_OPERATION_FAILED" });
   });
 });
 

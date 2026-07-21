@@ -141,6 +141,41 @@ a:focus-visible {
 .topic-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topic-count { min-width: 1.35rem; padding: .1rem .3rem; border: 1px solid #375249; color: var(--accent); text-align: center; font-size: .68rem; }
 
+.topic-context-menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 9.5rem;
+  padding: .28rem;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  box-shadow: 0 .55rem 1.6rem #000a;
+}
+
+.topic-context-item {
+  display: block;
+  width: 100%;
+  padding: .55rem .7rem;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.topic-context-item:hover,
+.topic-context-item:focus-visible {
+  background: #1c252d;
+}
+
+.topic-context-item-danger {
+  color: var(--danger);
+}
+
+.topic-context-item-danger:hover,
+.topic-context-item-danger:focus-visible {
+  background: #2b1117;
+}
+
 .quiet-button,
 .primary-button,
 .history-loader,
