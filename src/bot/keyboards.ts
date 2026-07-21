@@ -73,6 +73,19 @@ export function folderBrowserKeyboard(
 // (user 요청: 빈 패널은 '-' 표기, 추후 배선 가능성만 열어둔다.)
 const RESERVED_SLOT_LABEL = "➖";
 
+// Cline 새 세션 기본값 패널의 6번째 슬롯 라벨. permissionMode가 "plan"이면 Plan,
+// 그 외("auto" 또는 미설정=프로젝트 defaultMode 따름)는 Act로 표시한다.
+// 미설정을 Act로 표기하는 이유: Cline은 auto(act)가 실질 기본이며, 이 버튼을 누르면
+// 명시적으로 plan/auto 중 하나로 확정되기 때문이다.
+function clineDefaultModeLabel(mode: PermissionMode | undefined): string {
+  return mode === "plan" ? "🧭 Plan" : "▶️ Act";
+}
+
+// Cline 기본 모드 토글의 다음 값. plan↔auto 두 값만 순환한다.
+function clineToggledDefaultMode(mode: PermissionMode | undefined): PermissionMode {
+  return mode === "plan" ? "auto" : "plan";
+}
+
 function clineProviderOption(catalog: ModelCatalog, providerId: string | null | undefined) {
   return catalog.clineProviders.find((option) => option.id === providerId)
     ?? catalog.clineProviders[0];
@@ -163,12 +176,16 @@ function defaultsKeyboard(
       : RESERVED_SLOT_LABEL;
   const codexAccountIndex = selectedCodexAccountIndex(defaults.codexHome, codexAccountHomes);
   const claudeTokenIndex = selectedClaudeTokenIndex(defaults.claudeTokenIndex, claudeTokenCount);
-  // 6번째 슬롯: Claude/Codex 제공자에서는 토큰 선택 버튼, agy는 예약 슬롯.
-  const sixth = defaults.provider === "codex" && codexAccountHomes.length > 1 && codexAccountIndex >= 0
-    ? `🔑 토큰: #${codexAccountIndex + 1}`
-    : defaults.provider === "claude" && claudeTokenCount > 1 && claudeTokenIndex >= 0
-      ? `🔑 토큰: #${claudeTokenIndex + 1}`
-      : RESERVED_SLOT_LABEL;
+  // 6번째 슬롯: Claude/Codex는 토큰이 여러 개라 토큰 선택 버튼을 둔다.
+  // Cline은 토큰이 단수라 이 자리가 남으므로 Plan↔Act 토글 버튼을 배치한다(user 지시).
+  // 그 외(agy/grok)는 예약 슬롯.
+  const sixth = defaults.provider === "cline"
+    ? clineDefaultModeLabel(defaults.defaultPermissionMode)
+    : defaults.provider === "codex" && codexAccountHomes.length > 1 && codexAccountIndex >= 0
+      ? `🔑 토큰: #${codexAccountIndex + 1}`
+      : defaults.provider === "claude" && claudeTokenCount > 1 && claudeTokenIndex >= 0
+        ? `🔑 토큰: #${claudeTokenIndex + 1}`
+        : RESERVED_SLOT_LABEL;
   return new Keyboard()
     .text("⚙️ 새 세션 기본값")
     .text(`🧠 모델: ${modelText}`)
@@ -403,11 +420,13 @@ function usageRateLimitWarning(): string {
 
 export {
   agyModelKeyboard,
+  clineDefaultModeLabel,
   clineModelOption,
   clineModelSnapshotKeyboard,
   clineProviderOption,
   clineProviderSnapshotKeyboard,
   clineReasoningLabel,
+  clineToggledDefaultMode,
   codexModelKeyboard,
   defaultsEffortKeyboard,
   defaultsKeyboard,

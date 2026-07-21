@@ -459,7 +459,8 @@ export class SessionManager {
     grokReasoning?: string | null,
     clineProviderId?: string | null,
     clineModel?: string | null,
-    clineReasoning?: string | null
+    clineReasoning?: string | null,
+    permissionMode?: SessionRecord["permissionMode"] | null
   ): SessionRecord {
     if (this.disposed) throw new Error("세션 관리자가 종료되어 새 세션을 만들 수 없습니다.");
     const selectedProvider = provider ?? this.defaultProvider();
@@ -476,7 +477,7 @@ export class SessionManager {
       cwd: project.cwd,
       title,
       status: "queued",
-      permissionMode: project.defaultMode,
+      permissionMode: permissionMode ?? project.defaultMode,
       provider: selectedProvider,
       model: model ?? null,
       thinking: thinking ?? null,

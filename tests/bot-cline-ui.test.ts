@@ -275,6 +275,44 @@ describe("Cline bot configuration UI", () => {
       .toBe(true);
   });
 
+  it("shows the Plan/Act toggle in the sixth slot for Cline defaults", () => {
+    const catalog = clineCatalog(1, 1);
+    const labelOf = (defaults: SessionDefaults): string => {
+      const sixth = defaultsKeyboard(defaults, catalog).build()[2]?.[1];
+      return typeof sixth === "string" ? sixth : sixth?.text ?? "";
+    };
+    // 미설정 기본값은 Cline의 실질 기본(act)으로 표기한다.
+    expect(labelOf(defaultsFor(catalog))).toContain("Act");
+    expect(labelOf({ ...defaultsFor(catalog), defaultPermissionMode: "plan" })).toContain("Plan");
+    expect(labelOf({ ...defaultsFor(catalog), defaultPermissionMode: "auto" })).toContain("Act");
+    // Claude 기본값에서는 이 슬롯이 토큰/예약이라 Plan/Act가 나오면 안 된다(회귀 방지).
+    const claudeSixth = defaultsKeyboard({ ...defaultsFor(catalog), provider: "claude" }, catalog).build()[2]?.[1];
+    const claudeLabel = typeof claudeSixth === "string" ? claudeSixth : claudeSixth?.text ?? "";
+    expect(claudeLabel).not.toContain("Plan");
+    expect(claudeLabel).not.toContain("Act");
+  });
+
+  it("toggles the Cline default permission mode plan<->auto from the panel button", async () => {
+    const test = setup();
+    // 미설정 → Act 표시. 버튼을 누르면 plan으로 확정.
+    await test.bot.handleUpdate(messageUpdate("▶️ Act", 1));
+    expect(test.updateSessionDefaults).toHaveBeenCalledWith({ defaultPermissionMode: "plan" });
+    expect(test.defaults().defaultPermissionMode).toBe("plan");
+
+    // 다시 누르면 auto로 되돌아온다.
+    await test.bot.handleUpdate(messageUpdate("🧭 Plan", 2));
+    expect(test.updateSessionDefaults).toHaveBeenLastCalledWith({ defaultPermissionMode: "auto" });
+    expect(test.defaults().defaultPermissionMode).toBe("auto");
+  });
+
+  it("carries the Cline default permission mode into pending starts", () => {
+    const catalog = clineCatalog(1, 1);
+    const planned = pendingFieldsFromDefaults({ ...defaultsFor(catalog), defaultPermissionMode: "plan" });
+    expect(planned).toMatchObject({ provider: "cline", permissionMode: "plan" });
+    // 미설정이면 permissionMode 키를 넣지 않아 프로젝트 defaultMode를 따른다.
+    expect("permissionMode" in pendingFieldsFromDefaults(defaultsFor(catalog))).toBe(false);
+  });
+
   it("formats Cline provider, model, and reasoning status", () => {
     const catalog = clineCatalog(1, 1);
     const defaults = defaultsFor(catalog);

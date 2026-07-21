@@ -1,8 +1,12 @@
+import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import type { ProjectConfig, ProviderKind, SessionDefaults } from "../types.js";
 
 export interface PendingStartOptions {
   resumeSessionId?: string;
   forkSession?: boolean;
+  // 새 세션 시작 권한 모드 override. 없으면 프로젝트 defaultMode를 따른다.
+  // 현재는 Cline 새 세션이 General 패널의 Plan/Act 토글값을 여기로 넘긴다.
+  permissionMode?: PermissionMode | undefined;
   provider?: ProviderKind | undefined;
   model?: string | undefined;
   thinking?: string | undefined;
@@ -88,6 +92,8 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
       clineProviderId: defaults.clineProviderId ?? "",
       clineModel: defaults.clineModel ?? "",
       clineReasoning: defaults.clineReasoning ?? "off",
+      // General 패널의 Plan/Act 토글값. 미설정이면 undefined로 두어 프로젝트 defaultMode를 따른다.
+      ...(defaults.defaultPermissionMode ? { permissionMode: defaults.defaultPermissionMode } : {}),
       leanMode: true
     };
   }

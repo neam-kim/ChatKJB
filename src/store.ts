@@ -61,6 +61,13 @@ function normalizeDefaultIndex(value: string | number | null | undefined): numbe
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
+// 저장된 새 세션 기본 권한 모드를 정규화한다. 알 수 없는 값이나 미설정이면 undefined를
+// 반환해 새 세션이 프로젝트 defaultMode를 따르게 한다.
+function normalizeDefaultPermissionMode(value: string | null | undefined): PermissionMode | undefined {
+  const modes: PermissionMode[] = ["default", "acceptEdits", "plan", "dontAsk", "auto", "bypassPermissions"];
+  return value && modes.includes(value as PermissionMode) ? (value as PermissionMode) : undefined;
+}
+
 interface SessionRow {
   id: string;
   sdk_session_id: string | null;
@@ -538,6 +545,7 @@ export class StateStore {
       .prepare("SELECT key, value FROM app_settings WHERE key LIKE 'default.%'")
       .all() as Array<{ key: string; value: string; }>;
     const stored = new Map(rows.map((row) => [row.key.slice("default.".length), row.value]));
+    const defaultPermissionMode = normalizeDefaultPermissionMode(stored.get("defaultPermissionMode"));
     return {
       provider: normalizeProvider(stored.get("provider")),
       claudeModel: stored.get("claudeModel") ?? SESSION_DEFAULT_SEED.claudeModel,
@@ -553,7 +561,8 @@ export class StateStore {
       claudeEffort: stored.get("claudeEffort") ?? SESSION_DEFAULT_SEED.claudeEffort,
       codexReasoning: stored.get("codexReasoning") ?? SESSION_DEFAULT_SEED.codexReasoning,
       codexHome: stored.get("codexHome") ?? SESSION_DEFAULT_SEED.codexHome,
-      agyThinkingLevel: normalizeDefaultAgyThinkingLevel(stored.get("agyThinkingLevel"))
+      agyThinkingLevel: normalizeDefaultAgyThinkingLevel(stored.get("agyThinkingLevel")),
+      ...(defaultPermissionMode ? { defaultPermissionMode } : {})
     };
   }
 

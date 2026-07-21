@@ -16,9 +16,11 @@ import {
   defaultsTokenKeyboard
 } from "../keyboards.js";
 import {
+  clineDefaultModeLabel,
   clineModelSnapshotKeyboard,
   clineProviderOption,
-  clineProviderSnapshotKeyboard
+  clineProviderSnapshotKeyboard,
+  clineToggledDefaultMode
 } from "../keyboards.js";
 import {
   clineCatalogRevision,
@@ -207,6 +209,25 @@ export function registerMessageHandlers(bot: Bot, deps: BotDeps): void {
     await ctx.reply("새 세션에서 사용할 Cline 내부 제공자를 선택하세요.", {
       reply_markup: clineProviderSnapshotKeyboard(snapshot)
     });
+  });
+
+  // Cline 새 세션 기본값 패널의 Plan↔Act 토글. 이 버튼은 Cline 제공자일 때만 노출되며,
+  // 누를 때마다 새 세션 기본 권한 모드를 plan↔auto로 뒤집는다. Claude/Codex는 이 자리에
+  // 토큰 버튼이 오므로 이 라벨과 겹치지 않는다.
+  bot.hears(/^(🧭 Plan|▶️ Act)/, async (ctx) => {
+    const defaults = store.getSessionDefaults();
+    if (defaults.provider !== "cline") {
+      await ctx.reply("Plan/Act 토글은 Cline 새 세션 기본값 전용입니다.", {
+        reply_markup: defaultPanelKeyboard(defaults)
+      });
+      return;
+    }
+    const next = clineToggledDefaultMode(defaults.defaultPermissionMode);
+    const updated = store.updateSessionDefaults({ defaultPermissionMode: next });
+    await ctx.reply(
+      `새 Cline 세션 기본 모드를 ${clineDefaultModeLabel(next)}(${next})(으)로 바꿨습니다.`,
+      { reply_markup: defaultPanelKeyboard(updated) }
+    );
   });
 
   bot.hears(/^➖/, async (ctx) => {

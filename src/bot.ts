@@ -316,7 +316,8 @@ export function createBot(
       options.grokReasoning ?? null,
       options.clineProviderId ?? null,
       options.clineModel ?? null,
-      options.clineReasoning ?? null
+      options.clineReasoning ?? null,
+      options.permissionMode ?? null
     );
     const codexAccount = session.provider === "codex"
       ? codexAccountLabel(session.codexHome, config.codexAccountHomes)

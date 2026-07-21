@@ -38,6 +38,9 @@ export interface SessionDefaults {
   codexReasoning: string;
   codexHome: string | null;
   agyThinkingLevel: string;
+  // 새 세션의 시작 권한 모드. 현재는 Cline만 General 패널에서 Plan(=plan)↔Act(=auto)로
+  // 토글해 사용한다. 비어 있으면 프로젝트 defaultMode를 따른다.
+  defaultPermissionMode?: PermissionMode;
 }
 
 export interface UsageWindow {
@@ -71,6 +74,8 @@ export interface UsageSnapshot {
 export type ReservedTaskStatus = "pending" | "running" | "done" | "error" | "canceled";
 
 export interface ReservedTaskStartOptions {
+  // 새 세션 시작 권한 모드 override. 없으면 프로젝트 defaultMode를 따른다.
+  permissionMode?: PermissionMode;
   provider?: ProviderKind;
   model?: string;
   thinking?: string;
