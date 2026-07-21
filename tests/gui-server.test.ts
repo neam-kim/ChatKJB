@@ -53,7 +53,7 @@ const LEAK_SENTINELS = [
 const REPLY_PANEL_ROWS = [
   ["\u2699\ufe0f \uc0c8 \uc138\uc158 \uae30\ubcf8\uac12", "\ud83e\udde0 \ubaa8\ub378: GPT-5.6-Sol"],
   ["\ud83e\udd16 \uc81c\uacf5\uc790: Cline", "\ud83d\udcad \ucd94\ub860: high"],
-  ["\ud83d\udd0c Cline \uc81c\uacf5\uc790: anthropic", "\u2796"]
+  ["\ud83d\udd0c Cline \uc81c\uacf5\uc790: anthropic", "\ud83e\udded Plan"]
 ] as const;
 
 interface AuthenticatedSession {

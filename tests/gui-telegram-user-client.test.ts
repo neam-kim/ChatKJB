@@ -36,7 +36,12 @@ const REPLY_PANEL_ROWS = [
 const CLINE_REPLY_PANEL_ROWS = [
   ["\u2699\ufe0f \uc0c8 \uc138\uc158 \uae30\ubcf8\uac12", "\ud83e\udde0 \ubaa8\ub378: claude-sonnet-4-6"],
   ["\ud83e\udd16 \uc81c\uacf5\uc790: Cline", "\ud83d\udcad \ucd94\ub860: high"],
-  ["\ud83d\udd0c Cline \uc81c\uacf5\uc790: anthropic", "\u2796"]
+  ["\ud83d\udd0c Cline \uc81c\uacf5\uc790: anthropic", "\ud83e\udded Plan"]
+] as const;
+const CLINE_ACT_REPLY_PANEL_ROWS = [
+  [...CLINE_REPLY_PANEL_ROWS[0]],
+  [...CLINE_REPLY_PANEL_ROWS[1]],
+  [CLINE_REPLY_PANEL_ROWS[2][0], "\u25b6\ufe0f Act"]
 ] as const;
 
 function replyKeyboardMarkup(rows: readonly (readonly string[])[] = REPLY_PANEL_ROWS): unknown {
@@ -1253,6 +1258,22 @@ describe("TelegramUserClient forum scope and actions", () => {
       message: expect.objectContaining({
         id: 301,
         replyPanel: { messageId: 301, rows: CLINE_REPLY_PANEL_ROWS }
+      })
+    });
+
+    adapter.emit({
+      className: "UpdateNewChannelMessage",
+      message: rawMessage({
+        id: 302,
+        text: "Cline act panel",
+        replyMarkup: replyKeyboardMarkup(CLINE_ACT_REPLY_PANEL_ROWS)
+      })
+    });
+    expect(updates).toContainEqual({
+      type: "message_upsert",
+      message: expect.objectContaining({
+        id: 302,
+        replyPanel: { messageId: 302, rows: CLINE_ACT_REPLY_PANEL_ROWS.map((row) => [...row]) }
       })
     });
     await client.stop();
