@@ -127,6 +127,61 @@ export interface GrokCliResult {
   text: string;
   /** grok 0.2.99+의 `end` 이벤트가 준 이번 턴 토큰 사용량. 구버전 CLI에서는 null. */
   usage: GrokTokenUsage | null;
+  /**
+   * true면 프로세스는 비정상 종료(code≠0)했지만 streaming-json 공개 text가 있어
+   * 그 결과를 살려 세션을 완료로 처리한다(HTTP 522 등 후반 단절 대비).
+   */
+  salvaged?: boolean;
+}
+
+/** Grok CLI stderr를 사용자 안내 문장으로 짧게 정리한다. */
+export function formatGrokCliFailure(code: number | null, stderr: string): string {
+  const detail = stderr.trim().slice(-1000);
+  const httpMatch = detail.match(/HTTP\s+(\d{3})/i)
+    ?? detail.match(/status[_\s]?(\d{3})/i)
+    ?? detail.match(/\(status\s+(\d{3})/i);
+  const status = httpMatch?.[1];
+  if (status === "522" || /timed out or was interrupted/i.test(detail)) {
+    return "Grok API 연결이 끊겼거나 시간 초과되었습니다(HTTP 522). "
+      + "같은 토픽에서 이어서 보내 주시면 재개할 수 있습니다."
+      + (detail ? ` 원문: ${detail.slice(0, 280)}` : "");
+  }
+  if (status === "429" || /rate limit|too many requests/i.test(detail)) {
+    return "Grok API 요청 한도에 걸렸습니다. 잠시 후 같은 토픽에서 다시 시도해 주세요."
+      + (detail ? ` 원문: ${detail.slice(0, 280)}` : "");
+  }
+  return `Grok CLI 실행 실패 (코드 ${code ?? "unknown"})`
+    + (detail ? `: ${detail}` : "");
+}
+
+/**
+ * 프로세스 종료 코드와 수집된 공개 text로 성공·salvage·실패를 결정한다.
+ * abort/timeout 등 pendingError가 있으면 항상 실패한다.
+ */
+export function resolveGrokProcessExit(input: {
+  code: number | null;
+  visibleText: string;
+  stderr: string;
+  pendingError: Error | null;
+}): { ok: true; text: string; salvaged: boolean; } | { ok: false; error: Error; } {
+  if (input.pendingError) return { ok: false, error: input.pendingError };
+  const text = input.visibleText.trim();
+  if (input.code === 0) {
+    if (!text) {
+      return {
+        ok: false,
+        error: new Error("Grok CLI가 성공 종료와 함께 빈 응답을 반환했습니다.")
+      };
+    }
+    return { ok: true, text, salvaged: false };
+  }
+  // 비정상 종료라도 이미 스트리밍된 공개 답변이 있으면 세션을 ERROR로 버리지 않는다.
+  // 긴 작업 후 --check/후속 turn에서 HTTP 522가 나도 본문 결과는 보존한다.
+  if (text) return { ok: true, text, salvaged: true };
+  return {
+    ok: false,
+    error: new Error(formatGrokCliFailure(input.code, input.stderr))
+  };
 }
 
 export function grokToolFreeArgs(): string[] {
@@ -246,25 +301,24 @@ function runGrokProcess(
       if (terminationTimer) clearTimeout(terminationTimer);
       signal?.removeEventListener("abort", onAbort);
       if (settled) return;
-      if (pendingError) {
-        finishReject(pendingError);
-        return;
-      }
-      if (code !== 0) {
-        finishReject(new Error(
-          `Grok CLI 실행 실패 (코드 ${code ?? "unknown"})`
-          + (stderr.trim() ? `: ${stderr.trim().slice(-1000)}` : "")
-        ));
-        return;
-      }
       const response = output.finish();
       for (const visibleEvent of output.takeVisibleEvents()) onPartial?.(visibleEvent);
-      if (!response) {
-        finishReject(new Error("Grok CLI가 성공 종료와 함께 빈 응답을 반환했습니다."));
+      const decided = resolveGrokProcessExit({
+        code,
+        visibleText: response,
+        stderr,
+        pendingError
+      });
+      if (!decided.ok) {
+        finishReject(decided.error);
         return;
       }
       settled = true;
-      resolve({ text: response, usage: output.usage() });
+      resolve({
+        text: decided.text,
+        usage: output.usage(),
+        ...(decided.salvaged ? { salvaged: true } : {})
+      });
     });
     if (signal?.aborted) onAbort();
   });

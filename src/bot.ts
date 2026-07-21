@@ -744,7 +744,10 @@ export function createBot(
     caption: string | undefined
   ): Promise<void> {
     if (items.length === 0) return;
-    const reply = (ctx as { reply: (text: string) => Promise<unknown>; }).reply;
+    // grammy Context.reply는 프로토타입 메서드라 this.msg를 본다. 메서드만 뽑으면
+    // this가 끊겨 "Cannot read properties of undefined (reading 'msg')"로 첨부 처리가
+    // 통째로 실패한다. 호출 시점에 ctx에서 호출해 this를 유지한다.
+    const reply = (text: string) => ctx.reply(text);
     const topicId = (ctx.message as { message_thread_id?: number; } | undefined)?.message_thread_id;
     const userId = ctx.from?.id;
     if (!Number.isSafeInteger(userId) || (userId ?? 0) <= 0) {

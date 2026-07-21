@@ -141,7 +141,7 @@ export async function executeGrok(
           emitGrokProgress(withoutGrokControlMarkers(message));
         }
       };
-      const { text, usage } = await dependencies.runGrok(turnPrompt, {
+      const { text, usage, salvaged } = await dependencies.runGrok(turnPrompt, {
         executable: host.options.grokExecutable ?? "grok",
         cwd: session.cwd,
         model,
@@ -162,7 +162,11 @@ export async function executeGrok(
       }
       if (progressDelivery) await progressDelivery;
       if (progressError) throw progressError;
-      const response = parseGrokTranscript(text).final || "Grok 실행 완료";
+      const parsedFinal = parseGrokTranscript(text).final;
+      const salvageNote = salvaged
+        ? "\n\n(참고: Grok CLI가 비정상 종료했지만 이미 받은 공개 답변을 살려 완료 처리했습니다. 이어 작업이 필요하면 같은 토픽에 보내 주세요.)"
+        : "";
+      const response = (parsedFinal || "Grok 실행 완료") + salvageNote;
       const visibleResponse = await queueRequestedUserInput(
         host,
         session,

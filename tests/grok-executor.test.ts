@@ -237,6 +237,25 @@ describe("Grok executor", () => {
     expect(renames).toEqual(["[RUNNING] Grok test", "[STOP] Grok test"]);
   });
 
+  it("completes with a salvage note when the CLI returns salvaged text", async () => {
+    const { host, store, sent, renames } = setup();
+    const runGrok = vi.fn(async () => ({
+      text: "[FINAL]본문 결과[/FINAL]",
+      usage: null,
+      salvaged: true
+    }));
+
+    await executeGrok(host, {
+      session: store.getSession("grok-session")!,
+      prompt: "522 직전 작업"
+    }, { runGrok, createSessionId: () => "fixed-grok-id" });
+
+    expect(store.getSession("grok-session")?.status).toBe("done");
+    expect(sent.join("\n")).toContain("본문 결과");
+    expect(sent.join("\n")).toMatch(/비정상 종료했지만|살려 완료/);
+    expect(renames).toEqual(["[RUNNING] Grok test", "[DONE] Grok test"]);
+  });
+
   it("marks the topic as errored when the Grok CLI fails", async () => {
     const { host, store, renames } = setup();
     const runGrok = vi.fn(async () => { throw new Error("grok cli exploded"); });

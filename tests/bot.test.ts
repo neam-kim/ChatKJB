@@ -1059,6 +1059,37 @@ describe("/new defaults fast path", () => {
     expect(created?.title).toContain("보고서 확인");
   });
 
+  it("replies after attaching a file to an existing session (ctx.reply this binding)", async () => {
+    // 회귀: handleFiles가 ctx.reply를 언바인딩하면 grammy Context가
+    // "Cannot read properties of undefined (reading 'msg')"로 터져 첨부 후 세션이 멈춘다.
+    // createForumTopic mock은 항상 topic 7777을 반환한다.
+    const downloadFile = vi.fn(async () => "/tmp/photo.jpg");
+    const { bot, store, sessions, calls } = botSetup({
+      runtime: { downloadFile }
+    });
+    vi.spyOn(sessions as unknown as { execute: () => Promise<void>; }, "execute")
+      .mockResolvedValue();
+    const resume = vi.spyOn(sessions, "resume").mockReturnValue(true);
+
+    await bot.handleUpdate(newCommand(1, "/new test"));
+    await bot.handleUpdate(textMessage("먼저 텍스트로 세션 생성", 2, 7777));
+    const created = store.listSessions(10).find((item) => item.topicId === 7777);
+    expect(created).toBeDefined();
+    store.updateSession(created!.id, { status: "done" });
+
+    const before = calls.length;
+    await bot.handleUpdate(documentMessage(3, 7777));
+
+    expect(downloadFile).toHaveBeenCalled();
+    expect(resume).toHaveBeenCalled();
+    const replyTexts = calls
+      .slice(before)
+      .filter((call) => call.method === "sendMessage")
+      .map((call) => String(call.payload?.text ?? ""));
+    expect(replyTexts.some((text) => text.includes("파일 저장") && text.includes("후속 작업")))
+      .toBe(true);
+  });
+
   it("applies Codex defaults when the default provider is Codex", async () => {
     const { bot, store, sessions } = botSetup();
     vi.spyOn(sessions as unknown as { executeCodex: () => Promise<void>; }, "executeCodex")

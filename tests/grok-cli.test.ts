@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { GrokStreamingJsonCollector, grokPermissionMode, grokToolFreeArgs, usageFromEndEvent } from "../src/grok-cli.js";
+import {
+  formatGrokCliFailure,
+  GrokStreamingJsonCollector,
+  grokPermissionMode,
+  grokToolFreeArgs,
+  resolveGrokProcessExit,
+  usageFromEndEvent
+} from "../src/grok-cli.js";
 
 // grok CLI `--permission-mode`는 bypassPermissions만 실효하고 auto/dontAsk/acceptEdits는
 // 무시된다(grok 22-permissions-and-safety.md). 무시되면 헤드리스에서 MCP 도구가 승인 프롬프트에
@@ -87,5 +94,77 @@ describe("GrokStreamingJsonCollector", () => {
       });
     expect(usageFromEndEvent({})).toBeNull();
     expect(usageFromEndEvent(null)).toBeNull();
+  });
+});
+
+describe("resolveGrokProcessExit", () => {
+  it("성공 종료와 공개 text가 있으면 salvage 없이 통과한다", () => {
+    expect(resolveGrokProcessExit({
+      code: 0,
+      visibleText: "완료했습니다",
+      stderr: "",
+      pendingError: null
+    })).toEqual({ ok: true, text: "완료했습니다", salvaged: false });
+  });
+
+  it("성공 종료지만 빈 응답이면 실패한다", () => {
+    const result = resolveGrokProcessExit({
+      code: 0,
+      visibleText: "  \n",
+      stderr: "",
+      pendingError: null
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toMatch(/빈 응답/);
+  });
+
+  it("비정상 종료라도 공개 text가 있으면 salvage로 통과한다", () => {
+    // 긴 작업 후 HTTP 522로 CLI가 1을 내도 본문 결과는 보존한다.
+    expect(resolveGrokProcessExit({
+      code: 1,
+      visibleText: "[FINAL]배포 준비 완료[/FINAL]",
+      stderr: 'Error: Internal error: {"message":"API error (status 522): Connection to Grok timed out (HTTP 522)."}',
+      pendingError: null
+    })).toEqual({
+      ok: true,
+      text: "[FINAL]배포 준비 완료[/FINAL]",
+      salvaged: true
+    });
+  });
+
+  it("비정상 종료와 빈 text면 정리된 실패 메시지를 낸다", () => {
+    const result = resolveGrokProcessExit({
+      code: 1,
+      visibleText: "",
+      stderr: 'API error (status 522 <unknown status code>): Connection to Grok timed out or was interrupted. Please try again. (HTTP 522).',
+      pendingError: null
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toMatch(/HTTP 522/);
+      expect(result.error.message).toMatch(/연결이 끊겼|시간 초과/);
+    }
+  });
+
+  it("abort/timeout pendingError는 text가 있어도 실패한다", () => {
+    const result = resolveGrokProcessExit({
+      code: null,
+      visibleText: "중간 결과",
+      stderr: "",
+      pendingError: new Error("turn aborted")
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toBe("turn aborted");
+  });
+});
+
+describe("formatGrokCliFailure", () => {
+  it("HTTP 522를 짧은 안내로 바꾼다", () => {
+    const message = formatGrokCliFailure(
+      1,
+      'Error: Internal error: {"message":"API error (status 522): timed out (HTTP 522)."}'
+    );
+    expect(message).toMatch(/HTTP 522/);
+    expect(message).not.toMatch(/Grok CLI 실행 실패 \(코드 1\): Error: Internal error/);
   });
 });
