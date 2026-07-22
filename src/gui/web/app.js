@@ -1423,15 +1423,7 @@ function startApplication() {
       const name = document.createElement("span");
       name.className = "topic-name";
       name.textContent = topic.id === GENERAL_TOPIC_ID ? "ChatKJB" : topic.title;
-      if (topic.id === GENERAL_TOPIC_ID) {
-        button.append(name);
-      } else {
-        const prefix = document.createElement("span");
-        prefix.className = "topic-prefix";
-        prefix.setAttribute("aria-hidden", "true");
-        prefix.textContent = "/";
-        button.append(prefix, name);
-      }
+      button.append(name);
       if (topic.unreadCount > 0) {
         const count = document.createElement("span");
         count.className = "topic-count";

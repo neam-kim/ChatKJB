@@ -114,6 +114,12 @@ describe("ChatKJB Terminal macOS shell contract", () => {
     expect(build).toContain('const runtimePath = join(runtimeDir, "node")');
     expect(build).toContain('const webAssetNames = ["app.js", "index.html", "manifest.webmanifest", "styles.css"]');
     expect(build).toContain("const runtimeSource = realpathSync(process.execPath)");
+    expect(build).toContain("assertPortableNodeRuntime(runtimeSource)");
+    expect(build.indexOf("assertPortableNodeRuntime(runtimeSource)")).toBeLessThan(
+      build.indexOf("rmSync(appPath")
+    );
+    expect(build).toContain('!library.startsWith("/System/Library/")');
+    expect(build).toContain('!library.startsWith("/usr/lib/")');
     expect(build).toContain('"esbuild-metafile.json"');
     expect(build).toContain('"manifest.json"');
     expect(build.indexOf('"--timestamp=none",\n    runtimePath')).toBeLessThan(

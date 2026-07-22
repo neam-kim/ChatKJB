@@ -174,6 +174,15 @@ describe("GUI web static security and responsive contract", () => {
     expect(css).toMatch(/\.general-panel\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
   });
 
+  it("renders topic titles without a decorative slash prefix", () => {
+    const script = readFileSync(resolve(webDirectory, "app.js"), "utf8");
+    const css = readFileSync(resolve(webDirectory, "styles.css"), "utf8");
+    expect(script).toContain("button.append(name)");
+    expect(script).not.toContain("topic-prefix");
+    expect(css).not.toContain(".topic-prefix");
+    expect(css).toMatch(/\.topic-button\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto/);
+  });
+
   it("offers sidebar topic deletion through a right-click context menu", () => {
     const script = readFileSync(resolve(webDirectory, "app.js"), "utf8");
     const css = readFileSync(resolve(webDirectory, "styles.css"), "utf8");

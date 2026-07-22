@@ -161,6 +161,7 @@ async function run(): Promise<void> {
         sourceMode: config.usageSourceMode,
         usageCachePaths: config.usageCachePaths,
         usageCacheUrls: config.usageCacheUrls,
+        preferDaemonClaudeCache: config.preferDaemonClaudeCache,
         ...(config.usageHttpToken ? { usageHttpToken: config.usageHttpToken } : {})
       }),
       onDiagnostic: ({ type, code }) => {

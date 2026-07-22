@@ -119,7 +119,7 @@ a:focus-visible {
 
 .topic-button {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: .55rem;
   width: 100%;
@@ -135,9 +135,7 @@ a:focus-visible {
 
 .topic-button:hover { background: #172027; color: var(--text); }
 .topic-button[aria-current="page"] { border-left-color: var(--accent); background: #14231e; color: var(--text); }
-.topic-button[data-topic-id="1"] { grid-template-columns: minmax(0, 1fr) auto; }
 .topic-button[data-topic-id="1"] .topic-name { color: var(--text); font-weight: 800; }
-.topic-prefix { color: var(--faint); }
 .topic-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topic-count { min-width: 1.35rem; padding: .1rem .3rem; border: 1px solid #375249; color: var(--accent); text-align: center; font-size: .68rem; }
 

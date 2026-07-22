@@ -598,6 +598,8 @@ export async function loadTelegramGuiConfig() {
       codexFallbackHome
     ),
     usageSourceMode,
+    // GUI가 같은 Mac에서 실행되어도 Claude 웹 조회는 데몬 하나만 맡긴다.
+    preferDaemonClaudeCache: usageSourceMode === "local",
     usageCachePaths,
     usageCacheUrls,
     ...(usageHttpToken ? { usageHttpToken } : {})

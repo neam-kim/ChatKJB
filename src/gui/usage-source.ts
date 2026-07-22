@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fetchCodexLiveUsage } from "../codex-live-usage.js";
 import { fetchGrokLiveUsage } from "../grok-live-usage.js";
+import { fetchClaudeWebUsage } from "../claude-web-usage.js";
 import { buildCodexEnvironment } from "../session-environment.js";
 import {
   fetchDaemonUsageCache,
@@ -53,6 +54,8 @@ export interface UsageSourceOptions {
   cwd?: string;
   fetchCodex?: typeof fetchCodexLiveUsage;
   fetchGrok?: typeof fetchGrokLiveUsage;
+  /** 데몬 전용 Claude 웹 사용량 조회. 미지정이면 기존 SQLite 스냅샷만 읽는다. */
+  fetchClaudeWeb?: typeof fetchClaudeWebUsage;
   now?: () => number;
   /**
    * local: 이 Mac 이 데몬 호스트 — DB·CLI 직접 조회.
@@ -67,6 +70,8 @@ export interface UsageSourceOptions {
    */
   usageCacheUrls?: readonly string[];
   usageHttpToken?: string;
+  /** GUI는 데몬이 갱신한 Claude 값을 먼저 읽고, 데몬 부재 때만 DB 스냅샷으로 폴백한다. */
+  preferDaemonClaudeCache?: boolean;
 }
 
 export interface UsageCacheOptions {
@@ -119,6 +124,34 @@ function windowHasUtilization(window: UsageWindow | undefined): window is UsageW
 }
 
 /**
+ * 한도 초기화 시각이 지난 스냅샷은 이전 주기의 값이다. Claude는 라이브 사용량을 직접
+ * 조회하지 않으므로, 새 주기의 수치가 수신되기 전에는 이런 값을 합쳐 보여주면 안 된다.
+ * resetsAt이 없거나 해석할 수 없으면 현재 창 여부를 판별할 근거가 없으므로 기존처럼 보존한다.
+ */
+function windowHasCurrentUtilization(window: UsageWindow | undefined, now: number): window is UsageWindow {
+  if (!windowHasUtilization(window)) return false;
+  if (!window.resetsAt) return true;
+  const resetsAt = Date.parse(window.resetsAt);
+  return Number.isNaN(resetsAt) || resetsAt > now;
+}
+
+/** fallback 경로에서도 초기화가 지난 실측값을 다시 노출하지 않는다. */
+function removeExpiredUsageWindows(snapshot: UsageSnapshot, now: number): UsageSnapshot {
+  const { fiveHour, sevenDay, ...rest } = snapshot;
+  const currentFiveHour = windowHasUtilization(fiveHour) && !windowHasCurrentUtilization(fiveHour, now)
+    ? undefined
+    : fiveHour;
+  const currentSevenDay = windowHasUtilization(sevenDay) && !windowHasCurrentUtilization(sevenDay, now)
+    ? undefined
+    : sevenDay;
+  return {
+    ...rest,
+    ...(currentFiveHour ? { fiveHour: currentFiveHour } : {}),
+    ...(currentSevenDay ? { sevenDay: currentSevenDay } : {})
+  };
+}
+
+/**
  * 공유 SQLite에서 Claude 사용량 스냅샷을 읽는다.
  * 읽기 전용 핸들을 매 폴칭마다 열고 닫으므로 WAL 체크포인트와 무관하게 항상 신선값을 본다.
  *
@@ -129,7 +162,7 @@ function windowHasUtilization(window: UsageWindow | undefined): window is UsageW
  * 실측 창이 하나도 없으면(모두 rateLimitsAvailable=false 등) 최신 스냅샷을 그대로 폴백한다.
  * DB 부재·스키마 미생성·JSON 파손은 모두 "스냅샷 없음"과 같게 취급한다.
  */
-function readLatestClaudeUsageSnapshot(databasePath: string): UsageSnapshot | null {
+function readLatestClaudeUsageSnapshot(databasePath: string, now: number): UsageSnapshot | null {
   let db: DatabaseSync | null = null;
   try {
     db = new DatabaseSync(databasePath, { readOnly: true });
@@ -156,11 +189,11 @@ function readLatestClaudeUsageSnapshot(databasePath: string): UsageSnapshot | nu
       if (!fallback) fallback = parsed;
       // 창별로 아직 못 채운 칸을, 실측 utilization 을 가진 최신 스냅샷에서 하나씩 채운다.
       let contributed = false;
-      if (merged.fiveHour === undefined && windowHasUtilization(parsed.fiveHour)) {
+      if (merged.fiveHour === undefined && windowHasCurrentUtilization(parsed.fiveHour, now)) {
         merged.fiveHour = parsed.fiveHour;
         contributed = true;
       }
-      if (merged.sevenDay === undefined && windowHasUtilization(parsed.sevenDay)) {
+      if (merged.sevenDay === undefined && windowHasCurrentUtilization(parsed.sevenDay, now)) {
         merged.sevenDay = parsed.sevenDay;
         contributed = true;
       }
@@ -182,7 +215,7 @@ function readLatestClaudeUsageSnapshot(databasePath: string): UsageSnapshot | nu
         ...(merged.sevenDay ? { sevenDay: merged.sevenDay } : {})
       };
     }
-    return fallback;
+    return fallback ? removeExpiredUsageWindows(fallback, now) : null;
   } catch {
     return null;
   } finally {
@@ -282,6 +315,7 @@ export function labelCodexHomes(homes: readonly string[]): Array<{ home: string;
 export function createUsageProvider(options: UsageSourceOptions): GuiUsageProvider {
   const fetchCodex = options.fetchCodex ?? fetchCodexLiveUsage;
   const fetchGrok = options.fetchGrok ?? fetchGrokLiveUsage;
+  const fetchClaudeWeb = options.fetchClaudeWeb;
   const now = options.now ?? Date.now;
   const cwd = options.cwd ?? process.cwd();
   const sourceMode: UsageSourceMode = options.sourceMode ?? "local";
@@ -339,7 +373,20 @@ export function createUsageProvider(options: UsageSourceOptions): GuiUsageProvid
 
   return {
     async fetchClaudeUsage(): Promise<GuiClaudeUsageDto> {
-      const snapshot = readLatestClaudeUsageSnapshot(options.databasePath);
+      // 데몬만 브라우저를 실행한다. 웹 조회가 실패하면 기존 DB 수치로 안전하게 폴백한다.
+      if (fetchClaudeWeb) {
+        const live = await fetchClaudeWeb();
+        if (live) return live;
+      }
+      // Terminal GUI는 데몬 캐시를 우선 읽어 별도 Chrome을 띄우지 않는다.
+      if (options.preferDaemonClaudeCache) {
+        const cache = await resolveCache();
+        if (cache) {
+          const stale = cache.claude.stale || isDaemonUsageCacheStale(cache, now());
+          return { ...cache.claude, stale };
+        }
+      }
+      const snapshot = readLatestClaudeUsageSnapshot(options.databasePath, now());
       if (!snapshot) return { ...EMPTY_CLAUDE_USAGE };
       return {
         fiveHour: claudeWindow(snapshot.fiveHour),

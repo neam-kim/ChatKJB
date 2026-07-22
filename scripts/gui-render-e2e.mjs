@@ -398,6 +398,16 @@ class FixtureUsageProvider {
           label: ".codex",
           fiveHour: { utilization: 7, resetsAt: null },
           sevenDay: { utilization: 33, resetsAt: null }
+        },
+        {
+          label: ".codex-acct-b",
+          fiveHour: { utilization: 41, resetsAt: null },
+          sevenDay: { utilization: 52, resetsAt: null }
+        },
+        {
+          label: ".codex-acct-c",
+          fiveHour: { utilization: 68, resetsAt: null },
+          sevenDay: { utilization: 74, resetsAt: null }
         }
       ]
     };
@@ -615,8 +625,8 @@ async function main() {
     usageFixture.pending = false;
     usageFixture.release?.();
     await waitFor(async () => await evaluate(
-      "[...document.querySelectorAll('#usage-strip .usage-line')].length === 3"
-    ), "usage strip three provider lines");
+      "[...document.querySelectorAll('#usage-strip .usage-line')].length === 5"
+    ), "usage strip Claude, three Codex accounts, and Grok lines");
     const usagePhase1 = await evaluate(`(() => {
       const strip = document.querySelector('#usage-strip');
       return {
@@ -637,7 +647,9 @@ async function main() {
     }
     const expectedUsageLines = [
       { provider: "Claude", cells: [["5h 42%", false], ["1w 18%", false]], notes: ["대화 전 갱신"] },
-      { provider: "Codex", cells: [["5h 7%", false], ["1w 33%", false]], notes: [] },
+      { provider: "Codex · .codex", cells: [["5h 7%", false], ["1w 33%", false]], notes: [] },
+      { provider: "Codex · .codex-acct-b", cells: [["5h 41%", false], ["1w 52%", false]], notes: [] },
+      { provider: "Codex · .codex-acct-c", cells: [["5h 68%", false], ["1w 74%", false]], notes: [] },
       { provider: "Grok", cells: [["주간 63%", false], ["월간 미수신", true]], notes: [] }
     ];
     const usageMismatch = JSON.stringify(usagePhase1.lines.map((line) => [
@@ -669,14 +681,22 @@ async function main() {
       const lines = [...document.querySelectorAll('#usage-strip .usage-line')];
       return {
         claudeNotes: [...lines[0].querySelectorAll('.usage-note')].map((note) => note.textContent),
-        codexCells: [...lines[1].querySelectorAll('.usage-cell')].map((cell) => cell.textContent)
+        codexLines: lines.slice(1, 4).map((line) => ({
+          provider: line.querySelector('.usage-provider')?.textContent || '',
+          cells: [...line.querySelectorAll('.usage-cell')].map((cell) => cell.textContent)
+        }))
       };
     })()`);
     if (usagePhase2.claudeNotes.includes("대화 전 갱신")) {
       throw new Error("stale note survived the forced failure");
     }
-    if (usagePhase2.codexCells.join("|") !== "5h 7%|1w 33%") {
-      throw new Error(`codex cells regressed during claude failure: ${usagePhase2.codexCells}`);
+    const expectedCachedCodex = [
+      { provider: "Codex · .codex", cells: ["5h 7%", "1w 33%"] },
+      { provider: "Codex · .codex-acct-b", cells: ["5h 41%", "1w 52%"] },
+      { provider: "Codex · .codex-acct-c", cells: ["5h 68%", "1w 74%"] }
+    ];
+    if (JSON.stringify(usagePhase2.codexLines) !== JSON.stringify(expectedCachedCodex)) {
+      throw new Error(`codex lines regressed during claude failure: ${JSON.stringify(usagePhase2.codexLines)}`);
     }
     if (usageFixture.calls.codex !== 1) {
       throw new Error(`codex fetch was not cached: ${usageFixture.calls.codex} calls`);

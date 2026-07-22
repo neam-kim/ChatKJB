@@ -37,6 +37,7 @@ function sourceOptions(overrides: Record<string, unknown> = {}) {
   return {
     databasePath: join(tmpdir(), "chatkjb-usage-source-missing", "state.sqlite"),
     codexExecutable: "codex",
+    codexHome: "/tmp/codex-homes/.codex",
     grokExecutable: "grok",
     ...overrides
   } as Parameters<typeof createUsageProvider>[0];
@@ -179,6 +180,51 @@ describe("createUsageProvider — Claude 스냅샷", () => {
     expect(usage.fiveHour).toEqual({ utilization: 61, resetsAt: "f" });
     expect(usage.sevenDay).toEqual({ utilization: 88, resetsAt: "w" });
     expect(usage.capturedAt).toBe(2_000);
+  });
+
+  it("초기화 시각이 지난 창은 이전 주기 값으로 병합하지 않는다", async () => {
+    const databasePath = fixtureDatabase([
+      {
+        id: "latest-five",
+        updatedAt: 10_000,
+        snapshot: {
+          capturedAt: 10_000,
+          rateLimitsAvailable: true,
+          fiveHour: { utilization: 7, resetsAt: "1970-01-01T00:00:20.000Z" }
+        }
+      },
+      {
+        id: "expired-week",
+        updatedAt: 9_000,
+        snapshot: {
+          capturedAt: 9_000,
+          rateLimitsAvailable: true,
+          sevenDay: { utilization: 100, resetsAt: "1970-01-01T00:00:09.000Z" }
+        }
+      }
+    ]);
+    const usage = await createUsageProvider(sourceOptions({ databasePath, now: () => 10_000 })).fetchClaudeUsage();
+    expect(usage.fiveHour).toEqual({ utilization: 7, resetsAt: "1970-01-01T00:00:20.000Z" });
+    expect(usage.sevenDay).toBeNull();
+    expect(usage.capturedAt).toBe(10_000);
+  });
+
+  it("만료된 창만 있는 fallback도 이전 사용률을 노출하지 않는다", async () => {
+    const databasePath = fixtureDatabase([
+      {
+        id: "expired-only",
+        updatedAt: 9_000,
+        snapshot: {
+          capturedAt: 9_000,
+          rateLimitsAvailable: true,
+          sevenDay: { utilization: 100, resetsAt: "1970-01-01T00:00:09.000Z" }
+        }
+      }
+    ]);
+    const usage = await createUsageProvider(sourceOptions({ databasePath, now: () => 10_000 })).fetchClaudeUsage();
+    expect(usage.fiveHour).toBeNull();
+    expect(usage.sevenDay).toBeNull();
+    expect(usage.capturedAt).toBe(9_000);
   });
 
   it("실측 utilization이 하나도 없으면 최신 스냅샷을 그대로 폴백한다", async () => {

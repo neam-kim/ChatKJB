@@ -3,6 +3,7 @@
 // Terminal 은 데몬이 없는 Mac 에서 파일 또는 HTTP 로 **데몬 호스트 한도**를 표시한다.
 import { hostname } from "node:os";
 import { createUsageProvider } from "./gui/usage-source.js";
+import { fetchClaudeWebUsage } from "./claude-web-usage.js";
 import {
   ensureTailscaleUsageServe,
   startDaemonUsageHttpServer,
@@ -16,7 +17,22 @@ import {
   type DaemonUsageCacheFile
 } from "./usage-cache.js";
 
-const DEFAULT_INTERVAL_MS = 60_000;
+// Claude 웹 사용량은 정시 반복을 피하며 약 15분마다 갱신한다.
+// Codex/Grok도 동일 게시 주기를 따르되, 수동 publishNow는 진단·테스트에만 쓴다.
+const DEFAULT_INTERVAL_MS = 15 * 60_000;
+const USAGE_PUBLISH_JITTER_SECONDS = 300;
+
+/** 다음 자동 조회 시각을 기준 15분에서 ±5분 무작위로 분산한다. */
+export function nextUsagePublishDelayMs(
+  baseIntervalMs = DEFAULT_INTERVAL_MS,
+  random: () => number = Math.random
+): number {
+  // Math.random()은 [0, 1)이나, 테스트용 주입값도 안전하게 같은 범위로 정규화한다.
+  const sample = Math.min(Math.max(random(), 0), 1 - Number.EPSILON);
+  const offsetSeconds = Math.floor(sample * (USAGE_PUBLISH_JITTER_SECONDS * 2 + 1))
+    - USAGE_PUBLISH_JITTER_SECONDS;
+  return Math.max(1_000, baseIntervalMs + offsetSeconds * 1_000);
+}
 
 export interface DaemonUsagePublisherOptions {
   databasePath: string;
@@ -50,7 +66,10 @@ export function startDaemonUsagePublisher(
     grokExecutable: options.grokExecutable,
     codexAccountHomes: [...options.codexAccountHomes],
     // publisher 자신은 항상 로컬 조회(캐시 재귀 방지).
-    sourceMode: "local"
+    sourceMode: "local",
+    // 개인 구독에는 공식 실시간 API가 없어 전용 로그인 프로필을 통해 읽는다.
+    // 실패 시 usage-source가 SQLite 스냅샷으로 폴백한다.
+    fetchClaudeWeb: fetchClaudeWebUsage
   });
 
   let stopped = false;
@@ -135,22 +154,28 @@ export function startDaemonUsagePublisher(
     return await run;
   };
 
+  // 매번 새 난수를 써야 하므로 setInterval 대신 다음 완료 후 setTimeout을 다시 건다.
+  // 이 방식은 느린 웹 조회가 다음 조회와 겹치는 것도 막는다.
+  const scheduleNext = (): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      timer = null;
+      void publishNow().catch((error: unknown) => {
+        log(`Usage cache publish error → ${error instanceof Error ? error.message : String(error)}`);
+      }).finally(scheduleNext);
+    }, nextUsagePublishDelayMs(intervalMs));
+    timer.unref?.();
+  };
+
   void publishNow().catch((error: unknown) => {
     log(`Usage cache initial publish error → ${error instanceof Error ? error.message : String(error)}`);
-  });
-
-  timer = setInterval(() => {
-    void publishNow().catch((error: unknown) => {
-      log(`Usage cache publish error → ${error instanceof Error ? error.message : String(error)}`);
-    });
-  }, intervalMs);
-  timer.unref?.();
+  }).finally(scheduleNext);
 
   return {
     stop: () => {
       stopped = true;
       if (timer) {
-        clearInterval(timer);
+        clearTimeout(timer);
         timer = null;
       }
       if (httpServer) {

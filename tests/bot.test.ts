@@ -1537,7 +1537,7 @@ describe("/cancel command", () => {
 });
 
 describe("/compile command", () => {
-  it("requires an agy preprocessing checkpoint in the batch prompt", async () => {
+  it("runs the batch compile without an agy preprocessing checkpoint", async () => {
     const { bot, config, sessions, calls } = botSetup();
     mkdirSync(join(config.projects[0]!.cwd, ".claude", "commands"), { recursive: true });
     writeFileSync(join(config.projects[0]!.cwd, ".claude", "commands", "compile.md"), "# compile\n");
@@ -1560,9 +1560,7 @@ describe("/compile command", () => {
     });
     expect(runOneOffTask.mock.calls[0]![0]).not.toHaveProperty("timeoutMs");
     const prompt = runOneOffTask.mock.calls[0]![0].prompt;
-    expect(prompt).toContain("agy(Antigravity) 비신뢰 전처리는 필수 체크포인트입니다");
-    expect(prompt).toContain("반드시 한 번 시도");
-    expect(prompt).toContain("사용/폐기/생략 상태와 사유");
+    expect(prompt).not.toMatch(/agy|Antigravity|비신뢰 전처리/i);
     expect(prompt).toContain("`10-inbox/test.md`");
     await vi.waitFor(() => {
       const texts = calls

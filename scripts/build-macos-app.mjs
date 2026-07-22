@@ -46,6 +46,26 @@ const webAssetNames = ["app.js", "index.html", "manifest.webmanifest", "styles.c
 if (process.platform !== "darwin") throw new Error("ChatKJB Terminal.app can only be built on macOS");
 if (process.arch !== "arm64") throw new Error("This build currently targets the verified arm64 Mac runtime");
 
+function linkedLibraries(path) {
+  return execFileSync("/usr/bin/otool", ["-L", path], { encoding: "utf8" })
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim().split(" ", 1)[0])
+    .filter(Boolean);
+}
+
+function assertPortableNodeRuntime(path) {
+  const externalLibraries = linkedLibraries(path).filter((library) => (
+    !library.startsWith("/System/Library/")
+    && !library.startsWith("/usr/lib/")
+  ));
+  if (externalLibraries.length > 0) {
+    throw new Error(
+      `Node runtime is not self-contained; use a portable Node binary (first external library: ${externalLibraries[0]})`
+    );
+  }
+}
+
 function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
@@ -130,6 +150,10 @@ function copyBundledPackageLicenses(metafile) {
   return packages;
 }
 
+const runtimeSource = realpathSync(process.execPath);
+if (!lstatSync(runtimeSource).isFile()) throw new Error("Node runtime must be a regular file");
+assertPortableNodeRuntime(runtimeSource);
+
 mkdirSync(artifactsDir, { recursive: true });
 rmSync(buildDir, { recursive: true, force: true });
 rmSync(appPath, { recursive: true, force: true });
@@ -194,8 +218,6 @@ try {
   });
   for (const name of webAssetNames) copyFileSync(join(sourceWebDir, name), join(backendWebDir, name));
 
-  const runtimeSource = realpathSync(process.execPath);
-  if (!lstatSync(runtimeSource).isFile()) throw new Error("Node runtime must be a regular file");
   copyFileSync(runtimeSource, runtimePath);
   chmodSync(runtimePath, 0o755);
   execFileSync("/usr/bin/codesign", [
