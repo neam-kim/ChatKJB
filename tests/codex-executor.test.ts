@@ -263,4 +263,113 @@ describe("CodexExecutor retry lifecycle", () => {
     expect(store.getSession(record.id)?.status).toBe("interrupted");
     store.close();
   });
+
+  it("keeps the session's preferred Codex home after live reconcile instead of soonest-exhausted", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "chatkjb-codex-prefer-home-"));
+    directories.push(directory);
+    const homeA = join(directory, "codex-a");
+    const homeB = join(directory, "codex-b");
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const record = session(directory, homeB);
+    store.createSession(record);
+    const transport: MessageTransport = {
+      async sendText() { return 1; },
+      async editText() {},
+      async createTopic() { return 1; },
+      async renameTopic() {},
+      async deleteTopic() {},
+      async sendDocument() {},
+      async sendChatAction() {},
+      async sendFile() {}
+    };
+    const options: ExecutorOptions = {
+      debounceMs: 0,
+      mcpToolTimeoutMs: 1_000,
+      mcpMaxAttempts: 1,
+      codexMcpTimeoutMs: 60_000,
+      codexMcpHeartbeatMs: 1_000,
+      longRunningMcpServers: new Set(),
+      turnIdleTimeoutMs: 60_000,
+      claudeMemoryDir: directory,
+      modelCatalog: FALLBACK_MODEL_CATALOG
+    };
+    const now = Date.now();
+    const accountPool = new CodexAccountPool([homeA, homeB]);
+    // 과거 봉인: 전 계정 소진이면 예전 로직은 soonest=homeA를 고른다.
+    accountPool.restoreExhaustion(homeA, now + 60_000);
+    accountPool.restoreExhaustion(homeB, now + 120_000);
+    const selectedHomes: string[] = [];
+    const createdHomes: string[] = [];
+    const host: CodexExecutorHost = {
+      store,
+      transport,
+      options,
+      active: new Map(),
+      deleting: new Set(),
+      accountPool,
+      oauthTokens: [],
+      goalClientAvailable: false,
+      selectHome: (sessionRecord, selectOptions) => {
+        if (selectOptions?.rotateFromSession) {
+          return accountPool.selectNext(sessionRecord?.codexHome ?? null);
+        }
+        // production selectCodexHome: honor explicit session home
+        if (
+          sessionRecord?.codexHome
+          && accountPool.indexOf(sessionRecord.codexHome) !== -1
+        ) {
+          return sessionRecord.codexHome;
+        }
+        return accountPool.select();
+      },
+      recordUsage() {},
+      async setNativeGoal() {},
+      clearGoal() {},
+      markRateLimited() {},
+      async reconcileAccounts() {
+        // live usage: both healthy — clear stale seals
+        accountPool.setExhaustion(homeA, null);
+        accountPool.setExhaustion(homeB, null);
+      },
+      enqueue() {},
+      scheduleLimitResume() {},
+      applyHandoffSummary: (request) => request,
+      safeRename: async () => undefined,
+      requestUserInput: async () => ({})
+    };
+    const thread = {
+      id: "prefer-home-thread",
+      async runStreamed() {
+        createdHomes.push("stream");
+        return {
+          events: (async function* () {
+            yield { type: "item.completed", item: { type: "agent_message", text: "ok" } };
+            yield {
+              type: "turn.completed",
+              usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 }
+            };
+          })()
+        };
+      }
+    };
+    const fakeCodex = {
+      startThread: () => thread,
+      resumeThread: () => thread
+    } as unknown as Codex;
+    const executor = new CodexExecutor(host, {
+      createClient: ((_options: ExecutorOptions, codexHome: string) => {
+        selectedHomes.push(codexHome);
+        return fakeCodex;
+      }) as never,
+      copyRollout: (() => null) as never
+    });
+
+    await executor.execute({ session: record, prompt: "use preferred account" });
+
+    expect(selectedHomes).toEqual([homeB]);
+    expect(store.getSession(record.id)?.codexHome).toBe(homeB);
+    expect(store.getSession(record.id)?.status).toBe("done");
+    store.close();
+  });
 });

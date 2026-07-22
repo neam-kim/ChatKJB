@@ -847,10 +847,12 @@ export class SessionManager {
     if (options.rotateFromSession) {
       return this.codexAccountPool.selectNext(session?.codexHome ?? null);
     }
+    // 세션에 명시된 계정(/tokenid·기본 계정·이전 sticky 저장)은 풀 소진 봉인보다 우선한다.
+    // 과거 usage-limit 오류로 남은 봉인이 live 여유 계정을 가로채 #1로 몰리는 것을 막는다.
+    // 실제 한도 도달은 스트림 오류 경로의 markRateLimited + selectNext 페일오버가 담당한다.
     if (
       session?.codexHome
       && this.codexAccountPool.indexOf(session.codexHome) !== -1
-      && !this.codexAccountPool.isExhausted(session.codexHome)
     ) {
       return session.codexHome;
     }

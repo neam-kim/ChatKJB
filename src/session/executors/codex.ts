@@ -61,6 +61,8 @@ export interface CodexRunContext {
   lastAgentMessage: string;
   codexThreadId: string | null;
   codexHome: string;
+  /** prepareRun에서 계정 로테이션을 이미 적용했는지 — startRun 재선택 시 유지한다. */
+  accountRotateApplied: boolean;
   codexGoalSyncedThreadId?: string | null;
 }
 
@@ -185,10 +187,11 @@ export class CodexExecutor {
     if (!session) return null;
     request = this.host.applyHandoffSummary(request, session);
     session = this.host.store.getSession(request.session.id) ?? session;
+    const accountRotateApplied = request.codexRotateOnStart === true;
     const codexHome = this.host.selectHome(session, {
-      rotateFromSession: request.codexRotateOnStart === true
+      rotateFromSession: accountRotateApplied
     });
-    if (request.codexRotateOnStart) request = { ...request, codexRotateOnStart: false };
+    if (accountRotateApplied) request = { ...request, codexRotateOnStart: false };
 
     const renderer = new StreamRenderer(
       session,
@@ -227,6 +230,7 @@ export class CodexExecutor {
       lastAgentMessage: "",
       codexThreadId: session.codexThreadId,
       codexHome,
+      accountRotateApplied,
       codexGoalSyncedThreadId: null
     };
   }
@@ -243,7 +247,18 @@ export class CodexExecutor {
     await ctx.renderer.start(false);
     this.host.store.updateSession(ctx.session.id, { status: "running" });
 
-    if (this.host.accountPool.isExhausted(ctx.codexHome)) {
+    // 시작 직전 live 한도로 소진 봉인을 갱신한다. 재시작 복원·과거 오류 봉인이
+    // 여유 있는 #2/#3을 막고 soonest #1로 몰아넣는 경로를 여기서 끊는다.
+    await this.host.reconcileAccounts(ctx.session.cwd, {});
+    ctx.codexHome = this.host.selectHome(ctx.session, {
+      rotateFromSession: ctx.accountRotateApplied
+    });
+    // 명시 계정이 없고 자동 선택 홈만 소진된 경우에 한해 다른 가용 홈으로 옮긴다.
+    // 세션에 codexHome이 있으면 selectHome이 이미 그 홈을 반환하므로 가로채지 않는다.
+    if (
+      !ctx.session.codexHome
+      && this.host.accountPool.isExhausted(ctx.codexHome)
+    ) {
       ctx.codexHome = this.host.selectHome(ctx.session);
     }
     if (ctx.session.codexHome !== ctx.codexHome) {
