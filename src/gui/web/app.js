@@ -163,7 +163,9 @@ function startApplication() {
     readStates: new Map(),
     generalPanelRows: GENERAL_PANEL_FALLBACK_ROWS.map((row) => [...row]),
     panelMessageId: 0,
-    panelRefreshStarted: false,
+    panelInitialRefreshStarted: false,
+    panelRefreshActive: false,
+    panelRefreshPending: false,
     topicContextMenu: null,
     topicDeleteInFlight: null,
     usage: null,
@@ -616,15 +618,32 @@ function startApplication() {
     applyGeneralPanel(message.replyPanel, message.id);
   }
 
-  async function refreshGeneralPanelOnce() {
-    if (state.panelRefreshStarted || !state.csrf || state.connection !== "ready") return;
-    state.panelRefreshStarted = true;
-    try {
-      const response = await requestJson("/api/general-panel");
-      if (response?.panel) applyGeneralPanel(response.panel);
-    } catch {
-      // The functional fallback remains available when bounded Telegram lookup fails.
+  async function refreshGeneralPanel() {
+    if (!state.csrf || state.connection !== "ready") return;
+    if (state.panelRefreshActive) {
+      state.panelRefreshPending = true;
+      return;
     }
+    state.panelRefreshActive = true;
+    try {
+      do {
+        state.panelRefreshPending = false;
+        try {
+          const response = await requestJson("/api/general-panel");
+          if (response?.panel) applyGeneralPanel(response.panel);
+        } catch {
+          // The functional fallback remains available when bounded Telegram lookup fails.
+        }
+      } while (state.panelRefreshPending && state.csrf && state.connection === "ready");
+    } finally {
+      state.panelRefreshActive = false;
+    }
+  }
+
+  async function refreshGeneralPanelOnce() {
+    if (state.panelInitialRefreshStarted) return;
+    state.panelInitialRefreshStarted = true;
+    await refreshGeneralPanel();
   }
 
   function readStateFor(topicId) {
@@ -1575,6 +1594,7 @@ function startApplication() {
     elements.topicTitle.textContent = topic.title;
     updateActiveTopicState();
     updateGeneralPanelState();
+    if (topicId === GENERAL_TOPIC_ID) void refreshGeneralPanel();
     if (window.innerWidth <= 720) {
       elements.shell.dataset.sidebarOpen = "false";
       elements.sidebarToggle.setAttribute("aria-expanded", "false");

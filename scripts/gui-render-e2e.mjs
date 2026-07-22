@@ -575,6 +575,37 @@ async function main() {
     ), "dynamic General panel lookup");
     if (client.calls.panel !== 1) throw new Error(`General panel lookup count was ${client.calls.panel}, expected 1`);
 
+    await evaluate("document.querySelector('[data-topic-id=\"42\"]')?.click(); true");
+    await waitFor(async () => await evaluate(
+      "document.querySelector('#general-panel').hidden"
+    ), "ordinary topic before General panel refresh");
+    client.generalPanel = {
+      messageId: 451,
+      rows: [
+        ["⚙️ 새 세션 기본값", "🧠 모델: Grok 4.1"],
+        ["🤖 제공자: Grok", "💭 추론: 높음 (High)"],
+        ["🛠️ 작업량: 20k", "🔑 토큰: #1"]
+      ]
+    };
+    await evaluate("document.querySelector('[data-topic-id=\"1\"]')?.click(); true");
+    await waitFor(async () => await evaluate(
+      "[...document.querySelectorAll('#general-panel button')].some((button) => button.textContent === '🤖 제공자: Grok')"
+    ), "General selection refreshes current defaults");
+    if (client.calls.panel !== 2) throw new Error(`General panel lookup count was ${client.calls.panel}, expected 2 after reselection`);
+    client.generalPanel = {
+      messageId: 452,
+      rows: [
+        ["⚙️ 새 세션 기본값", "🧠 모델: Claude Opus 4.8"],
+        ["🤖 제공자: Claude", "💭 추론: 보통 (Medium)"],
+        ["🛠️ 작업량: 자동", "🔑 토큰: #2"]
+      ]
+    };
+    await evaluate("document.querySelector('[data-topic-id=\"1\"]')?.click(); true");
+    await waitFor(async () => await evaluate(
+      "[...document.querySelectorAll('#general-panel button')].some((button) => button.textContent === '🤖 제공자: Claude')"
+    ), "active General reselection refreshes current defaults");
+    if (client.calls.panel !== 3) throw new Error(`General panel lookup count was ${client.calls.panel}, expected 3 after active reselection`);
+
     // --- 작성창 하단 사용량 스트립 ---
     // 첫 Claude 조회가 보류되어 있으므로 스트립은 "불러오는 중"이어야 한다.
     await waitFor(() => usageFixture.calls.claude === 1, "first usage poll");

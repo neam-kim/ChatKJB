@@ -166,6 +166,7 @@ describe("GUI web static security and responsive contract", () => {
     expect(html.indexOf('id="general-panel"')).toBeLessThan(html.indexOf('id="composer"'));
     expect(script).toContain('topic.id === GENERAL_TOPIC_ID ? "ChatKJB" : topic.title');
     expect(script).toContain('requestJson("/api/general-panel")');
+    expect(script).toContain("if (topicId === GENERAL_TOPIC_ID) void refreshGeneralPanel();");
     expect(script).toContain('postJson(`/api/topics/${GENERAL_TOPIC_ID}/messages`, { text })');
     expect(script).toContain('generation !== state.selectionGeneration');
     expect(script).not.toContain('topic.id === 1 ? "~"');
