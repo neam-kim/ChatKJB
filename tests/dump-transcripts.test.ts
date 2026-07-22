@@ -355,24 +355,47 @@ describe("global result file merge", () => {
     mkdirSync(synologyProject, { recursive: true });
     const localFile = join(localProject, ".result.md");
     const synologyFile = join(synologyProject, ".result.md");
-    writeFileSync(localFile, "- Ａ  결과\n- 로컬 고유 결과\n");
-    writeFileSync(synologyFile, "- A 결과\n- 시놀로지 고유 결과\n");
+    writeFileSync(
+      localFile,
+      [
+        "## 2026-07-21T10:00:00+09:00",
+        "- Request: Ａ  결과",
+        "- Decision: 기록",
+        "- Result: 로컬 고유 결과",
+        "",
+      ].join("\n")
+    );
+    writeFileSync(
+      synologyFile,
+      [
+        "## 2026-07-21T10:00:00+09:00",
+        "- Request: A 결과",
+        "- Decision: 기록",
+        "- Result: 로컬 고유 결과",
+        "",
+        "## 2026-07-21T10:01:00+09:00",
+        "- Request: 시놀로지 고유 결과",
+        "- Decision: 기록",
+        "- Result: 시놀로지 고유 결과",
+        "",
+      ].join("\n")
+    );
 
-    expect(parseResultEntries("- 첫째\n\n* 둘째\n")).toEqual(["첫째", "둘째"]);
+    expect(parseResultEntries("- 첫째\n\n* 둘째\n")).toEqual([]);
     const merged = collectMergedResultEntries(
       [root, synologyRoot],
       [localFile, synologyFile]
     );
-    expect(merged.hashes).toHaveLength(3);
+    expect(merged.hashes).toHaveLength(2);
 
     const markdown = buildMergedResultsMarkdown(
       merged,
       new Date("2026-06-21T00:00:00.000Z")
     );
     expect(markdown).toContain('source_key: "result-files:global"');
-    expect(markdown).toContain("entries: 3");
+    expect(markdown).toContain("entries: 2");
     expect(markdown).toContain("Ａ  결과");
-    expect(markdown).not.toContain("- A 결과");
+    expect(markdown).not.toContain("Request: A 결과");
     expect(markdown).toContain("로컬 고유 결과");
     expect(markdown).toContain("시놀로지 고유 결과");
   });

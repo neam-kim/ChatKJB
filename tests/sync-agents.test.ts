@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +9,11 @@ import {
   resolveBin,
   resolveNodeBinDir
 } from "../scripts/sync-agents.mjs";
+
+const syncAgentSource = readFileSync(
+  new URL("../scripts/sync-agents.mjs", import.meta.url),
+  "utf8"
+);
 
 describe("resolveNodeBinDir", () => {
   const temporaryDirectories: string[] = [];
@@ -59,6 +64,14 @@ describe("resolveBin", () => {
     const codex = join(dir, "codex");
     writeFileSync(codex, "#!/bin/sh\n", { mode: 0o755 });
     expect(resolveBin("codex", [join(dir, "missing"), codex], "")).toBe(codex);
+  });
+});
+
+describe("Codex lockstep source boundary", () => {
+  it("updates only the shared runtime and never writes a prefix lockfile into the project", () => {
+    expect(syncAgentSource).not.toContain("copyFileSync(sharedLock, projLock)");
+    expect(syncAgentSource).not.toContain("writeFileSync(projPkg, bumped)");
+    expect(syncAgentSource).toContain('["install", "--prefix", shareBase,');
   });
 });
 

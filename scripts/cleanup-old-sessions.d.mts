@@ -3,6 +3,18 @@ export function isSessionEligibleForCleanup(
   cutoff: number
 ): boolean;
 
+export function cleanupResultLogs(
+  cutoff: number,
+  options?: { roots?: string[]; files?: string[] }
+): {
+  filesScanned: number;
+  blocksDeleted: number;
+  filesDeleted: number;
+  legacyFilesDeleted: number;
+  dumpEntries: number;
+  dumpSkipped: boolean;
+};
+
 export function enumerateDesktopFiles(
   ownedClaude: ReadonlySet<string>,
   ownedCodex: ReadonlySet<string>

@@ -6,7 +6,7 @@
 // 안전 원칙(중요)
 //   - 기존 위키(10-inbox/20-raw/30-wiki)와 dump-transcripts.mjs는 읽기 전용으로만 다룬다.
 //   - 쓰는 곳은 위키화(/compile) 대상이 아닌 _meta/ 안의 단일 파일뿐이다.
-//   - dump-transcripts.mjs가 이미 export한 파서를 재사용한다(중복 구현·새 의존성 없음).
+//   - dump-transcripts.mjs가 export한 지문 정규화를 재사용한다.
 //
 // 입력
 //   1) 트랜스크립트 .md (type: source, provider: ...) — 10-inbox, 20-raw
@@ -28,7 +28,6 @@ import { homedir } from "node:os";
 
 import {
   normalizeFingerprintText,
-  parseResultEntries,
   readFrontmatter,
 } from "./dump-transcripts.mjs";
 
@@ -235,7 +234,23 @@ function collectResultEntries(directories = [INBOX_DIR, RAW_DIR]) {
     const body = text.startsWith("---\n")
       ? text.slice(text.indexOf("\n---", 4) + 4)
       : text;
-    for (const entry of parseResultEntries(body)) {
+    const structured = [];
+    const lines = body.split(/\r?\n/);
+    for (let index = 0; index + 3 < lines.length; index++) {
+      if (!/^###\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+09:00\s*$/u.test(lines[index])) continue;
+      const fields = lines.slice(index + 1, index + 4);
+      if (!fields.every((line, fieldIndex) =>
+        new RegExp(`^- ${["Request", "Decision", "Result"][fieldIndex]}:\\s+\\S`, "u")
+          .test(line)
+      )) continue;
+      structured.push([lines[index], ...fields].join("\n"));
+      index += 3;
+    }
+    const legacy = body
+      .split(/\r?\n/)
+      .map((line) => line.trim().replace(/^[-*+]\s+/, "").trim())
+      .filter(Boolean);
+    for (const entry of structured.length ? structured : legacy) {
       const normalized = normalizeFingerprintText(entry);
       if (!normalized || normalized.startsWith("#") || normalized.startsWith("Source:")) continue;
       if (seen.has(normalized)) continue;

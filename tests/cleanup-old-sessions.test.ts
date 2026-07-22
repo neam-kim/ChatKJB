@@ -8,6 +8,11 @@ import {
   isSessionEligibleForCleanup,
   parseTelegramResponse,
 } from "../scripts/cleanup-old-sessions.mjs";
+import {
+  isConformingResultLog,
+  parseResultLogBlocks,
+  pruneExpiredResultBlocks,
+} from "../scripts/result-logs.mjs";
 
 describe("old session cleanup eligibility", () => {
   const cutoff = Date.UTC(2026, 6, 6, 5, 28);
@@ -34,6 +39,39 @@ describe("old session cleanup eligibility", () => {
     expect(parseTelegramResponse('{"ok":true,"result":true}').ok).toBe(true);
     expect(parseTelegramResponse('{"ok":false,"description":"Bad Request"}').ok).toBe(false);
     expect(parseTelegramResponse("not-json").ok).toBe(false);
+  });
+});
+
+describe("결과 로그 7일 보존", () => {
+  const oldBlock = [
+    "## 2026-07-01T10:00:00+09:00",
+    "- Request: 오래된 요청",
+    "- Decision: 보관",
+    "- Result: 오래된 결과",
+  ].join("\n");
+  const recentBlock = [
+    "## 2026-07-21T10:00:00+09:00",
+    "- Request: 최근 요청",
+    "- Decision: 보관",
+    "- Result: 최근 결과",
+  ].join("\n");
+
+  it("유효한 KST 블록만 7일 경과 시 작업 단위로 제거한다", () => {
+    const cutoff = Date.parse("2026-07-15T12:00:00+09:00");
+    const result = pruneExpiredResultBlocks(`${oldBlock}\n\n${recentBlock}\n`, cutoff);
+
+    expect(result.removed).toBe(1);
+    expect(result.text).not.toContain("오래된 요청");
+    expect(result.text).toContain("최근 요청");
+    expect(isConformingResultLog(result.text)).toBe(true);
+  });
+
+  it("새 규약 밖의 내용은 자동 보존 대상으로 표시한다", () => {
+    const parsed = parseResultLogBlocks(`${oldBlock}\n\n이전 자유 형식 메모\n`);
+
+    expect(parsed.blocks).toHaveLength(0);
+    expect(parsed.nonconforming).toBe(true);
+    expect(isConformingResultLog(`${oldBlock}\n\n이전 자유 형식 메모\n`)).toBe(false);
   });
 });
 

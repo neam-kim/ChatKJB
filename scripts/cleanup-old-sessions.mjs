@@ -20,6 +20,8 @@
 //   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 //   CLEANUP_RETAIN_DAYS=7, CLEANUP_DRY_RUN=1, CLEANUP_NOTIFY=0
 //   CLEANUP_DELETE_SOURCE=0 / CLEANUP_DELETE_DB=0 / CLEANUP_DELETE_TOPIC=0 (각 단계 끄기)
+//   CLEANUP_DELETE_RESULT_LOGS=0 (결과 로그 보존), CLEANUP_REMOVE_LEGACY_RESULT_LOGS=1
+//     (1회 마이그레이션: 새 규약이 아닌 `.result.md` 파일 제거)
 //   CLEANUP_AUDIT=1 이면 삭제 대상 경로를 한 줄씩 찍는다. CLEANUP_DRY_RUN=1과 함께 쓰면
 //   memory/·session_search.sqlite 같은 비세션 자산이 섞이지 않았는지 확인할 수 있다.
 
@@ -29,12 +31,19 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
+import {
+  collectResultFiles,
+  isConformingResultLog,
+  pruneExpiredResultBlocks,
+} from "./result-logs.mjs";
+import { dumpResultLogs } from "./dump-transcripts.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -152,6 +161,8 @@ const NOTIFY = process.env.CLEANUP_NOTIFY !== "0";
 const DELETE_SOURCE = process.env.CLEANUP_DELETE_SOURCE !== "0";
 const DELETE_DB = process.env.CLEANUP_DELETE_DB !== "0";
 const DELETE_TOPIC = process.env.CLEANUP_DELETE_TOPIC !== "0";
+const DELETE_RESULT_LOGS = process.env.CLEANUP_DELETE_RESULT_LOGS !== "0";
+const REMOVE_LEGACY_RESULT_LOGS = process.env.CLEANUP_REMOVE_LEGACY_RESULT_LOGS === "1";
 
 const log = (...a) => console.log("[cleanup-old-sessions]", ...a);
 const APP_TIME_ZONE = process.env.TZ?.trim()
@@ -509,6 +520,77 @@ function removeFile(file, recursiveDirectory = false) {
   }
 }
 
+function removeResultLogFile(file) {
+  if (basename(file).toLowerCase() !== ".result.md") return false;
+  if (DRY_RUN) return true;
+  try {
+    rmSync(file, { force: true });
+    return true;
+  } catch (e) {
+    log("결과 로그 파일 삭제 실패:", file, e?.message || e);
+    return false;
+  }
+}
+
+function cleanupResultLogs(cutoff, options = {}) {
+  const counters = {
+    filesScanned: 0,
+    blocksDeleted: 0,
+    filesDeleted: 0,
+    legacyFilesDeleted: 0,
+    dumpEntries: 0,
+    dumpSkipped: false,
+  };
+  if (!DELETE_RESULT_LOGS) return counters;
+
+  const files = options.files ?? collectResultFiles(options.roots);
+  const roots = options.roots ?? files.map(dirname);
+  if (!DRY_RUN) {
+    try {
+      const dump = dumpResultLogs({ files, roots });
+      counters.dumpEntries = dump.newEntries;
+    } catch (e) {
+      counters.dumpSkipped = true;
+      log("결과 로그 덤프 실패 — 결과 로그 정리를 건너뜀:", e?.message || e);
+      return counters;
+    }
+  }
+
+  for (const file of files) {
+    counters.filesScanned++;
+    let source;
+    try {
+      source = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+
+    if (REMOVE_LEGACY_RESULT_LOGS && !isConformingResultLog(source)) {
+      if (removeResultLogFile(file)) counters.legacyFilesDeleted++;
+      continue;
+    }
+
+    const pruned = pruneExpiredResultBlocks(source, cutoff);
+    if (!pruned.removed) continue;
+    if (DRY_RUN) {
+      counters.blocksDeleted += pruned.removed;
+      if (!pruned.text.trim()) counters.filesDeleted++;
+      continue;
+    }
+    try {
+      if (!pruned.text.trim()) {
+        if (removeResultLogFile(file)) counters.filesDeleted++;
+      } else {
+        writeFileSync(file, pruned.text, "utf8");
+      }
+      counters.blocksDeleted += pruned.removed;
+    } catch (e) {
+      log("결과 로그 정리 실패:", file, e?.message || e);
+    }
+  }
+  return counters;
+}
+
 // ── main ────────────────────────────────────────────────────────────────────
 function main() {
   if (!existsSync(STATE_DB)) {
@@ -528,6 +610,7 @@ function main() {
     clineQueueRowDeleted: 0,
     skippedRecent: 0,
     skippedActive: 0,
+    resultLogs: null,
   };
 
   const db = new DatabaseSync(STATE_DB, { readOnly: false });
@@ -607,6 +690,8 @@ function main() {
     db.close();
   }
 
+  counters.resultLogs = cleanupResultLogs(cutoff);
+
   const summary =
     `정리 대상 ${RETAIN_DAYS}일 경과 종료 세션\n` +
     `· 오케스트레이터: 원본 ${counters.orchSourceDeleted} · DB행 ${counters.orchRowDeleted} · 토픽 ${counters.topicDeleted}\n` +
@@ -624,6 +709,12 @@ function main() {
           : "") +
         "\n"
       : "") +
+    `· 결과 로그: 덤프 신규 ${counters.resultLogs.dumpEntries} · 검사 ${counters.resultLogs.filesScanned} · 블록 삭제 ${counters.resultLogs.blocksDeleted} · 파일 삭제 ${counters.resultLogs.filesDeleted}` +
+    (counters.resultLogs.legacyFilesDeleted > 0
+      ? ` · 레거시 파일 삭제 ${counters.resultLogs.legacyFilesDeleted}`
+      : "") +
+    (counters.resultLogs.dumpSkipped ? " · 덤프 실패로 정리 보류" : "") +
+    "\n" +
     `· 보존: 최근 ${counters.skippedRecent} · 진행중 ${counters.skippedActive} · 토픽삭제 실패 ${counters.skippedTopicFailure}` +
     (DRY_RUN ? " [DRY RUN]" : "");
   log(summary.replace(/\n/g, " | "));
@@ -631,6 +722,7 @@ function main() {
 }
 
 export {
+  cleanupResultLogs,
   enumerateDesktopFiles,
   isSessionEligibleForCleanup,
   parseTelegramResponse,

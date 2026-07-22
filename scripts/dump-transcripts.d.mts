@@ -35,6 +35,12 @@ export function buildMergedResultsMarkdown(
   generatedAt?: Date
 ): string;
 export function scanEmittedResultHashes(directories?: string[]): Set<string>;
+export function dumpResultLogs(options?: { roots?: string[]; files?: string[] }): {
+  files: number;
+  newEntries: number;
+  dest: string | null;
+  dryRun?: boolean;
+};
 export function buildMarkdown(
   session: Record<string, unknown>,
   chunks: TranscriptChunk[],

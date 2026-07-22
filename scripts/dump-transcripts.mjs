@@ -26,6 +26,7 @@
 //   RESULT_SEARCH_ROOTS (macOS에서는 :로 구분), RESULT_MERGED_FILE
 //   DUMP_FORCE=1  (워터마크 무시하고 전부 재덤프)
 //   DUMP_DRY_RUN=1 (파일 쓰지 않고 계획만 출력)
+//   DUMP_LEGACY_RESULT_LOGS=1 (1회 마이그레이션: 구형 줄 단위 결과 로그도 보관)
 
 import { createHash } from "node:crypto";
 import {
@@ -40,6 +41,12 @@ import {
 import { homedir } from "node:os";
 import { delimiter, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  collectResultFiles,
+  defaultResultSearchRoots,
+  parseResultEntries,
+  resultSearchRootsFromEnvironment,
+} from "./result-logs.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
 
@@ -162,36 +169,7 @@ const GROK_SESSIONS_DB =
 const ANTIGRAVITY_CONV_DIR =
   process.env.ANTIGRAVITY_CONV_DIR ||
   join(homedir(), ".gemini", "antigravity-cli", "conversations");
-export function defaultResultSearchRoots(home = homedir(), volumesPath = "/Volumes") {
-  const cloudStorage = join(home, "Library", "CloudStorage");
-  const roots = [];
-  const tryAdd = (candidate) => {
-    try {
-      const canonical = realpathSync(candidate);
-      if (canonical !== "/" && statSync(canonical).isDirectory()) roots.push(canonical);
-    } catch {
-      /* 사라졌거나 접근 불가한 저장소는 제외한다. */
-    }
-  };
-  try {
-    for (const entry of readdirSync(cloudStorage, { withFileTypes: true })) {
-      if (!entry.name.startsWith(".")) tryAdd(join(cloudStorage, entry.name));
-    }
-  } catch {
-    /* CloudStorage may not exist. */
-  }
-  try {
-    for (const entry of readdirSync(volumesPath, { withFileTypes: true })) {
-      if (!entry.name.startsWith(".")) tryAdd(join(volumesPath, entry.name));
-    }
-  } catch {
-    /* 외장/네트워크 볼륨이 없거나 아직 마운트되지 않음. */
-  }
-  return [...new Set([home, ...roots].map((root) => resolve(root)))];
-}
-const RESULT_SEARCH_ROOTS = process.env.RESULT_SEARCH_ROOTS
-  ? process.env.RESULT_SEARCH_ROOTS.split(delimiter).filter(Boolean).map((root) => resolve(root))
-  : defaultResultSearchRoots();
+const RESULT_SEARCH_ROOTS = resultSearchRootsFromEnvironment();
 
 const INBOX_DIR = join(WIKI_VAULT, "10-inbox");
 const RAW_DIR = join(WIKI_VAULT, "20-raw");
@@ -980,52 +958,6 @@ function buildMarkdown(session, chunks, part) {
 }
 
 // ── 전역 .result.md 병합 ──────────────────────────────────────────────────
-function collectResultFiles(roots = RESULT_SEARCH_ROOTS) {
-  const normalizedRoots = [...new Set(roots.map((root) => resolve(root)))];
-  const rootSet = new Set(normalizedRoots);
-  const found = new Set();
-
-  const walk = (directory, activeRoot) => {
-    let entries;
-    try {
-      entries = readdirSync(directory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const path = join(directory, entry.name);
-      if (entry.isFile() && entry.name.toLowerCase() === ".result.md") {
-        found.add(resolve(path));
-        continue;
-      }
-      if (!entry.isDirectory()) continue;
-      if (
-        entry.name.startsWith(".")
-        || entry.name === "#recycle"
-        || entry.name === "@eaDir"
-        || /^node_modules(?:[._-].*)?$/iu.test(entry.name)
-      ) continue;
-      const resolvedPath = resolve(path);
-      // 홈 아래의 Synology Drive처럼 별도 루트로 지정된 하위 트리는 해당 루트
-      // 차례에 한 번만 순회한다.
-      if (resolvedPath !== activeRoot && rootSet.has(resolvedPath)) continue;
-      walk(resolvedPath, activeRoot);
-    }
-  };
-
-  for (const root of normalizedRoots) {
-    if (existsSync(root)) walk(root, root);
-  }
-  return [...found].sort();
-}
-
-function parseResultEntries(text) {
-  return String(text)
-    .split(/\r?\n/)
-    .map((line) => line.trim().replace(/^[-*+]\s+/, "").trim())
-    .filter(Boolean);
-}
-
 function collectMergedResultEntries(
   roots = RESULT_SEARCH_ROOTS,
   files = collectResultFiles(roots)
@@ -1042,7 +974,14 @@ function collectMergedResultEntries(
       continue;
     }
     const entries = [];
-    for (const rawEntry of parseResultEntries(text)) {
+    const canonicalEntries = parseResultEntries(text);
+    const rawEntries = canonicalEntries.length || process.env.DUMP_LEGACY_RESULT_LOGS !== "1"
+      ? canonicalEntries
+      : text
+        .split(/\r?\n/)
+        .map((line) => line.trim().replace(/^[-*+]\s+/, "").trim())
+        .filter(Boolean);
+    for (const rawEntry of rawEntries) {
       const normalized = normalizeFingerprintText(rawEntry);
       if (!normalized) continue;
       const hash = fingerprintResultEntry(normalized);
@@ -1108,7 +1047,9 @@ function buildMergedResultsMarkdown(
         "",
         `Source: \`${source.file}\``,
         "",
-        ...source.entries.map((entry) => `- ${entry.text}`),
+        ...source.entries.flatMap((entry) =>
+          entry.text.replace(/^##\s+/mu, "### ").split("\n")
+        ),
         "",
       ];
       return lines.join("\n");
@@ -1153,9 +1094,11 @@ function scanEmittedResultHashes(directories = [INBOX_DIR, RAW_DIR]) {
   return hashes;
 }
 
-function dumpMergedResults(state) {
-  const files = collectResultFiles();
-  const merged = collectMergedResultEntries(RESULT_SEARCH_ROOTS, files);
+function dumpMergedResults(
+  state,
+  { roots = RESULT_SEARCH_ROOTS, files = collectResultFiles(roots) } = {}
+) {
+  const merged = collectMergedResultEntries(roots, files);
 
   const emitted = new Set(state?.emittedResultHashes || []);
   for (const h of scanEmittedResultHashes()) emitted.add(h);
@@ -1172,7 +1115,7 @@ function dumpMergedResults(state) {
 
   if (!newHashes.length) {
     log(`result merge — 신규 항목 없음, 건너뜀 (files=${files.length})`);
-    return;
+    return { files: files.length, newEntries: 0, dest: null };
   }
 
   const delta = { sources: newSources, hashes: newHashes };
@@ -1188,7 +1131,7 @@ function dumpMergedResults(state) {
       `would write ${dest} ` +
         `(${files.length} result files, ${newHashes.length} new entries)`
     );
-    return;
+    return { files: files.length, newEntries: newHashes.length, dest, dryRun: true };
   }
   mkdirSync(dirname(dest), { recursive: true });
   writeFileSync(dest, markdown, "utf8");
@@ -1196,6 +1139,14 @@ function dumpMergedResults(state) {
   log(
     `result merge — files=${files.length} new-entries=${newHashes.length} dest=${dest}`
   );
+  return { files: files.length, newEntries: newHashes.length, dest };
+}
+
+export function dumpResultLogs(options = {}) {
+  const state = loadWatermark();
+  const result = dumpMergedResults(state, options);
+  saveWatermark(state);
+  return result;
 }
 
 // ── 데스크톱 단독 세션(오케스트레이터 미경유) 열거 ──────────────────────────
@@ -1861,6 +1812,7 @@ export {
   chunkTurns,
   collectMergedResultEntries,
   collectResultFiles,
+  defaultResultSearchRoots,
   fingerprintTurns,
   hasProviderSourceIdentifier,
   hasRecoveredTranscriptDump,

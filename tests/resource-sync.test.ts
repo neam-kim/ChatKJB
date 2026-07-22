@@ -209,6 +209,8 @@ describe("shared memory resource text", () => {
     expect(policy).toContain("Never have more than 3 active subagents");
     expect(policy).toContain("Use frontmatter with `name`");
     expect(policy).toContain("Per-conversation Result Log");
+    expect(policy).toContain("subagents must never create, append, rewrite, or delete a `.result.md` file");
+    expect(policy).toContain("YYYY-MM-DDTHH:mm:ss+09:00");
   });
 
   it("builds a standalone-valid MCP-free Codex child role without overriding its role name", () => {

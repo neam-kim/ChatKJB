@@ -246,17 +246,12 @@ function restartDaemon(reason) {
 
 // codex-sdk를 targetVer에 맞춘다. 성공 시 true.
 //
-// 공유 node_modules를 **직접** 갱신한다(프로젝트/심링크/CloudStorage 미접촉):
-// 이 CloudStorage(Synology Drive)는 심링크를 수 초 내 지우므로, 프로젝트에서 npm install을
-// 돌리는 방식은 불안정하다. 대신 공유 dir에 프로젝트의 전체 manifest(package.json +
-// package-lock.json)를 두고 `npm install --prefix <shared>`로 codex-sdk만 올린다. 전체
-// manifest가 있으면 다른 의존성은 트리에 속해 prune되지 않고, 이미 설치된 native(better-sqlite3)
-// 도 재빌드되지 않는다(검증필: "changed N, removed 0").
+// 공유 node_modules를 **직접** 갱신한다. 프로젝트 manifest/lockfile은 배포 가능한 소스
+// 산출물이므로 자동 업데이트가 건드리지 않는다. 특히 `--prefix`로 생성한 lockfile은 공유
+// 런타임을 루트로 삼으므로 프로젝트에 복사하면 npm ci 재현성이 깨진다.
 function relockstepCodex(targetVer) {
   const projPkg = join(projectDir, "package.json");
-  const projLock = join(projectDir, "package-lock.json");
   const sharedPkg = join(shareBase, "package.json");
-  const sharedLock = join(shareBase, "package-lock.json");
   const openaiDir = join(sharedNm, "@openai");
   const openaiBak = join(shareBase, `@openai.bak-${nowTag}`);
   log(`codex 락스텝 시작 → codex-sdk@${targetVer}`);
@@ -271,29 +266,17 @@ function relockstepCodex(targetVer) {
   cpSync(openaiDir, openaiBak, { recursive: true });
 
   try {
-    // 1) 프로젝트 package.json 핀 갱신(dev 일관성용 — 일반 파일이라 CloudStorage에서도 안전).
-    const pkgRaw = readFileSync(projPkg, "utf8");
-    const bumped = pkgRaw.replace(
-      /("@openai\/codex-sdk"\s*:\s*")\^?\d+\.\d+\.\d+(")/,
-      `$1^${targetVer}$2`
-    );
-    if (bumped !== pkgRaw) writeFileSync(projPkg, bumped);
-
-    // 2) 공유 dir에 전체 manifest를 둔다(prune 방지).
+    // 1) 공유 dir에만 프로젝트 manifest를 복사해 전체 의존성을 보존한다.
     copyFileSync(projPkg, sharedPkg);
-    if (existsSync(projLock)) copyFileSync(projLock, sharedLock);
 
-    // 3) 공유 node_modules를 직접 갱신.
+    // 2) 공유 node_modules와 공유 lockfile만 직접 갱신.
     execFileSync(npmCli, ["install", "--prefix", shareBase, `@openai/codex-sdk@${targetVer}`], {
       cwd: shareBase,
       stdio: "inherit",
       env: childEnv
     });
 
-    // 4) 갱신된 lock을 프로젝트로 되돌려 일관성 유지(일반 파일).
-    if (existsSync(sharedLock)) copyFileSync(sharedLock, projLock);
-
-    // 5) 검증: codex-sdk 버전 일치 + better-sqlite3 네이티브 실제 로드(공유 dir 기준).
+    // 3) 검증: codex-sdk 버전 일치 + better-sqlite3 네이티브 실제 로드(공유 dir 기준).
     const got = pkgVersion(join(sharedNm, "@openai", "codex-sdk"));
     if (got !== targetVer) throw new Error(`codex-sdk 버전 불일치: ${got} != ${targetVer}`);
     execFileSync(
