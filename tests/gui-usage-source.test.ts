@@ -155,6 +155,46 @@ describe("createUsageProvider — Claude 스냅샷", () => {
     });
   });
 
+  it("부분 스냅샷을 창별로 병합해 5h·1w 최신 실측값을 함께 채운다", async () => {
+    // 실측 회귀: 최신 스냅샷은 fiveHour.utilization=null(resetsAt만)·sevenDay 부재라
+    // 하나만 고르면 5h·1w가 모두 "—"로 빈다. 창별 최신 실측값을 병합해야 한다.
+    const databasePath = fixtureDatabase([
+      {
+        id: "latest-null-five",
+        updatedAt: 3_000,
+        snapshot: { capturedAt: 3_000, rateLimitsAvailable: true, fiveHour: { utilization: null, resetsAt: "z" } }
+      },
+      {
+        id: "mid-five",
+        updatedAt: 2_000,
+        snapshot: { capturedAt: 2_000, rateLimitsAvailable: true, fiveHour: { utilization: 61, resetsAt: "f" } }
+      },
+      {
+        id: "old-seven",
+        updatedAt: 1_000,
+        snapshot: { capturedAt: 1_000, rateLimitsAvailable: true, sevenDay: { utilization: 88, resetsAt: "w" } }
+      }
+    ]);
+    const usage = await createUsageProvider(sourceOptions({ databasePath, now: () => 3_000 })).fetchClaudeUsage();
+    expect(usage.fiveHour).toEqual({ utilization: 61, resetsAt: "f" });
+    expect(usage.sevenDay).toEqual({ utilization: 88, resetsAt: "w" });
+    expect(usage.capturedAt).toBe(2_000);
+  });
+
+  it("실측 utilization이 하나도 없으면 최신 스냅샷을 그대로 폴백한다", async () => {
+    const databasePath = fixtureDatabase([
+      {
+        id: "only-resets",
+        updatedAt: 5_000,
+        snapshot: { capturedAt: 5_000, rateLimitsAvailable: true, fiveHour: { utilization: null, resetsAt: "z" } }
+      }
+    ]);
+    const usage = await createUsageProvider(sourceOptions({ databasePath, now: () => 5_000 })).fetchClaudeUsage();
+    expect(usage.fiveHour).toEqual({ utilization: null, resetsAt: "z" });
+    expect(usage.sevenDay).toBeNull();
+    expect(usage.capturedAt).toBe(5_000);
+  });
+
   it("capturedAt이 stale 임계(6시간)를 넘기면 stale로 표시한다", async () => {
     const now = 10 * 3_600_000;
     const databasePath = fixtureDatabase([

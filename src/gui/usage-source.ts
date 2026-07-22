@@ -108,15 +108,25 @@ function claudeWindow(window: UsageWindow | undefined): GuiUsageWindowDto | null
   };
 }
 
-function snapshotHasRateWindows(snapshot: UsageSnapshot): boolean {
-  return Boolean(snapshot.fiveHour || snapshot.sevenDay);
+/**
+ * 창이 **실측 utilization** 을 담고 있는지. resetsAt 만 있고 utilization 이 null 인 창은
+ * 표시할 수치가 없으므로 "값 있는 창"으로 치지 않는다(5h/1w 가 "—" 로 비는 회귀 방지).
+ */
+function windowHasUtilization(window: UsageWindow | undefined): window is UsageWindow {
+  return Boolean(window)
+    && typeof window!.utilization === "number"
+    && Number.isFinite(window!.utilization);
 }
 
 /**
  * 공유 SQLite에서 Claude 사용량 스냅샷을 읽는다.
  * 읽기 전용 핸들을 매 폴칭마다 열고 닫으므로 WAL 체크포인트와 무관하게 항상 신선값을 본다.
- * 최근 세션 중 **한도 창(fiveHour/sevenDay)이 있는** 스냅샷을 우선하고, 없으면 최신 스냅샷을 쓴다.
- * (rateLimitsAvailable=false 인 빈 스냅샷이 최신이면 칸이 전부 "—"가 되는 회귀를 막는다.)
+ *
+ * SDK usage API 는 조회 시점에 서버가 준 창만 담아, fiveHour 만 있고 sevenDay 가 없거나
+ * (또는 그 반대) utilization 이 null(resetsAt 만) 인 **부분 스냅샷**이 흔하다. 최신 스냅샷 하나만
+ * 골라 쓰면 다른 스냅샷에 남은 최신 실측값이 유실돼 5h/1w 가 "—" 로 빈다. 그래서 최신순으로
+ * 훑으며 **창별로 첫 실측 utilization 을 병합**하고, capturedAt 은 채택한 창 중 가장 최신값을 쓴다.
+ * 실측 창이 하나도 없으면(모두 rateLimitsAvailable=false 등) 최신 스냅샷을 그대로 폴백한다.
  * DB 부재·스키마 미생성·JSON 파손은 모두 "스냅샷 없음"과 같게 취급한다.
  */
 function readLatestClaudeUsageSnapshot(databasePath: string): UsageSnapshot | null {
@@ -127,6 +137,12 @@ function readLatestClaudeUsageSnapshot(databasePath: string): UsageSnapshot | nu
       "SELECT usage_snapshot FROM sessions WHERE usage_snapshot IS NOT NULL ORDER BY updated_at DESC LIMIT 24"
     ).all() as Array<{ usage_snapshot?: unknown }>;
     let fallback: UsageSnapshot | null = null;
+    const merged: {
+      fiveHour?: UsageWindow;
+      sevenDay?: UsageWindow;
+      subscriptionType?: UsageSnapshot["subscriptionType"];
+      capturedAt?: number;
+    } = {};
     for (const row of rows) {
       const raw = row?.usage_snapshot;
       if (typeof raw !== "string" || !raw) continue;
@@ -138,7 +154,33 @@ function readLatestClaudeUsageSnapshot(databasePath: string): UsageSnapshot | nu
       }
       if (!parsed || typeof parsed !== "object" || typeof parsed.capturedAt !== "number") continue;
       if (!fallback) fallback = parsed;
-      if (snapshotHasRateWindows(parsed)) return parsed;
+      // 창별로 아직 못 채운 칸을, 실측 utilization 을 가진 최신 스냅샷에서 하나씩 채운다.
+      let contributed = false;
+      if (merged.fiveHour === undefined && windowHasUtilization(parsed.fiveHour)) {
+        merged.fiveHour = parsed.fiveHour;
+        contributed = true;
+      }
+      if (merged.sevenDay === undefined && windowHasUtilization(parsed.sevenDay)) {
+        merged.sevenDay = parsed.sevenDay;
+        contributed = true;
+      }
+      if (contributed) {
+        // rows 는 최신순이라 처음 기여한 스냅샷의 capturedAt 이 가장 최신이다.
+        if (merged.capturedAt === undefined) merged.capturedAt = parsed.capturedAt;
+        if (merged.subscriptionType === undefined && parsed.subscriptionType != null) {
+          merged.subscriptionType = parsed.subscriptionType;
+        }
+      }
+      if (merged.fiveHour !== undefined && merged.sevenDay !== undefined) break;
+    }
+    if (merged.capturedAt !== undefined) {
+      return {
+        capturedAt: merged.capturedAt,
+        subscriptionType: merged.subscriptionType ?? fallback?.subscriptionType ?? null,
+        rateLimitsAvailable: true,
+        ...(merged.fiveHour ? { fiveHour: merged.fiveHour } : {}),
+        ...(merged.sevenDay ? { sevenDay: merged.sevenDay } : {})
+      };
     }
     return fallback;
   } catch {
