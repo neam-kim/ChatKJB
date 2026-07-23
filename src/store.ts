@@ -48,6 +48,7 @@ const SESSION_DEFAULT_SEED: SessionDefaults = {
   claudeEffort: DEFAULT_CLAUDE_EFFORT,
   codexReasoning: DEFAULT_CODEX_REASONING,
   codexHome: null,
+  subagentModel: null,
   agyThinkingLevel: ""
 };
 
@@ -85,6 +86,7 @@ interface SessionRow {
   claude_token_index: number | null;
   codex_model: string | null;
   codex_reasoning: string | null;
+  subagent_model: string | null;
   codex_home: string | null;
   codex_thread_id: string | null;
   agy_model: string | null;
@@ -181,6 +183,7 @@ export class StateStore {
         thinking TEXT,
         claude_token_index INTEGER,
         codex_model TEXT,
+        subagent_model TEXT,
         codex_home TEXT,
         codex_thread_id TEXT,
         agy_model TEXT,
@@ -289,6 +292,9 @@ export class StateStore {
     }
     if (!sessionColumns.some((column) => column.name === "codex_model")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN codex_model TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "subagent_model")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN subagent_model TEXT");
     }
     if (!sessionColumns.some((column) => column.name === "codex_thread_id")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN codex_thread_id TEXT");
@@ -407,12 +413,12 @@ export class StateStore {
       INSERT INTO sessions(
         id, sdk_session_id, chat_id, topic_id, project_name, cwd, title,
         status, permission_mode, provider, model, thinking, claude_effort,
-        claude_token_index, codex_model, codex_reasoning, codex_home, codex_thread_id, agy_model, grok_model, grok_reasoning, grok_session_id, agy_thinking_level,
+        claude_token_index, codex_model, codex_reasoning, subagent_model, codex_home, codex_thread_id, agy_model, grok_model, grok_reasoning, grok_session_id, agy_thinking_level,
         agy_conversation_id, agy_usage, grok_usage,
         cline_provider_id, cline_model, cline_reasoning, cline_session_id, cline_usage,
         handoff_summary, goal_condition, lean_mode, usage_snapshot,
         always_allowed_tools, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.sdkSessionId,
@@ -430,6 +436,7 @@ export class StateStore {
       session.claudeTokenIndex ?? null,
       session.codexModel ?? null,
       session.codexReasoning ?? null,
+      session.subagentModel ?? null,
       session.codexHome ?? null,
       session.codexThreadId ?? null,
       session.agyModel ?? null,
@@ -561,6 +568,7 @@ export class StateStore {
       claudeEffort: stored.get("claudeEffort") ?? SESSION_DEFAULT_SEED.claudeEffort,
       codexReasoning: stored.get("codexReasoning") ?? SESSION_DEFAULT_SEED.codexReasoning,
       codexHome: stored.get("codexHome") ?? SESSION_DEFAULT_SEED.codexHome,
+      subagentModel: stored.get("subagentModel") || null,
       agyThinkingLevel: normalizeDefaultAgyThinkingLevel(stored.get("agyThinkingLevel")),
       ...(defaultPermissionMode ? { defaultPermissionMode } : {})
     };
@@ -774,6 +782,7 @@ export class StateStore {
       claudeTokenIndex: row.claude_token_index,
       codexModel: row.codex_model,
       codexReasoning: row.codex_reasoning,
+      subagentModel: row.subagent_model,
       codexHome: row.codex_home,
       codexThreadId: row.codex_thread_id,
       agyModel: row.agy_model,

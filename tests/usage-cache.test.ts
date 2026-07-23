@@ -1,4 +1,12 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -147,15 +155,18 @@ describe("daemon usage cache", () => {
 });
 
 describe("writeDaemonUsageCache permissions payload", () => {
-  it("persists pretty JSON with version 2", () => {
+  it("atomically replaces the version 2 JSON without leaving temporary files", () => {
     const directory = mkdtempSync(join(tmpdir(), "chatkjb-usage-cache-write-"));
     directories.push(directory);
     const path = join(directory, "out.json");
-    const result = writeDaemonUsageCache(samplePayload(123), [path]);
+    writeDaemonUsageCache(samplePayload(123), [path]);
+    const result = writeDaemonUsageCache(samplePayload(456), [path]);
     expect(result.written).toEqual([path]);
     const parsed = JSON.parse(readFileSync(path, "utf8")) as { version: number; writtenAt: number };
     expect(parsed.version).toBe(2);
-    expect(parsed.writtenAt).toBe(123);
+    expect(parsed.writtenAt).toBe(456);
+    expect(readdirSync(directory)).toEqual(["out.json"]);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 });
 
@@ -212,4 +223,3 @@ describe("daemon usage HTTP", () => {
     }
   });
 });
-

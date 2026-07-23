@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FALLBACK_MODEL_CATALOG } from "../src/model-catalog.js";
+import { FALLBACK_MODEL_CATALOG, type ModelCatalog } from "../src/model-catalog.js";
+import { QWEN_SUBAGENT_SERVER_NAME, QWEN_SUBAGENT_TOOL_NAME } from "../src/qwen-subagent.js";
 import { PermissionBroker } from "../src/permission-broker.js";
 import {
   ClaudeExecutor,
@@ -64,7 +65,9 @@ function session(cwd: string): SessionRecord {
 
 function setup(
   selectToken?: ClaudeExecutorHost["selectToken"],
-  createQuery?: ClaudeExecutorDependencies["createQuery"]
+  createQuery?: ClaudeExecutorDependencies["createQuery"],
+  modelCatalog: ModelCatalog = FALLBACK_MODEL_CATALOG,
+  subagentModel?: string
 ): {
   active: Map<string, ActiveRun>;
   executor: ClaudeExecutor;
@@ -76,7 +79,7 @@ function setup(
   directories.push(directory);
   const store = new StateStore(join(directory, "state.sqlite"));
   store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
-  const record = session(directory);
+  const record = { ...session(directory), subagentModel: subagentModel ?? null };
   store.createSession(record);
   const renames: string[] = [];
   const transport: MessageTransport = {
@@ -99,7 +102,7 @@ function setup(
     longRunningMcpServers: new Set(),
     turnIdleTimeoutMs: 60_000,
     claudeMemoryDir: directory,
-    modelCatalog: FALLBACK_MODEL_CATALOG
+    modelCatalog
   };
   const active = new Map<string, ActiveRun>();
   const tokenPool = new TokenPool(["test-token"]);
@@ -136,6 +139,32 @@ function setup(
 }
 
 describe("ClaudeExecutor lifecycle", () => {
+  it("registers Qwen as an MCP delegate rather than an unsupported native Task model", async () => {
+    let captured: Parameters<ClaudeExecutorDependencies["createQuery"]>[0] | undefined;
+    const emptyQuery = { close() {}, async *[Symbol.asyncIterator]() {} } as unknown as Query;
+    const qwenCatalog: ModelCatalog = {
+      ...FALLBACK_MODEL_CATALOG,
+      codexModels: [...FALLBACK_MODEL_CATALOG.codexModels, {
+        id: "qwen3.8-max",
+        label: "qwen3.8-max",
+        reasoningOptions: [],
+        defaultReasoning: "high",
+        source: "token-plan"
+      }]
+    };
+    const createQuery = ((params) => {
+      captured = params;
+      return emptyQuery;
+    }) as ClaudeExecutorDependencies["createQuery"];
+    const { executor, store } = setup(undefined, createQuery, qwenCatalog, "qwen3.8-max");
+
+    await executor.execute({ session: store.getSession("claude-executor")!, prompt: "delegate" });
+
+    expect(captured?.options?.agents).toBeUndefined();
+    expect(captured?.options?.allowedTools).toContain(QWEN_SUBAGENT_TOOL_NAME);
+    expect(captured?.options?.mcpServers?.[QWEN_SUBAGENT_SERVER_NAME]).toBeDefined();
+  });
+
   it("does not register an active run when token selection fails", async () => {
     const { active, executor, store } = setup(() => {
       throw new Error("no usable token");

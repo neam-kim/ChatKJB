@@ -73,7 +73,7 @@ describe("GUI web interaction helpers", () => {
     expect(GENERAL_PANEL_FALLBACK_ROWS).toEqual([
       ["⚙️ 새 세션 기본값", "🧠 모델"],
       ["🤖 제공자", "💭 추론"],
-      ["🛠️ 작업량", "🔑 토큰"]
+      ["🛠️ 작업량", "🧑‍💻 서브에이전트"]
     ]);
     expect(shouldApplyGeneralPanelMessage(0, 1)).toBe(true);
     expect(shouldApplyGeneralPanelMessage(42, 42)).toBe(true);
@@ -101,6 +101,8 @@ describe("GUI usage-strip contract", () => {
     expect(remainingUsagePercent(Number.NaN)).toBeNull();
     expect(usageResetLabel("2026-07-23T12:00:00.000Z")).toContain("2026. 07. 23. 21:00");
     expect(usageResetLabel("not a date")).toBe("초기화 시각 미상");
+    expect(usageResetLabel(null, Date.parse("2026-07-23T12:00:00.000Z")))
+      .toBe("초기화 시각 미상 · 확인 2026. 07. 23. 21:00");
   });
 
   it("keeps a previously measured window when a refresh has no measurement, and replaces it when one arrives", () => {

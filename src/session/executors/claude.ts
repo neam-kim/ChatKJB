@@ -11,6 +11,12 @@ import { isRetryableMcpError, mcpCallKey, mcpServerName } from "../../mcp-policy
 import { DEFAULT_CLAUDE_MODEL, normalizeThinkingForModel } from "../../model-catalog.js";
 import type { PermissionBroker } from "../../permission-broker.js";
 import { loadClaudeConnectors } from "../../connectors.js";
+import {
+  isQwenSubagentModel,
+  QWEN_SUBAGENT_SERVER_NAME,
+  QWEN_SUBAGENT_TOOL_NAME,
+  qwenSubagentMcpServer
+} from "../../qwen-subagent.js";
 import { MessageQueue, StreamingTextCollector } from "../../session-collectors.js";
 import { buildClaudeEnvironment } from "../../session-environment.js";
 import {
@@ -257,6 +263,10 @@ export class ClaudeExecutor {
       ctx.session.thinking
     );
     const effort = resolveClaudeEffort(ctx.session.claudeEffort);
+    const qwenSubagent = isQwenSubagentModel(
+      this.host.options.modelCatalog,
+      ctx.session.subagentModel
+    );
     return {
       cwd: ctx.session.cwd,
       abortController: ctx.abortController,
@@ -264,7 +274,23 @@ export class ClaudeExecutor {
       thinking: resolveThinkingConfig(thinking),
       ...(effort ? { effort } : {}),
       permissionMode: ctx.session.permissionMode,
-      allowedTools: ["Read", "Glob", "Grep", "WebSearch", "Task"],
+      allowedTools: [
+        "Read",
+        "Glob",
+        "Grep",
+        "WebSearch",
+        "Task",
+        ...(qwenSubagent ? [QWEN_SUBAGENT_TOOL_NAME] : [])
+      ],
+      ...(ctx.session.subagentModel && !qwenSubagent ? {
+        agents: {
+          chatkjb_subagent: {
+            description: "Use for every delegated bounded subtask in this ChatKJB session.",
+            prompt: "Complete the delegated bounded subtask, verify the result, and return concise evidence to the parent.",
+            model: ctx.session.subagentModel
+          }
+        }
+      } : {}),
       settingSources: ["user"],
       skills: "all",
       systemPrompt: {
@@ -272,7 +298,8 @@ export class ClaudeExecutor {
         preset: "claude_code",
         append: buildClaudeSystemPromptAppend(ctx.session, {
           mcpMaxAttempts: this.host.options.mcpMaxAttempts,
-          claudeMemoryDir: this.host.options.claudeMemoryDir
+          claudeMemoryDir: this.host.options.claudeMemoryDir,
+          qwenSubagent
         })
       },
       env: buildClaudeEnvironment(
@@ -280,11 +307,16 @@ export class ClaudeExecutor {
         process.env,
         this.host.options.mcpToolTimeoutMs
       ),
-      mcpServers: loadClaudeConnectors(
-        this.host.options.mcpToolTimeoutMs,
-        this.host.options.codexMcpTimeoutMs,
-        this.host.options.longRunningMcpServers
-      ),
+      mcpServers: {
+        ...loadClaudeConnectors(
+          this.host.options.mcpToolTimeoutMs,
+          this.host.options.codexMcpTimeoutMs,
+          this.host.options.longRunningMcpServers
+        ),
+        ...(qwenSubagent && ctx.session.subagentModel ? {
+          [QWEN_SUBAGENT_SERVER_NAME]: qwenSubagentMcpServer(ctx.session.subagentModel)
+        } : {})
+      },
       hooks: {
         PostToolUse: [{ hooks: [postToolUse] }],
         PostToolUseFailure: [{ hooks: [postToolUseFailure] }],

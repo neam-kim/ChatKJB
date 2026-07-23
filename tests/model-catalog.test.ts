@@ -17,8 +17,24 @@ import {
   resolveAgyCliModel,
   normalizeClaudeCliModels,
   normalizeGrokCliModels,
+  parseAlibabaTokenPlanModels,
   resolveModel
 } from "../src/model-catalog.js";
+
+describe("Alibaba Token Plan model catalog", () => {
+  it("accepts OpenAI-compatible model lists and ignores malformed entries", () => {
+    expect(parseAlibabaTokenPlanModels({
+      data: [
+        { id: "qwen3.8-max" },
+        { id: "qwen3.8-max" },
+        { id: "qwen3-coder-plus" },
+        { id: "" },
+        null
+      ]
+    })).toEqual(["qwen3.8-max", "qwen3-coder-plus"]);
+    expect(parseAlibabaTokenPlanModels({ data: "invalid" })).toEqual([]);
+  });
+});
 
 describe("codex reasoning catalog", () => {
   it("defaults to high effort", () => {

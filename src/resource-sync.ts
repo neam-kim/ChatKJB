@@ -529,10 +529,12 @@ export function buildSharedPolicyText(paths: SharedMemoryTextPaths & { home: str
     "## Execution And Subagents",
     "",
     "- Execute ordinary tool calls sequentially and use each result before the next call.",
-    "- Exception: when a task has genuinely independent, bounded subtasks, proactively delegate them to subagents and run up to 3 subagents concurrently.",
-    "- Never have more than 3 active subagents. If 3 are active, wait for or close one before spawning another.",
+    "- The root session owns judgment, risk checks, work decomposition, coordination, result integration, integrated verification, and final reporting.",
+    "- When actual implementation, research, or testing has genuinely independent, bounded subtasks, proactively delegate them to subagents. Simple questions and single actions remain with the root session.",
+    "- External MCP and connector calls remain with the root session; subagents return evidence for the root to integrate.",
+    "- Never have more than 4 active subagents. If 4 are active, wait for or close one before spawning another.",
     "- This is a concurrency limit, not a cumulative per-command or per-turn spawn limit. Close completed, failed, or interrupted subagents to release their slots, then continue spawning new subagents in the same command or turn when useful work remains.",
-    "- The main agent does not count toward the three-subagent concurrency limit. If a skill or provider workflow requests four or more subagents, execute them in waves of at most three.",
+    "- The main agent does not count toward the four-subagent concurrency limit. If a skill or provider workflow requests five or more subagents, execute them in waves of at most four.",
     "- On Codex, a completed `wait_agent` does not release a slot by itself; collect the result and call `close_agent` before reusing it when that tool is available.",
     "- Prefer parallel subagents for exploration, review, testing, log analysis, and other read-heavy work. Parallel write work is allowed only when file ownership is clearly separated; otherwise serialize the edits to avoid conflicts.",
     "- Subagents must not recursively fan out. The main agent remains responsible for waiting for results, reconciling conflicts, validating the combined result, and reporting the final outcome.",
@@ -584,7 +586,7 @@ export function buildSharedPolicyText(paths: SharedMemoryTextPaths & { home: str
     "- Do not make out-of-scope file changes, external transfers, or permission expansions. Ask through the ChatKJB conversation when authority is required.",
     "- Progress and results are reported through the ChatKJB conversation.",
     "- Delegation inside the current turn is normal orchestration, not a new independent task. Use the provider-native mechanism: Claude Task/Agent, Codex collaboration tools, Antigravity background subagents, or Grok subagents.",
-    "- Prefer provider-exposed default agents and user- or project-defined specialist agents. Keep the same three-active-subagent limit, no-recursive-fan-out rule, read-heavy parallel preference, separated write ownership, and main-agent integration responsibility defined above.",
+    "- Prefer provider-exposed default agents and user- or project-defined specialist agents for bounded implementation, research, and testing. Keep the same four-active-subagent limit, depth-one/no-recursive-fan-out rule, read-heavy parallel preference, separated write ownership, root-owned external MCP calls, and root integration responsibility defined above.",
     ""
   ].join("\n");
 }

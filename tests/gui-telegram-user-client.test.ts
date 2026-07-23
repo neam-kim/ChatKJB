@@ -42,6 +42,16 @@ const CLINE_ACT_REPLY_PANEL_ROWS = [
   [...CLINE_REPLY_PANEL_ROWS[1]],
   [CLINE_REPLY_PANEL_ROWS[2][0], "\u25b6\ufe0f Act"]
 ] as const;
+const CLAUDE_SUBAGENT_REPLY_PANEL_ROWS = [
+  ["⚙️ 새 세션 기본값", "🧠 모델: Opus 4.8"],
+  ["🤖 제공자: Claude", "💭 thinking: off"],
+  ["🛠️ 작업량: 높음 (High)", "🧑‍💻 서브에이전트: Opus 4.8"]
+] as const;
+const CODEX_SUBAGENT_REPLY_PANEL_ROWS = [
+  ["⚙️ 새 세션 기본값", "🧠 모델: GPT-5.6-Terra"],
+  ["🤖 제공자: Codex", "💭 추론: 보통 (Medium)"],
+  ["🧑‍💻 서브에이전트: GPT-5.6-Terra", "➖"]
+] as const;
 
 function replyKeyboardMarkup(rows: readonly (readonly string[])[] = REPLY_PANEL_ROWS): unknown {
   return {
@@ -1274,6 +1284,37 @@ describe("TelegramUserClient forum scope and actions", () => {
       message: expect.objectContaining({
         id: 302,
         replyPanel: { messageId: 302, rows: CLINE_ACT_REPLY_PANEL_ROWS.map((row) => [...row]) }
+      })
+    });
+
+    adapter.emit({
+      className: "UpdateNewChannelMessage",
+      message: rawMessage({
+        id: 303,
+        text: "Claude subagent panel",
+        replyMarkup: replyKeyboardMarkup(CLAUDE_SUBAGENT_REPLY_PANEL_ROWS)
+      })
+    });
+    adapter.emit({
+      className: "UpdateNewChannelMessage",
+      message: rawMessage({
+        id: 304,
+        text: "Codex subagent panel",
+        replyMarkup: replyKeyboardMarkup(CODEX_SUBAGENT_REPLY_PANEL_ROWS)
+      })
+    });
+    expect(updates).toContainEqual({
+      type: "message_upsert",
+      message: expect.objectContaining({
+        id: 303,
+        replyPanel: { messageId: 303, rows: CLAUDE_SUBAGENT_REPLY_PANEL_ROWS }
+      })
+    });
+    expect(updates).toContainEqual({
+      type: "message_upsert",
+      message: expect.objectContaining({
+        id: 304,
+        replyPanel: { messageId: 304, rows: CODEX_SUBAGENT_REPLY_PANEL_ROWS }
       })
     });
     await client.stop();

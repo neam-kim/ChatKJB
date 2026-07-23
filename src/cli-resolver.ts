@@ -30,9 +30,16 @@ function isExecutable(path: string): boolean {
 }
 
 function executableFromPath(binaryName: string, env: NodeJS.ProcessEnv): string | undefined {
-  const pathValue = env.PATH ?? "";
-  for (const dir of pathValue.split(delimiter)) {
-    if (!dir) continue;
+  // ChatKJB.app의 process.execPath는 번들 내부 Node라 provider CLI가 설치된 실제 Node
+  // bin을 알 수 없다. LaunchAgent 설치기가 기록한 경로를 일반 PATH보다 먼저 탐색한다.
+  const directories = [
+    env.CHATKJB_NODE_BIN?.trim(),
+    ...(env.PATH ?? "").split(delimiter)
+  ];
+  const seen = new Set<string>();
+  for (const dir of directories) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
     const candidate = join(dir, binaryName);
     if (isExecutable(candidate)) return candidate;
   }

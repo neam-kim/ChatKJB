@@ -59,7 +59,7 @@ export interface CodexModelOption {
   label: string;
   reasoningOptions: CodexReasoningOption[];
   defaultReasoning: CodexReasoningEffort;
-  source: "cli" | "fallback";
+  source: "cli" | "token-plan" | "fallback";
 }
 
 // agy 추론 강도는 CLI 모델명의 (Low/Medium/High) 변형으로 제어한다.
@@ -170,6 +170,17 @@ export const FALLBACK_CODEX_MODELS: CodexModelOption[] = [
     source: "fallback"
   }
 ];
+
+function alibabaCodexModel(id: string): CodexModelOption {
+  return {
+    id,
+    label: id,
+    // Token Plan의 OpenAI-compatible Chat API는 Codex의 GPT 추론 강도 제어를 보장하지 않는다.
+    reasoningOptions: codexReasoningOptions(["low", "medium", "high"]),
+    defaultReasoning: "high",
+    source: "token-plan"
+  };
+}
 
 export const FALLBACK_AGY_MODELS: AgyModelOption[] = [
   { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", source: "fallback" },
@@ -463,7 +474,14 @@ export interface CatalogProbe {
   agyExecutable?: string | undefined;
   grokExecutable?: string | undefined;
   mcpToolTimeoutMs?: number | undefined;
+  alibabaTokenPlan?: {
+    apiKey: string;
+    baseUrl: string;
+    defaultModel: string;
+  } | undefined;
 }
+
+export type AlibabaTokenPlanConfig = NonNullable<CatalogProbe["alibabaTokenPlan"]>;
 
 export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalog> {
   const available = new Set<string>(
@@ -472,6 +490,7 @@ export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalo
   const [
     claudeModels,
     codexModels,
+    alibabaModels,
     agyModels,
     grokModels,
     grokReasoningEfforts,
@@ -483,6 +502,10 @@ export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalo
     available.has("codex")
       ? discoverCodexModels(probe).catch(() => FALLBACK_CODEX_MODELS)
       : Promise.resolve(FALLBACK_CODEX_MODELS),
+    probe.alibabaTokenPlan
+      ? discoverAlibabaTokenPlanModels(probe.alibabaTokenPlan)
+        .catch(() => [alibabaCodexModel(probe.alibabaTokenPlan!.defaultModel)])
+      : Promise.resolve([]),
     available.has("agy")
       ? discoverAgyModels(probe).catch(() => FALLBACK_AGY_MODELS)
       : Promise.resolve(FALLBACK_AGY_MODELS),
@@ -498,12 +521,62 @@ export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalo
   ]);
   return {
     claudeModels: claudeModels.length ? claudeModels : FALLBACK_CLAUDE_MODELS,
-    codexModels: codexModels.length ? codexModels : FALLBACK_CODEX_MODELS,
+    codexModels: mergeCodexModels(codexModels.length ? codexModels : FALLBACK_CODEX_MODELS, alibabaModels),
     agyModels: agyModels.length ? agyModels : FALLBACK_AGY_MODELS,
     grokModels: grokModels.length ? grokModels : FALLBACK_GROK_MODELS,
     clineProviders: clineCatalog.providers,
     clineModelsByProvider: clineCatalog.modelsByProvider,
     grokReasoningEfforts
+  };
+}
+
+function mergeCodexModels(
+  codexModels: readonly CodexModelOption[],
+  alibabaModels: readonly CodexModelOption[]
+): CodexModelOption[] {
+  const merged = new Map<string, CodexModelOption>();
+  for (const model of [...alibabaModels, ...codexModels]) {
+    const key = model.id.toLowerCase();
+    if (!merged.has(key)) merged.set(key, model);
+  }
+  return [...merged.values()];
+}
+
+export function parseAlibabaTokenPlanModels(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const data = (payload as Record<string, unknown>).data;
+  if (!Array.isArray(data)) return [];
+  return [...new Set(data.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const id = (item as Record<string, unknown>).id;
+    return typeof id === "string" && id.trim() ? [id.trim()] : [];
+  }))];
+}
+
+export async function discoverAlibabaTokenPlanModels(plan: AlibabaTokenPlanConfig)
+  : Promise<CodexModelOption[]> {
+  const response = await fetch(`${plan.baseUrl.replace(/\/$/, "")}/models`, {
+    headers: { Authorization: `Bearer ${plan.apiKey}` },
+    signal: AbortSignal.timeout(CODEX_DISCOVERY_TIMEOUT_MS)
+  });
+  if (!response.ok) throw new Error(`Alibaba Token Plan model discovery failed (${response.status})`);
+  const ids = parseAlibabaTokenPlanModels(await response.json());
+  if (ids.length === 0) throw new Error("Alibaba Token Plan returned no models");
+  return ids.map(alibabaCodexModel);
+}
+
+/** Qwen MCP 선택 패널을 열 때 현재 제공자 목록으로 카탈로그를 갱신한다. */
+export async function refreshAlibabaTokenPlanModels(
+  catalog: ModelCatalog,
+  plan: AlibabaTokenPlanConfig
+): Promise<ModelCatalog> {
+  const discovered = await discoverAlibabaTokenPlanModels(plan);
+  return {
+    ...catalog,
+    codexModels: mergeCodexModels(
+      catalog.codexModels.filter((option) => option.source !== "token-plan"),
+      discovered
+    )
   };
 }
 

@@ -322,7 +322,8 @@ export function createBot(
       options.clineProviderId ?? null,
       options.clineModel ?? null,
       options.clineReasoning ?? null,
-      options.permissionMode ?? null
+      options.permissionMode ?? null,
+      options.subagentModel ?? null
     );
     const codexAccount = session.provider === "codex"
       ? codexAccountLabel(session.codexHome, config.codexAccountHomes)

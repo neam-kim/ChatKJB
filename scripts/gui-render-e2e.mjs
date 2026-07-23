@@ -385,10 +385,10 @@ class FixtureUsageProvider {
     if (this.pending) await new Promise((resolve) => { this.release = resolve; });
     if (this.failClaude) throw new Error("claude snapshot read failed");
     return {
-      fiveHour: { utilization: 42, resetsAt: "2026-07-23T12:00:00.000Z" },
+      fiveHour: { utilization: 42, resetsAt: null },
       sevenDay: { utilization: 18, resetsAt: "2026-07-30T12:00:00.000Z" },
       stale: true,
-      capturedAt: 1_700_000_000_000
+      capturedAt: Date.parse("2026-07-23T12:00:00.000Z")
     };
   }
 
@@ -578,7 +578,7 @@ async function main() {
         const panel = document.querySelector('#general-panel');
         return panel && !panel.hidden
           && [...panel.querySelectorAll('button')].map((button) => button.textContent).join('|')
-            === '⚙️ 새 세션 기본값|🧠 모델|🤖 제공자|💭 추론|🛠️ 작업량|🔑 토큰';
+            === '⚙️ 새 세션 기본값|🧠 모델|🤖 제공자|💭 추론|🛠️ 작업량|🧑‍💻 서브에이전트';
       })()`
     ), "immediate functional General panel fallback");
     client.releasePanel?.();
@@ -648,7 +648,7 @@ async function main() {
       throw new Error(`usage strip is not mounted directly after the composer form: ${JSON.stringify(usagePhase1)}`);
     }
     const expectedUsageLines = [
-      { provider: "Claude", cells: [["5h 잔여 58%초기화 2026. 07. 23. 21:00", false], ["1w 잔여 82%초기화 2026. 07. 30. 21:00", false]], notes: ["대화 전 갱신"] },
+      { provider: "Claude", cells: [["5h 잔여 58%초기화 시각 미상 · 확인 2026. 07. 23. 21:00", false], ["1w 잔여 82%초기화 2026. 07. 30. 21:00", false]], notes: ["대화 전 갱신"] },
       { provider: "Codex · .codex", cells: [["5h 잔여 93%초기화 2026. 07. 23. 21:00", false], ["1w 잔여 67%초기화 2026. 07. 30. 21:00", false]], notes: [] },
       { provider: "Codex · .codex-acct-b", cells: [["5h 잔여 59%초기화 2026. 07. 23. 21:00", false], ["1w 잔여 48%초기화 2026. 07. 30. 21:00", false]], notes: [] },
       { provider: "Codex · .codex-acct-c", cells: [["5h 잔여 32%초기화 2026. 07. 23. 21:00", false], ["1w 잔여 26%초기화 2026. 07. 30. 21:00", false]], notes: [] },

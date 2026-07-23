@@ -37,6 +37,7 @@ import {
   thinkingToggleOptionsForModel
 } from "../../model-catalog.js";
 import { buildMemoryPrompt } from "../../session-manager.js";
+import { claudeSubagentModelOptions, codexSubagentModelOptions } from "../../qwen-subagent.js";
 import type { ProviderKind } from "../../types.js";
 import type { BotDeps } from "../deps.js";
 import {
@@ -1153,6 +1154,43 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
 
   bot.callbackQuery(/^noop:/, async (ctx) => {
     await ctx.answerCallbackQuery({ text: "변경할 설정이 없습니다." });
+  });
+
+  // 새 세션 기본값 패널: 하위 에이전트 모델 선택. setsa:claude|codex:<id|inherit>
+  bot.callbackQuery(/^setsa:/, async (ctx) => {
+    const rest = ctx.callbackQuery.data.slice("setsa:".length);
+    const sep = rest.indexOf(":");
+    const provider = rest.slice(0, sep) as ProviderKind;
+    const modelId = rest.slice(sep + 1);
+    if ((provider !== "claude" && provider !== "codex") || modelId.length === 0) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 서브에이전트 설정입니다.", show_alert: true });
+      return;
+    }
+    const options = provider === "codex"
+      ? codexSubagentModelOptions(config.modelCatalog)
+      : claudeSubagentModelOptions(config.modelCatalog);
+    const selected = modelId === "inherit" ? null : options.find((item) => item.id === modelId);
+    if (modelId !== "inherit" && !selected) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 모델입니다.", show_alert: true });
+      return;
+    }
+    const current = store.getSessionDefaults();
+    if (current.provider !== provider) {
+      await ctx.answerCallbackQuery({ text: "현재 제공자의 설정만 변경할 수 있습니다.", show_alert: true });
+      return;
+    }
+    const defaults = store.updateSessionDefaults({ subagentModel: selected?.id ?? null });
+    const qwenSelection = selected != null
+      && "kind" in selected && selected.kind === "qwen";
+    await ctx.answerCallbackQuery({ text: selected ? `${selected.label} 선택` : "모델 기본값 상속" });
+    await ctx.reply(
+      selected
+        ? qwenSelection
+          ? `새 ${providerDisplayLabel(provider)} 세션의 Qwen MCP 서브에이전트: ${selected.label}`
+          : `새 ${providerDisplayLabel(provider)} 세션의 서브에이전트 모델: ${selected.label}`
+        : `새 ${providerDisplayLabel(provider)} 세션의 서브에이전트 모델은 기본값을 상속합니다.`,
+      { reply_markup: defaultPanelKeyboard(defaults) }
+    );
   });
 
   // 새 세션 기본값 패널: 모델 선택. setm:<provider>:<id>

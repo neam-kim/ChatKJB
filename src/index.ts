@@ -4,6 +4,7 @@ import { reapOrphanedClineMcp } from "./cline-orphan-reaper.js";
 import { loadConfig } from "./config.js";
 import { startDaemonUsagePublisher } from "./daemon-usage-publisher.js";
 import { FALLBACK_MODEL_CATALOG, loadModelCatalog } from "./model-catalog.js";
+import { DEFAULT_CODEX_MODEL } from "./model-catalog.js";
 import { syncSharedResourcesCached } from "./resource-sync.js";
 import { buildServiceRecoveryPrompt } from "./session-prompts.js";
 import { StateStore } from "./store.js";
@@ -51,16 +52,29 @@ async function main(): Promise<void> {
       codexExecutable: config.codexExecutable,
       agyExecutable: config.agyExecutable,
       grokExecutable: config.grokExecutable,
-      mcpToolTimeoutMs: config.mcpToolTimeoutMs
+      mcpToolTimeoutMs: config.mcpToolTimeoutMs,
+      alibabaTokenPlan: config.alibabaTokenPlan
     }).catch(() => FALLBACK_MODEL_CATALOG);
+    // Token Plan이 설정된 첫 적용에서는 기존 GPT 기본값만 사용자가 요청한 모델로 전환한다.
+    // 사용자가 이미 선택한 다른 모델과 실행 중인 세션은 건드리지 않는다.
+    if (config.alibabaTokenPlan
+      && config.modelCatalog.codexModels.some((model) =>
+        model.source === "token-plan"
+        && model.id.toLowerCase() === config.alibabaTokenPlan!.defaultModel.toLowerCase()
+      )
+      && store.getSessionDefaults().codexModel === DEFAULT_CODEX_MODEL) {
+      store.updateSessionDefaults({ codexModel: config.alibabaTokenPlan.defaultModel });
+    }
     const claudeDynamic = config.modelCatalog.claudeModels.some((m) => m.source === "api");
     const codexDynamic = config.modelCatalog.codexModels.some((m) => m.source === "cli");
+    const alibabaDynamic = config.modelCatalog.codexModels.some((m) => m.source === "token-plan");
     const agyDynamic = config.modelCatalog.agyModels.some((m) => m.source === "cli");
     const grokDynamic = config.modelCatalog.grokModels.some((m) => m.source === "cli");
     const clineDynamic = config.modelCatalog.clineProviders.length > 0;
     console.log(
       `Model catalog → Claude: ${claudeDynamic ? "동적" : "기본값"}, `
-      + `Codex: ${codexDynamic ? "동적" : "기본값"}, `
+      + `Codex: ${codexDynamic ? "동적" : "기본값"}`
+      + `${alibabaDynamic ? " · Alibaba Token Plan: 동적" : ""}, `
       + `Antigravity: ${agyDynamic ? "동적" : "기본값"}, `
       + `Grok: ${grokDynamic ? "동적" : "기본값"}, `
       + `Cline: ${clineDynamic ? `동적(${config.modelCatalog.clineProviders.length} providers)` : "사용 불가"}`

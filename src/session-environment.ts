@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { loadMergedConnectors, syncCodexMcpConfig } from "./connectors.js";
 import { sharedCodexLiteAgentPath } from "./resource-sync.js";
 import { projectSourceDir } from "./runtime-paths.js";
+import { qwenSubagentProcessConfig, QWEN_SUBAGENT_SERVER_NAME } from "./qwen-subagent.js";
 import type { SessionRecord } from "./types.js";
 
 // provider CLI(codex 등)는 보통 Node와 같은 bin 디렉터리에 설치된다. 그래서 실행 중인
@@ -87,7 +88,10 @@ export function requireCodexSubscriptionAuth(
   }
 }
 
-export function codexSharedResourceConfig() {
+export function codexSharedResourceConfig(
+  subagentModel?: string | null,
+  qwenSubagentModel?: string | null
+) {
   const liteAgent = sharedCodexLiteAgentPath();
   return {
     // Codex native collaboration tools are enabled explicitly so ChatKJB sessions do not
@@ -95,8 +99,9 @@ export function codexSharedResourceConfig() {
     // 열려 있는 자식 수를 세므로, 결과 취합 뒤 close_agent로 슬롯을 반환해야 한다.
     features: { memories: true, multi_agent: true },
     agents: {
-      max_threads: 3,
+      max_threads: 4,
       max_depth: 1,
+      ...(subagentModel && !qwenSubagentModel ? { default_subagent_model: subagentModel } : {}),
       // Codex child sessions otherwise inherit every root MCP and multiply the local stdio
       // process set by the number of active subagents. Root tools stay unchanged; repository
       // exploration/review children use a generated MCP-free role layer.
@@ -116,7 +121,14 @@ export function codexSharedResourceConfig() {
     memories: {
       generate_memories: true,
       use_memories: true
-    }
+    },
+    // Qwen Token Plan은 Codex native child model provider로 전달할 수 없다. 선택된 경우
+    // 루트에만 짧은 전용 MCP를 붙이고, GPT 루트가 이 도구로 위임·검증한다.
+    ...(qwenSubagentModel ? {
+      mcp_servers: {
+        [QWEN_SUBAGENT_SERVER_NAME]: qwenSubagentProcessConfig(qwenSubagentModel)
+      }
+    } : {})
   };
 }
 

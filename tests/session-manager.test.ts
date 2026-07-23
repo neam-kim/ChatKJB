@@ -1046,12 +1046,15 @@ describe("memory command", () => {
     const boundary = buildOrchestrationBoundaryInstructions();
     expect(boundary).toContain("독립 native-app 세션으로 전환하지 않는다");
     expect(boundary).toContain("[SUBAGENT_DELEGATION_ENCOURAGED]");
-    expect(boundary).toContain("동시에 최대 3명(주 에이전트 제외)");
+    expect(boundary).toContain("실제 구현·조사·테스트는 provider-native subagent에 우선 위임한다");
+    expect(boundary).toContain("단순 질의·단일 행동과 외부 MCP·커넥터 호출은 주 에이전트가 직접 소유한다");
+    expect(boundary).toContain("판단·위험 확인·작업 분해·조율·결과 통합·통합 검증·최종 보고");
+    expect(boundary).toContain("동시에 최대 4명(주 에이전트 제외)");
+    expect(boundary).toContain("깊이 1");
     expect(boundary).toContain("재귀 위임 금지");
-    expect(boundary).toContain("외부 MCP·커넥터 호출은 주 에이전트가 소유한다");
     expect(boundary).toContain("MCP 기동을 생략한 경량 role");
     expect(boundary).toContain("POLICIES.md#execution-and-subagents");
-    expect(boundary.length).toBeLessThan(1_200);
+    expect(boundary.length).toBeLessThan(1_400);
   });
 });
 
@@ -1620,6 +1623,62 @@ describe("synthesis provider coverage", () => {
 });
 
 describe("session context reset", () => {
+  it("clears only the active provider's conversation and usage state", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-reset-provider-boundary-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const agySession: SessionRecord = {
+      ...baseSession("reset-agy", directory),
+      provider: "agy",
+      agyConversationId: "agy-conversation",
+      agyUsage: '{"input":10}',
+      grokSessionId: "grok-session",
+      grokUsage: '{"input":20}',
+      handoffSummary: "old context"
+    };
+    const grokSession: SessionRecord = {
+      ...baseSession("reset-grok", directory),
+      topicId: 43,
+      provider: "grok",
+      agyConversationId: "agy-conversation",
+      agyUsage: '{"input":30}',
+      grokSessionId: "grok-session",
+      grokUsage: '{"input":40}',
+      handoffSummary: "old context"
+    };
+    store.createSession(agySession);
+    store.createSession(grokSession);
+    const manager = new SessionManager(
+      store,
+      fakeTransport,
+      new PermissionBroker(store, fakeTransport, 1000),
+      sessionManagerOptions(directory)
+    );
+
+    try {
+      await expect(manager.resetContext(agySession.id)).resolves.toEqual({ ok: true });
+      expect(store.getSession(agySession.id)).toMatchObject({
+        agyConversationId: null,
+        agyUsage: null,
+        grokSessionId: "grok-session",
+        grokUsage: '{"input":20}',
+        handoffSummary: null
+      });
+
+      await expect(manager.resetContext(grokSession.id)).resolves.toEqual({ ok: true });
+      expect(store.getSession(grokSession.id)).toMatchObject({
+        agyConversationId: "agy-conversation",
+        agyUsage: '{"input":30}',
+        grokSessionId: null,
+        grokUsage: null,
+        handoffSummary: null
+      });
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("clears Claude resume state only after transcript deletion succeeds", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-reset-claude-"));
     const store = new StateStore(join(directory, "state.sqlite"));

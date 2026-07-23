@@ -14,6 +14,7 @@ export interface PendingStartOptions {
   claudeTokenIndex?: number | null | undefined;
   codexModel?: string | undefined;
   codexReasoning?: string | undefined;
+  subagentModel?: string | null | undefined;
   codexHome?: string | null | undefined;
   agyThinkingLevel?: string | undefined;
   agyModel?: string | undefined;
@@ -67,6 +68,7 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
       codexModel: defaults.codexModel,
       codexReasoning: defaults.codexReasoning,
       codexHome: defaults.codexHome,
+      subagentModel: defaults.subagentModel ?? null,
       leanMode: true
     };
   }
@@ -103,6 +105,7 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
     thinking: defaults.thinking,
     claudeEffort: defaults.claudeEffort,
     claudeTokenIndex: defaults.claudeTokenIndex,
+    subagentModel: defaults.subagentModel ?? null,
     leanMode: true
   };
 }

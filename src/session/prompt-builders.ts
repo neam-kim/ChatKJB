@@ -1,4 +1,5 @@
 import type { EffortLevel, ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
+import { QWEN_SUBAGENT_TOOL_NAME } from "../qwen-subagent.js";
 import {
   buildLimitResumePrompt,
   buildOrchestratedTurnPrompt,
@@ -103,12 +104,23 @@ export function promptForCodexRequest(request: RunRequest): string {
 
 export function buildClaudeSystemPromptAppend(
   session: SessionRecord,
-  opts: { mcpMaxAttempts: number; claudeMemoryDir: string; }
+  opts: { mcpMaxAttempts: number; claudeMemoryDir: string; qwenSubagent?: boolean; }
 ): string {
   return buildProviderBootstrap(session, opts.claudeMemoryDir, {
     // claude_code preset이 날짜와 user-scope CLAUDE.md를 이미 제공한다.
     includeDate: false,
     prefixSections: [
+      ...(session.subagentModel
+        ? opts.qwenSubagent
+          ? [
+            `Qwen 하위 작업은 반드시 ${QWEN_SUBAGENT_TOOL_NAME} 도구로 위임하십시오. `
+            + "요청을 작고 독립적으로 나누고, 필요한 파일 내용과 조사 결과를 context에 함께 전달한 뒤 응답을 직접 검증·통합하십시오."
+          ]
+          : [
+            "하위 작업을 위임할 때는 반드시 Task 도구의 subagent_type을 chatkjb_subagent로 지정하십시오. "
+            + `이 세션의 하위 에이전트 모델은 ${session.subagentModel}로 고정되어 있습니다.`
+          ]
+        : []),
       `MCP 도구가 timeout, connection closed 또는 transport 오류로 실패하면 `
       + `호스트의 MCP_RETRY 지시에 따라 같은 입력을 순차적으로 최대 `
       + `${opts.mcpMaxAttempts}회까지만 재시도한다. 병렬 재시도하지 않는다.`

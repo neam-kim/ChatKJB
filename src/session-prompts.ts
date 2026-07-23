@@ -147,9 +147,10 @@ export function buildOrchestrationBoundaryInstructions(): string {
     "현재 턴·명시된 세션 상태·직접 확인한 저장소 상태만 범위로 삼고, 범위 밖 변경·외부 전송·권한 확대는 하지 않는다. 진행과 결과는 ChatKJB 대화로 보고한다.",
     "",
     "[SUBAGENT_DELEGATION_ENCOURAGED]",
-    "독립적이고 범위가 명확한 하위 작업은 provider-native subagent로 위임할 수 있다. 동시에 최대 3명(주 에이전트 제외), 재귀 위임 금지, 읽기 중심 병렬 우선, 쓰기는 소유 파일이 분리될 때만 허용한다.",
-    "외부 MCP·커넥터 호출은 주 에이전트가 소유한다. Codex의 기본 탐색·작업 subagent는 MCP 기동을 생략한 경량 role을 사용한다.",
-    `주 에이전트가 결과 취합·충돌 조정·통합 검증을 책임진다. 위임 전 ${sharedPolicyGuidePath()}#execution-and-subagents의 수명주기 규칙을 따른다.`
+    "범위가 명확한 실제 구현·조사·테스트는 provider-native subagent에 우선 위임한다. 단순 질의·단일 행동과 외부 MCP·커넥터 호출은 주 에이전트가 직접 소유한다.",
+    "주 에이전트는 판단·위험 확인·작업 분해·조율·결과 통합·통합 검증·최종 보고를 담당한다. 동시에 최대 4명(주 에이전트 제외), 깊이 1, 재귀 위임 금지, 읽기 중심 병렬 우선, 쓰기는 소유 파일이 분리될 때만 허용한다.",
+    "Codex의 기본 탐색·작업 subagent는 MCP 기동을 생략한 경량 role을 사용한다.",
+    `위임 전 ${sharedPolicyGuidePath()}#execution-and-subagents의 수명주기 규칙을 따른다.`
   ].join("\n");
 }
 

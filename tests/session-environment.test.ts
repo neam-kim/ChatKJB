@@ -9,15 +9,28 @@ import {
 } from "../src/session-environment.js";
 
 describe("codexSharedResourceConfig", () => {
-  it("enables native delegation with three direct child threads", () => {
+  it("enables native delegation with four direct child threads at depth one", () => {
     const config = codexSharedResourceConfig();
     expect(config).toMatchObject({
       features: { memories: true, multi_agent: true },
-      agents: { max_threads: 3, max_depth: 1 }
+      agents: { max_threads: 4, max_depth: 1 }
     });
     expect(config.agents.default.config_file).toContain("codex-agents/lite.toml");
     expect(config.agents.explorer.config_file).toBe(config.agents.default.config_file);
     expect(config.agents.worker.config_file).toBe(config.agents.default.config_file);
+  });
+
+  it("passes an explicitly selected model to Codex child agents", () => {
+    expect(codexSharedResourceConfig("gpt-5.4-mini").agents.default_subagent_model).toBe("gpt-5.4-mini");
+  });
+
+  it("registers Qwen as a dedicated MCP delegate instead of a native child model", () => {
+    const config = codexSharedResourceConfig("qwen3.8-max", "qwen3.8-max");
+    expect(config.agents.default_subagent_model).toBeUndefined();
+    expect(config.mcp_servers?.chatkjb_qwen_subagent).toMatchObject({
+      command: process.execPath,
+      env: { CHATKJB_QWEN_SUBAGENT_MODEL: "qwen3.8-max" }
+    });
   });
 });
 

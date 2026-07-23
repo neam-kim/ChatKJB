@@ -28,7 +28,8 @@ afterEach(() => {
 
 async function loadFromEnvironmentFile(
   lines: readonly string[],
-  mode = 0o600
+  mode = 0o600,
+  prepare?: (directory: string) => void
 ) {
   const directory = mkdtempSync(join(tmpdir(), "chatkjb-gui-config-"));
   directories.push(directory);
@@ -41,6 +42,7 @@ async function loadFromEnvironmentFile(
     CHATKJB_PROJECT_DIR: directory,
     CHATKJB_ENV_PATH: envPath
   };
+  prepare?.(directory);
   const { loadTelegramGuiConfig } = await import("../src/config.js");
   return { config: loadTelegramGuiConfig(), directory, envPath };
 }
@@ -245,6 +247,25 @@ describe("Telegram GUI configuration", () => {
       preferDaemonClaudeCache: false,
       usageCachePaths: expect.any(Array),
       usageCacheUrls: expect.any(Array)
+    });
+  });
+
+  it("uses daemon cache even when the bot database exists on the same Mac", async () => {
+    let dataDirectory = "";
+    const { config } = await loadFromEnvironmentFile(
+      requiredEnvironment(),
+      0o600,
+      (directory) => {
+        dataDirectory = join(directory, "data");
+        mkdirSync(dataDirectory, { recursive: true });
+        writeFileSync(join(dataDirectory, "state.sqlite"), "database canary\n", { mode: 0o600 });
+      }
+    );
+
+    await expect(config).resolves.toMatchObject({
+      databasePath: join(dataDirectory, "state.sqlite"),
+      usageSourceMode: "daemon-cache",
+      preferDaemonClaudeCache: false
     });
   });
 });

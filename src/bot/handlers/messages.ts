@@ -1,5 +1,6 @@
 import { Bot } from "grammy";
 import { clineModelsForProvider } from "../../cline-sdk.js";
+import { refreshAlibabaTokenPlanModels } from "../../model-catalog.js";
 import type { ProjectConfig } from "../../types.js";
 import { safeErrorMessage } from "../../telegram-transport.js";
 import type { BotDeps } from "../deps.js";
@@ -12,6 +13,7 @@ import {
   defaultsModelKeyboard,
   defaultsProviderKeyboard,
   defaultsReasoningKeyboard,
+  defaultsSubagentModelKeyboard,
   defaultsSummary,
   defaultsTokenKeyboard
 } from "../keyboards.js";
@@ -151,6 +153,29 @@ export function registerMessageHandlers(bot: Bot, deps: BotDeps): void {
     }
     await ctx.reply("새 세션 기본 Claude 작업량을 선택하세요. (thinking과 별개 축)", {
       reply_markup: defaultsEffortKeyboard(defaults, config.modelCatalog)
+    });
+  });
+
+  bot.hears(/^🧑‍💻 서브에이전트/, async (ctx) => {
+    const defaults = store.getSessionDefaults();
+    if (defaults.provider !== "claude" && defaults.provider !== "codex") {
+      await ctx.reply("서브에이전트 모델은 Claude 또는 Codex 새 세션에서만 설정할 수 있습니다.", {
+        reply_markup: defaultPanelKeyboard(defaults)
+      });
+      return;
+    }
+    if ((defaults.provider === "claude" || defaults.provider === "codex") && config.alibabaTokenPlan) {
+      try {
+        config.modelCatalog = await refreshAlibabaTokenPlanModels(
+          config.modelCatalog,
+          config.alibabaTokenPlan
+        );
+      } catch {
+        // 네트워크 일시 실패 때도 마지막으로 감지한 목록과 Claude 기본 선택지는 계속 제공한다.
+      }
+    }
+    await ctx.reply(`새 ${providerDisplayLabel(defaults.provider)} 세션의 서브에이전트 모델을 선택하세요.`, {
+      reply_markup: defaultsSubagentModelKeyboard(defaults, config.modelCatalog)
     });
   });
 

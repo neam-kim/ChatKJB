@@ -22,6 +22,7 @@ import {
   requireCodexSubscriptionAuth
 } from "../../session-environment.js";
 import { buildProviderBootstrap, buildUserMessage } from "../../session-prompts.js";
+import { isQwenSubagentModel, QWEN_SUBAGENT_TOOL_NAME } from "../../qwen-subagent.js";
 import {
   isNoRolloutError,
   isRateLimitError,
@@ -117,13 +118,40 @@ const DEFAULT_DEPENDENCIES: CodexExecutorDependencies = {
 };
 
 /** 인증·공유 리소스·환경 설정을 한 번의 공통 경로로 구성한다. */
-export function createCodexClient(options: ExecutorOptions, codexHome: string): Codex {
+function isAlibabaTokenPlanModel(options: ExecutorOptions, model: string): boolean {
+  return Boolean(options.alibabaTokenPlan) && options.modelCatalog.codexModels.some((option) =>
+    option.source === "token-plan" && option.id.toLowerCase() === model.toLowerCase()
+  );
+}
+
+export function createCodexClient(
+  options: ExecutorOptions,
+  codexHome: string,
+  model: string,
+  subagentModel?: string | null
+): Codex {
   requireCodexSubscriptionAuth(codexHome);
   syncSharedResourcesCached();
+  const usesAlibabaTokenPlan = isAlibabaTokenPlanModel(options, model);
+  const alibaba = options.alibabaTokenPlan;
+  const qwenSubagent = isQwenSubagentModel(options.modelCatalog, subagentModel);
   return new Codex({
     ...(options.codexExecutable ? { codexPathOverride: options.codexExecutable } : {}),
     env: buildCodexEnvironment(codexHome),
-    config: codexSharedResourceConfig()
+    config: {
+      ...codexSharedResourceConfig(subagentModel, qwenSubagent ? subagentModel : null),
+      ...(usesAlibabaTokenPlan && alibaba ? {
+        model_provider: "alibaba_token_plan",
+        model_providers: {
+          alibaba_token_plan: {
+            name: "Alibaba Cloud Model Studio Token Plan",
+            base_url: alibaba.baseUrl,
+            env_key: "DASHSCOPE_API_KEY",
+            wire_api: "chat"
+          }
+        }
+      } : {})
+    }
   });
 }
 
@@ -268,7 +296,12 @@ export class CodexExecutor {
     const codexModel = ctx.session.codexModel ?? DEFAULT_CODEX_MODEL;
     const codexReasoning =
       (ctx.session.codexReasoning as CodexReasoningEffort | null) ?? DEFAULT_CODEX_REASONING;
-    const codex = this.dependencies.createClient(this.host.options, ctx.codexHome);
+    const codex = this.dependencies.createClient(
+      this.host.options,
+      ctx.codexHome,
+      codexModel,
+      ctx.session.subagentModel
+    );
     const threadOptions = buildCodexThreadOptions(
       ctx.session,
       codexModel,
@@ -284,8 +317,19 @@ export class CodexExecutor {
     // native thread에는 첫 ChatKJB 턴에서만 정적 harness를 넣는다. 재개 thread는 이미
     // 같은 내용을 대화 기록에 보유하므로 매 execute마다 다시 넣지 않는다.
     const firstTurn = ctx.codexThreadId === null;
+    const qwenSubagent = isQwenSubagentModel(
+      this.host.options.modelCatalog,
+      ctx.session.subagentModel
+    );
     const bootstrap = firstTurn
-      ? buildProviderBootstrap(ctx.session, this.host.options.claudeMemoryDir)
+      ? buildProviderBootstrap(ctx.session, this.host.options.claudeMemoryDir, {
+        prefixSections: qwenSubagent
+          ? [
+            `Qwen 하위 작업은 반드시 ${QWEN_SUBAGENT_TOOL_NAME} 도구로 위임하십시오. `
+            + "요청을 작고 독립적으로 나누고, 필요한 파일 내용과 조사 결과를 context에 함께 전달한 뒤 응답을 직접 검증·통합하십시오."
+          ]
+          : []
+      })
       : "";
     const iterator = ctx.input[Symbol.asyncIterator]();
     const pending = await iterator.next();

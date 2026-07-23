@@ -16,16 +16,6 @@ import {
 } from "./connectors.js";
 import { seedClineConnection } from "./cline-sdk.js";
 import { runGrokCli } from "./grok-cli.js";
-import {
-  buildJudgePrompt,
-  buildPeerCritiquePrompt,
-  buildRevisionPrompt,
-  buildSynthesisPrompt,
-  parseJudgeResponse,
-  type JudgeCandidate,
-  type JudgeVerdict,
-  type SynthCritique
-} from "./judge.js";
 import { appLocale, appTimeZone } from "./localization.js";
 import {
   DEFAULT_CLAUDE_MODEL,
@@ -33,7 +23,6 @@ import {
   DEFAULT_CODEX_REASONING,
   DEFAULT_GROK_MODEL,
   DEFAULT_GROK_REASONING,
-  latestClaudeFableModel,
   normalizeThinkingForModel,
   type CodexReasoningEffort
 } from "./model-catalog.js";
@@ -90,6 +79,11 @@ import {
 import { executeGrok as executeGrokProvider } from "./session/executors/grok.js";
 import { ClineExecutor } from "./session/executors/cline.js";
 import { isCodexUsageSnapshot } from "./session/provider-progress.js";
+import {
+  synthesizeProviderResponses,
+  type ReadOnlyExecutionOptions,
+  type SynthesisResult
+} from "./session/synthesis.js";
 import { StateStore } from "./store.js";
 import { safeErrorMessage } from "./telegram-transport.js";
 import { TokenPool } from "./token-pool.js";
@@ -149,16 +143,6 @@ export { parseGrokTranscript } from "./session/executors/grok.js";
 // 한도 초기화 직후의 미세한 시계 오차로 또 거부당하는 것을 막는다.
 const LIMIT_RESUME_BUFFER_MS = 10_000;
 const CODEX_LIVE_USAGE_FALLBACK_BACKOFF_MS = 60 * 60 * 1000;
-// /synth 다중후보 판관은 시작 시 Claude SDK에서 만든 동적 모델 카탈로그의 최신 Fable을 쓴다.
-// Fable 판관이 없거나 실패하면 다른 모델로 바꾸지 않고 첫 후보를 그대로 채택한다.
-const SYNTH_JUDGE_CLAUDE_THINKING = "high";
-
-const SYNTH_JUDGE_CLAUDE_EFFORT = "high";
-// /synth는 인증된 제공자들을 동시에 띄운다. SDK/CLI 초기화(모듈 동적 import + 서브프로세스
-// spawn)가 같은 순간에 겹치면 저수준 read 실패(errno 11)·fd 스파이크로 데몬이 내려간 정황이
-// 있었다. 시작을 이 간격만큼 어긋나게 해 초기화 버스트를 분산한다. 정상 대기 구간은 여전히
-// 병렬이므로 전체 지연은 (가장 느린 제공자 + 2×간격) 수준에 그친다.
-const SYNTH_PROVIDER_STAGGER_MS = 400;
 const CODEX_ACCOUNT_STATE_SETTING = "codex.accountState.v1";
 const CLAUDE_TOKEN_STATE_SETTING = "claude.tokenState.v1";
 export const CLAUDE_MODEL = DEFAULT_CLAUDE_MODEL;
@@ -209,28 +193,7 @@ export type InitialSessionPrompt = string | ((session: SessionRecord) => string)
 
 export type GoalSetResult = "active" | "stored" | "native" | "unsupported";
 
-export interface SynthesisResult {
-  ok: boolean;
-  reason?: string;
-  // 최종 종합 답변(ok일 때).
-  answer?: string;
-  // 후보로 실제 응답한 provider들.
-  candidates?: ProviderKind[];
-  // 심사 결과(투명성). 단일 후보면 생략될 수 있다.
-  verdict?: JudgeVerdict;
-  // 종합자로 쓴 provider.
-  synthesizedBy?: ProviderKind;
-}
-
-interface SilentReadOnlyOptions {
-  claudeModelOverride?: string;
-  claudeThinkingOverride?: string;
-  claudeEffortOverride?: string;
-  codexModelOverride?: string;
-  codexReasoningOverride?: CodexReasoningEffort;
-  timeoutMs?: number;
-  toolFree?: boolean;
-}
+export type { ReadOnlyExecutionOptions, SynthesisResult } from "./session/synthesis.js";
 
 interface OneOffTaskOptions {
   provider: ProviderKind;
@@ -470,7 +433,8 @@ export class SessionManager {
     clineProviderId?: string | null,
     clineModel?: string | null,
     clineReasoning?: string | null,
-    permissionMode?: SessionRecord["permissionMode"] | null
+    permissionMode?: SessionRecord["permissionMode"] | null,
+    subagentModel?: string | null
   ): SessionRecord {
     if (this.disposed) throw new Error("세션 관리자가 종료되어 새 세션을 만들 수 없습니다.");
     const selectedProvider = provider ?? this.defaultProvider();
@@ -495,6 +459,7 @@ export class SessionManager {
       claudeTokenIndex: claudeTokenIndex ?? null,
       codexModel: codexModel ?? null,
       codexReasoning: codexReasoning ?? null,
+      subagentModel: subagentModel ?? null,
       codexHome: codexHome ?? null,
       codexThreadId: null,
       agyModel: agyModel ?? null,
@@ -782,8 +747,8 @@ export class SessionManager {
         const codexHome = this.selectCodexHome(session);
         if (tried.has(codexHome)) break;
         tried.add(codexHome);
-        const codex = createCodexClient(this.options, codexHome);
         const model = session.codexModel ?? DEFAULT_CODEX_MODEL;
+        const codex = createCodexClient(this.options, codexHome, model);
         const reasoning =
           (session.codexReasoning as CodexReasoningEffort | null) ?? DEFAULT_CODEX_REASONING;
         const thread = codex.startThread(
@@ -1542,7 +1507,6 @@ export class SessionManager {
         this.store.updateSession(session.id, {
           agyConversationId: null,
           agyUsage: null,
-          grokUsage: null,
           handoffSummary: null
         });
       } else if (session.provider === "cline") {
@@ -1556,6 +1520,7 @@ export class SessionManager {
         // grok(및 그 외): grok 세션 마커를 비워 다음 턴이 새 grok 세션을 만들게 한다.
         this.store.updateSession(session.id, {
           grokSessionId: null,
+          grokUsage: null,
           handoffSummary: null
         });
       }
@@ -1630,12 +1595,13 @@ export class SessionManager {
     // Codex: 직전 스레드를 재개해 비스트리밍으로 요약 한 턴을 받는다.
     if (!session.codexThreadId) return "";
     const codexHome = this.selectCodexHome(session);
-    const codex = createCodexClient(this.options, codexHome);
+    const codexModel = session.codexModel ?? DEFAULT_CODEX_MODEL;
+    const codex = createCodexClient(this.options, codexHome, codexModel);
     const thread = codex.resumeThread(
       session.codexThreadId,
       buildCodexThreadOptions(
         session,
-        session.codexModel ?? DEFAULT_CODEX_MODEL,
+        codexModel,
         (session.codexReasoning as CodexReasoningEffort | null) ?? DEFAULT_CODEX_REASONING,
         "plan",
         false
@@ -2048,174 +2014,24 @@ export class SessionManager {
     return text;
   }
 
-  // ── 다단계 병렬 종합 ─────────────────────────────────────────────────────
-  // 같은 작업을 인증된 제공자들에 읽기 전용으로 동시에 시킨다(파일 충돌 없음). Claude
-  // OAuth가 있으면 동적으로 감지한 최신 Fable 심사자가 가장 나은 답을 고른다. 단, 바로 승자를 정하지 않고 먼저
-  // 각 provider가 서로의 원답을 비판하고, 원 provider가 자기 답을 보완한 뒤 승점제
-  // 리그 방식으로 재심사한다.
-  // 마지막에는 승자 provider가 다른 보완 후보의 더 나은 부분을 통합해 최종답을 만든다.
-  // /synth 명령으로만 호출되는 비싼 경로다.
+  // /synth의 세션 동시 실행 여부만 관리하고, 후보 수집·비평·심사·통합은 전용 모듈에 맡긴다.
   async runSynthesis(session: SessionRecord, prompt: string): Promise<SynthesisResult> {
     if (this.active.has(session.id)) {
       return { ok: false, reason: "실행 중에는 병렬 종합을 시작할 수 없습니다. 작업 완료 또는 /stop 후 다시 시도하세요." };
     }
-    const providers = (["claude", "codex", "agy", "grok", "cline"] as const)
-      .filter((provider): provider is ProviderKind => this.isProviderAvailable(provider));
-    // 인증된 제공자들을 동시에 시작하되 초기화 버스트만 SYNTH_PROVIDER_STAGGER_MS 간격으로 어긋나게
-    // 한다(동시 모듈 로딩·spawn 스파이크로 인한 errno 11 크래시 완화). 일단 시작된 뒤의 대기는
-    // 병렬로 진행된다.
-    const settled = await Promise.allSettled(
-      providers.map(async (provider, index) => {
-        if (index > 0) {
-          await new Promise<void>((resolve) =>
-            setTimeout(resolve, index * SYNTH_PROVIDER_STAGGER_MS));
+    return synthesizeProviderResponses(
+      {
+        modelCatalog: this.options.modelCatalog,
+        isProviderAvailable: (provider) => this.isProviderAvailable(provider),
+        executeReadOnly: (targetSession, provider, targetPrompt, options) =>
+          this.runSilentReadOnly(targetSession, provider, targetPrompt, options),
+        reportError: (context, error) => {
+          console.error(`${context}:`, safeErrorMessage(error, this.oauthTokens));
         }
-        return this.runSilentReadOnly(session, provider, prompt);
-      })
+      },
+      session,
+      prompt
     );
-    const candidates: JudgeCandidate[] = [];
-    for (const [index, result] of settled.entries()) {
-      if (result.status === "fulfilled" && result.value.trim()) {
-        candidates.push({ provider: providers[index]!, text: result.value.trim() });
-      }
-    }
-
-    if (candidates.length === 0) {
-      return { ok: false, reason: "후보 제공자가 모두 응답하지 못했습니다." };
-    }
-    const candidateProviders = candidates.map((c) => c.provider);
-
-    // 후보가 하나뿐이면 심사·종합 없이 그대로 반환한다.
-    if (candidates.length === 1) {
-      return {
-        ok: true,
-        answer: candidates[0]!.text,
-        candidates: candidateProviders,
-        synthesizedBy: candidates[0]!.provider
-      };
-    }
-
-    const critiques = await this.collectPeerCritiques(session, prompt, candidates);
-    const revisedCandidates = await this.reviseCandidates(session, prompt, candidates, critiques);
-    const judgedCandidates = revisedCandidates.length >= 2 ? revisedCandidates : candidates;
-    const judgedProviders = judgedCandidates.map((c) => c.provider);
-
-    const verdict = await this.judgeCandidates(session, prompt, judgedCandidates);
-    const winner = judgedCandidates[verdict.winner - 1] ?? judgedCandidates[0]!;
-
-    // 승자 기반 통합: 승자 provider에게 후보들을 주고 최종본을 합치게 한다(읽기 전용).
-    const synthPrompt = buildSynthesisPrompt(prompt, judgedCandidates, verdict);
-    let answer = winner.text;
-    try {
-      answer = (await this.runSilentReadOnly(session, winner.provider, synthPrompt)).trim() || winner.text;
-    } catch (error) {
-      // 종합 실패 시 승자 답을 그대로 쓴다(품질은 낮아도 답은 보존).
-      console.error("Synthesis merge failed:", safeErrorMessage(error, this.oauthTokens));
-    }
-
-    return {
-      ok: true,
-      answer,
-      candidates: judgedProviders,
-      verdict,
-      synthesizedBy: winner.provider
-    };
-  }
-
-  private async collectPeerCritiques(
-    session: SessionRecord,
-    question: string,
-    candidates: JudgeCandidate[]
-  ): Promise<SynthCritique[]> {
-    const settled = await Promise.allSettled(
-      candidates.map(async (candidate, index) => {
-        if (index > 0) {
-          await new Promise<void>((resolve) =>
-            setTimeout(resolve, index * SYNTH_PROVIDER_STAGGER_MS));
-        }
-        const critiquePrompt = buildPeerCritiquePrompt(question, candidates, candidate.provider);
-        return {
-          provider: candidate.provider,
-          text: (await this.runSilentReadOnly(session, candidate.provider, critiquePrompt)).trim()
-        };
-      })
-    );
-    const critiques: SynthCritique[] = [];
-    for (const result of settled) {
-      if (result.status === "fulfilled" && result.value.text) {
-        critiques.push(result.value);
-      }
-    }
-    return critiques;
-  }
-
-  private async reviseCandidates(
-    session: SessionRecord,
-    question: string,
-    candidates: JudgeCandidate[],
-    critiques: SynthCritique[]
-  ): Promise<JudgeCandidate[]> {
-    if (critiques.length === 0) return [];
-    const settled = await Promise.allSettled(
-      candidates.map(async (candidate, index) => {
-        if (index > 0) {
-          await new Promise<void>((resolve) =>
-            setTimeout(resolve, index * SYNTH_PROVIDER_STAGGER_MS));
-        }
-        const revisionPrompt = buildRevisionPrompt(question, candidate, candidates, critiques);
-        return {
-          provider: candidate.provider,
-          text: (await this.runSilentReadOnly(session, candidate.provider, revisionPrompt)).trim()
-        };
-      })
-    );
-    const revised: JudgeCandidate[] = [];
-    for (const result of settled) {
-      if (result.status === "fulfilled" && result.value.text) {
-        revised.push(result.value);
-      }
-    }
-    return revised;
-  }
-
-  // 후보들을 승점제 리그 방식으로 심사한다. 최신 Claude Fable이 없거나 실패하면 1번 후보.
-  private async judgeCandidates(
-    session: SessionRecord,
-    question: string,
-    candidates: JudgeCandidate[]
-  ): Promise<JudgeVerdict> {
-    const judgePrompt = buildJudgePrompt(question, candidates);
-
-    const fable = this.isProviderAvailable("claude")
-      ? latestClaudeFableModel(this.options.modelCatalog)
-      : undefined;
-    if (fable) {
-      try {
-        // Fable 판관도 runSilentReadOnly를 통해 토큰을 회전한다: 한 토큰이 한도여도
-        // 살아있는 다른 토큰이 있으면 첫 후보 폴백 대신 정상 심사를 마친다.
-        const text = await this.runSilentReadOnly(session, "claude", judgePrompt, {
-          claudeModelOverride: fable.id,
-          claudeThinkingOverride: SYNTH_JUDGE_CLAUDE_THINKING,
-          claudeEffortOverride: SYNTH_JUDGE_CLAUDE_EFFORT
-        });
-        const parsed = parseJudgeResponse(text, candidates.length);
-        if (parsed) return { ...parsed, judge: "claude", judgeModel: fable.id };
-      } catch (error) {
-        console.error(`Claude Fable synthesis judge failed (${fable.id}):`, safeErrorMessage(error, this.oauthTokens));
-      }
-    }
-
-    // Fable 판정이 실패하면 다른 모델로 폴백하지 않고
-    // 첫 후보를 그대로 채택한다(투명성을 위해 judge: "fallback"으로 표기).
-    return {
-      winner: 1,
-      reason: fable
-        ? `승점제 심사자(${fable.label})를 사용할 수 없어 첫 후보를 선택했습니다.`
-        : this.isProviderAvailable("claude")
-          ? "Claude 모델 카탈로그에서 Fable을 찾지 못해 첫 후보를 선택했습니다."
-          : "Claude OAuth가 없어 Claude 전용 심사를 건너뛰고 첫 후보를 선택했습니다.",
-      judge: "fallback"
-    };
   }
 
   // provider 하나에 같은 프롬프트를 읽기 전용·새 맥락으로 1회 실행해 최종 텍스트만 받는다.
@@ -2224,7 +2040,7 @@ export class SessionManager {
     session: SessionRecord,
     provider: ProviderKind,
     prompt: string,
-    options: SilentReadOnlyOptions = {}
+    options: ReadOnlyExecutionOptions = {}
   ): Promise<string> {
     if (!this.isProviderAvailable(provider)) {
       throw new Error(`${provider} 제공자는 인증되지 않아 사용할 수 없습니다.`);
@@ -2296,9 +2112,9 @@ export class SessionManager {
         tried.add(codexHome);
         let isolated: ReturnType<SessionManager["createToolFreeCodexClient"]> | null = null;
         try {
-          isolated = options.toolFree ? this.createToolFreeCodexClient(codexHome) : null;
-          const codex = isolated?.codex ?? createCodexClient(this.options, codexHome);
           const model = options.codexModelOverride ?? session.codexModel ?? DEFAULT_CODEX_MODEL;
+          isolated = options.toolFree ? this.createToolFreeCodexClient(codexHome) : null;
+          const codex = isolated?.codex ?? createCodexClient(this.options, codexHome, model);
           const reasoning = options.codexReasoningOverride
             ?? (session.codexReasoning as CodexReasoningEffort | null)
             ?? DEFAULT_CODEX_REASONING;

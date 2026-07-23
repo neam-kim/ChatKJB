@@ -99,6 +99,12 @@ const environmentSchema = z.object({
   MCP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
   // 여러 Codex ChatGPT 계정의 CODEX_HOME 디렉터리(CSV, 절대경로). 비어 있으면 단일 계정.
   CODEX_ACCOUNT_HOMES: z.string().optional(),
+  // Alibaba Cloud Model Studio Token Plan (OpenAI-compatible Codex custom provider).
+  DASHSCOPE_API_KEY: z.string().trim().min(1).optional(),
+  DASHSCOPE_BASE_URL: z.string().url().default(
+    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+  ),
+  DASHSCOPE_MODEL: z.string().trim().min(1).default("qwen3.8-max"),
   CODEX_MCP_TIMEOUT_MINUTES: z.coerce.number().int().min(1).default(30),
   // 0이면 provider 턴의 절대 시간 제한을 두지 않는다.
   PROVIDER_TURN_TIMEOUT_MINUTES: z.coerce.number().int().min(0).default(0),
@@ -570,12 +576,11 @@ export async function loadTelegramGuiConfig() {
     ? absolutePath(process.env.CODEX_HOME)
     : join(homedir(), ".codex");
 
-  // 봇 프로젝트·DB 가 이 Mac 에 있으면 데몬 호스트(로컬 조회). 없으면 다른 Mac 의
-  // Terminal 이므로 데몬이 게시한 공유 캐시만 읽어 **데몬 머신 사용량**을 표시한다.
+  // Terminal은 위치와 무관하게 데몬이 게시한 공유 캐시만 읽는다. 같은 Mac에서 local
+  // 모드를 쓰면 사용량 폴칭마다 Codex 계정별 app-server를 다시 띄워 UI와 시스템을
+  // 주기적으로 버벅이게 한다. 실제 provider 조회는 daemon-usage-publisher 한 곳만 맡는다.
   const botProjectDir = discoverBotProjectDir();
-  const usageSourceMode = botProjectDir && existsSync(databasePath)
-    ? "local" as const
-    : "daemon-cache" as const;
+  const usageSourceMode = "daemon-cache" as const;
   const usageCachePaths = discoverUsageCachePaths({ projectDir: botProjectDir });
   // 맥북처럼 NAS 미마운트 환경: Tailscale MagicDNS(neam-macmini 등) HTTP 후보.
   const usageCacheUrls = discoverUsageCacheUrls();
@@ -598,8 +603,8 @@ export async function loadTelegramGuiConfig() {
       codexFallbackHome
     ),
     usageSourceMode,
-    // GUI가 같은 Mac에서 실행되어도 Claude 웹 조회는 데몬 하나만 맡긴다.
-    preferDaemonClaudeCache: usageSourceMode === "local",
+    // daemon-cache 모드에서는 세 provider 모두 이미 데몬 값을 사용한다.
+    preferDaemonClaudeCache: false,
     usageCachePaths,
     usageCacheUrls,
     ...(usageHttpToken ? { usageHttpToken } : {})
@@ -666,6 +671,13 @@ export async function loadConfig() {
     claudeCodeOauthToken: claudeCodeOauthTokens[0],
     claudeCodeOauthTokens,
     codexAccountHomes,
+    ...(env.DASHSCOPE_API_KEY
+      ? { alibabaTokenPlan: {
+        apiKey: env.DASHSCOPE_API_KEY,
+        baseUrl: env.DASHSCOPE_BASE_URL.replace(/\/$/, ""),
+        defaultModel: env.DASHSCOPE_MODEL
+      } }
+      : {}),
     availableProviders,
     defaultProvider: availableProviders[0]!,
     modelCatalog,

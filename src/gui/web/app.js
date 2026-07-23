@@ -10,7 +10,7 @@ const GENERAL_TOPIC_ID = 1;
 export const GENERAL_PANEL_FALLBACK_ROWS = Object.freeze([
   Object.freeze(["⚙️ 새 세션 기본값", "🧠 모델"]),
   Object.freeze(["🤖 제공자", "💭 추론"]),
-  Object.freeze(["🛠️ 작업량", "🔑 토큰"])
+  Object.freeze(["🛠️ 작업량", "🧑‍💻 서브에이전트"])
 ]);
 
 export function shouldApplyGeneralPanelMessage(currentMessageId, candidateMessageId) {
@@ -99,10 +99,23 @@ export function remainingUsagePercent(utilization) {
   return Math.max(0, Math.min(100, 100 - Math.round(utilization)));
 }
 
-export function usageResetLabel(resetsAt) {
-  if (typeof resetsAt !== "string") return "초기화 시각 미상";
+export function usageResetLabel(resetsAt, checkedAt = null) {
+  const checkedAtLabel = () => {
+    if (!Number.isFinite(checkedAt)) return "초기화 시각 미상";
+    const formatted = new Intl.DateTimeFormat("ko-KR", {
+      timeZone: "Asia/Seoul",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(new Date(checkedAt));
+    return `초기화 시각 미상 · 확인 ${formatted}`;
+  };
+  if (typeof resetsAt !== "string") return checkedAtLabel();
   const timestamp = Date.parse(resetsAt);
-  if (Number.isNaN(timestamp)) return "초기화 시각 미상";
+  if (Number.isNaN(timestamp)) return checkedAtLabel();
   const formatted = new Intl.DateTimeFormat("ko-KR", {
     timeZone: "Asia/Seoul",
     year: "numeric",
@@ -465,7 +478,7 @@ function startApplication() {
     };
   }
 
-  function usageCell(label, window, unknownText = "—") {
+  function usageCell(label, window, unknownText = "—", checkedAt = null) {
     const cell = document.createElement("span");
     cell.className = "usage-cell";
     const value = usageWindowHasMeasurement(window)
@@ -475,7 +488,7 @@ function startApplication() {
     summary.textContent = `${label} ${value}`;
     const reset = document.createElement("span");
     reset.className = "usage-reset";
-    reset.textContent = usageResetLabel(window?.resetsAt);
+    reset.textContent = usageResetLabel(window?.resetsAt, checkedAt);
     cell.append(summary, reset);
     if (!usageWindowHasMeasurement(window)) cell.classList.add("usage-unknown");
     return cell;
@@ -543,7 +556,10 @@ function startApplication() {
       ]);
     });
     strip.replaceChildren(
-      usageLine("Claude", [usageCell("5h", claude.fiveHour), usageCell("1w", claude.sevenDay)], claudeNotes),
+      usageLine("Claude", [
+        usageCell("5h", claude.fiveHour, "—", claude.capturedAt),
+        usageCell("1w", claude.sevenDay, "—", claude.capturedAt)
+      ], claudeNotes),
       ...codexLines,
       usageLine("Grok", [
         usageCell("주간", grok.weekly, grok.weeklyReceived ? "—" : "미수신"),

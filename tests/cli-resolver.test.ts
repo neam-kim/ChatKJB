@@ -47,4 +47,19 @@ describe("CLI resolver", () => {
       env: { PATH: "" }
     })).toBe("missing-tool");
   });
+
+  it("finds provider CLIs in the Node bin recorded by the LaunchAgent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "chatkjb-cli-node-bin-"));
+    const candidate = join(dir, "provider-cli");
+    writeFileSync(candidate, "#!/bin/sh\nexit 0\n");
+    chmodSync(candidate, 0o755);
+
+    expect(resolveCliExecutable({
+      binaryName: "provider-cli",
+      env: {
+        PATH: "/usr/bin:/bin",
+        CHATKJB_NODE_BIN: dir
+      }
+    })).toBe(candidate);
+  });
 });

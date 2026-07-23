@@ -34,6 +34,7 @@ import {
 } from "./cline-snapshots.js";
 import { providerDisplayLabel } from "./formatting.js";
 import { selectedClaudeTokenIndex, selectedCodexAccountIndex } from "./pending-keys.js";
+import { claudeSubagentModelOptions, codexSubagentModelOptions } from "../qwen-subagent.js";
 
 export function driveListText(): string {
   return "드라이브를 선택하세요.";
@@ -167,10 +168,19 @@ function defaultsKeyboard(
         : defaults.provider === "cline"
           ? `💭 추론: ${clineReasoningLabel(defaults.clineReasoning)}`
         : `💭 thinking: ${defaults.thinking === "off" ? "off" : "on"}`;
-  // 5번째 슬롯: Claude는 작업량(effort)을 thinking과 별개 축으로 토글한다.
-  // Codex·agy는 추론 강도(💭)가 작업량을 겸하므로 추가로 고를 게 없어 예약('-') 처리한다.
+  const subagentLabel = defaults.subagentModel
+    ? (defaults.provider === "codex"
+      ? codexSubagentModelOptions(catalog).find((option) => option.id === defaults.subagentModel)?.label
+        ?? codexModelLabel(catalog, defaults.subagentModel)
+      : claudeSubagentModelOptions(catalog).find((option) => option.id === defaults.subagentModel)?.label
+        ?? modelLabel(catalog, defaults.subagentModel))
+    : "기본 상속";
+  // 5번째 슬롯: Codex의 예약 칸은 하위 에이전트 모델 선택에 사용한다.
+  // Claude는 기존 작업량(effort) 버튼을 유지한다.
   const fifth = defaults.provider === "claude"
     ? `🛠️ 작업량: ${claudeEffortLabel(defaults.claudeEffort)}`
+    : defaults.provider === "codex"
+      ? `🧑‍💻 서브에이전트: ${subagentLabel}`
     : defaults.provider === "cline"
       ? `🔌 Cline 제공자: ${clineProviderOption(catalog, defaults.clineProviderId)?.label ?? "감지 없음"}`
       : RESERVED_SLOT_LABEL;
@@ -178,6 +188,7 @@ function defaultsKeyboard(
   const claudeTokenIndex = selectedClaudeTokenIndex(defaults.claudeTokenIndex, claudeTokenCount);
   // 6번째 슬롯: Claude/Codex는 토큰이 여러 개라 토큰 선택 버튼을 둔다.
   // Cline은 토큰이 단수라 이 자리가 남으므로 Plan↔Act 토글 버튼을 배치한다(user 지시).
+  // Claude는 토큰이 하나일 때 남는 칸에 하위 에이전트 모델 선택을 둔다.
   // 그 외(agy/grok)는 예약 슬롯.
   const sixth = defaults.provider === "cline"
     ? clineDefaultModeLabel(defaults.defaultPermissionMode)
@@ -185,8 +196,10 @@ function defaultsKeyboard(
       ? `🔑 토큰: #${codexAccountIndex + 1}`
       : defaults.provider === "claude" && claudeTokenCount > 1 && claudeTokenIndex >= 0
         ? `🔑 토큰: #${claudeTokenIndex + 1}`
+        : defaults.provider === "claude"
+          ? `🧑‍💻 서브에이전트: ${subagentLabel}`
         : RESERVED_SLOT_LABEL;
-  return new Keyboard()
+  const keyboard = new Keyboard()
     .text("⚙️ 새 세션 기본값")
     .text(`🧠 모델: ${modelText}`)
     .row()
@@ -197,6 +210,12 @@ function defaultsKeyboard(
     .text(sixth)
     .resized()
     .persistent();
+  // Claude 계정이 여러 개이면 여섯 번째 슬롯은 토큰 선택에 쓰인다. 이때도 Qwen MCP
+  // 서브에이전트 선택이 숨지 않도록 별도 행을 추가한다.
+  if (defaults.provider === "claude" && claudeTokenCount > 1) {
+    keyboard.row().text(`🧑‍💻 서브에이전트: ${subagentLabel}`);
+  }
+  return keyboard;
 }
 
 // 기본값 패널의 모델 선택용 인라인 키보드(제공자별). setm:<provider>:<id>
@@ -213,6 +232,20 @@ function defaultsModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog)
         : catalog.claudeModels.map((option) => ({ id: option.id, label: option.label }));
   for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `setm:${defaults.provider}:${option.id}`);
+    if (index < options.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+// 새 세션 기본값 패널: Claude/Codex 하위 에이전트 모델. setsa:<provider>:<id|inherit>
+function defaultsSubagentModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const options = defaults.provider === "codex"
+    ? codexSubagentModelOptions(catalog)
+    : claudeSubagentModelOptions(catalog);
+  keyboard.text(`${defaults.subagentModel ? "모델 기본값 상속" : "✅ 모델 기본값 상속"}`, `setsa:${defaults.provider}:inherit`).row();
+  for (const [index, option] of options.entries()) {
+    keyboard.text(`${option.id === defaults.subagentModel ? "✅ " : ""}${option.label}`, `setsa:${defaults.provider}:${option.id}`);
     if (index < options.length - 1) keyboard.row();
   }
   return keyboard;
@@ -431,6 +464,7 @@ export {
   defaultsEffortKeyboard,
   defaultsKeyboard,
   defaultsModelKeyboard,
+  defaultsSubagentModelKeyboard,
   defaultsProviderKeyboard,
   defaultsReasoningKeyboard,
   defaultsSummary,

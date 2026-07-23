@@ -9,8 +9,11 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type {
   GuiClaudeUsageDto,
@@ -322,11 +325,23 @@ export function writeDaemonUsageCache(
   const written: string[] = [];
   const failed: string[] = [];
   for (const path of paths) {
+    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, body, { encoding: "utf8", mode: 0o600 });
+      // 독자가 잘린 JSON을 보지 않도록 같은 디렉터리에 완성본을 쓴 뒤 원자적으로 교체한다.
+      writeFileSync(temporaryPath, body, {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx"
+      });
+      renameSync(temporaryPath, path);
       written.push(path);
     } catch {
+      try {
+        unlinkSync(temporaryPath);
+      } catch {
+        // 임시 파일이 생성되지 않았거나 이미 rename된 경우.
+      }
       failed.push(path);
     }
   }

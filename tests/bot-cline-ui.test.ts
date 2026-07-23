@@ -275,6 +275,23 @@ describe("Cline bot configuration UI", () => {
       .toBe(true);
   });
 
+  it("shows the subagent model button in the available Claude and Codex slots", () => {
+    const catalog = clineCatalog(1, 1);
+    const labelOf = (value: unknown) => typeof value === "string" ? value : (value as { text?: string } | undefined)?.text ?? "";
+    const claude = defaultsKeyboard({ ...defaultsFor(catalog), provider: "claude" }, catalog).build();
+    const codex = defaultsKeyboard({ ...defaultsFor(catalog), provider: "codex" }, catalog).build();
+    expect(labelOf(claude[2]?.[1])).toContain("🧑‍💻 서브에이전트");
+    expect(labelOf(codex[2]?.[0])).toContain("🧑‍💻 서브에이전트");
+  });
+
+  it("carries the selected subagent model only into Claude and Codex pending starts", () => {
+    const catalog = clineCatalog(1, 1);
+    const claude = pendingFieldsFromDefaults({ ...defaultsFor(catalog), provider: "claude", subagentModel: "claude" });
+    const codex = pendingFieldsFromDefaults({ ...defaultsFor(catalog), provider: "codex", subagentModel: "codex" });
+    expect(claude.subagentModel).toBe("claude");
+    expect(codex.subagentModel).toBe("codex");
+  });
+
   it("shows the Plan/Act toggle in the sixth slot for Cline defaults", () => {
     const catalog = clineCatalog(1, 1);
     const labelOf = (defaults: SessionDefaults): string => {

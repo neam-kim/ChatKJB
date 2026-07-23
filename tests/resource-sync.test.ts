@@ -206,7 +206,12 @@ describe("shared memory resource text", () => {
     expect(text).toContain("POLICIES.md section");
     expect(text).toContain("LLM-Wiki query flow");
     expect(text).toContain("native auto-memory fallback only if needed");
-    expect(policy).toContain("Never have more than 3 active subagents");
+    expect(policy).toContain("Never have more than 4 active subagents");
+    expect(policy).toContain("root session owns judgment, risk checks, work decomposition");
+    expect(policy).toContain("implementation, research, or testing");
+    expect(policy).toContain("Simple questions and single actions remain with the root session");
+    expect(policy).toContain("External MCP and connector calls remain with the root session");
+    expect(policy).toContain("depth-one/no-recursive-fan-out rule");
     expect(policy).toContain("Use frontmatter with `name`");
     expect(policy).toContain("Per-conversation Result Log");
     expect(policy).toContain("subagents must never create, append, rewrite, or delete a `.result.md` file");

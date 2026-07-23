@@ -26,6 +26,11 @@ export interface ExecutorOptions {
   additionalOauthTokens?: string[];
   availableProviders?: readonly ProviderKind[] | undefined;
   codexAccountHomes?: string[];
+  alibabaTokenPlan?: {
+    apiKey: string;
+    baseUrl: string;
+    defaultModel: string;
+  } | undefined;
   claudeCodeExecutable?: string;
   codexExecutable?: string;
   agyExecutable?: string | undefined;
