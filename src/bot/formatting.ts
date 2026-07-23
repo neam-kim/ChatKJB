@@ -166,5 +166,6 @@ export function providerDisplayLabel(provider: ProviderKind): string {
   if (provider === "agy") return "Antigravity";
   if (provider === "grok") return "Grok";
   if (provider === "cline") return "Cline";
+  if (provider === "qwen") return "Qwen";
   return "Claude";
 }

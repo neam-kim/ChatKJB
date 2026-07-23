@@ -51,6 +51,12 @@ describe("codexSharedResourceConfig", () => {
       env: { CHATKJB_QWEN_SUBAGENT_MODEL: "qwen3.8-max" }
     });
   });
+
+  it("scopes the Qwen MCP delegate to the session working directory when provided", () => {
+    const config = codexSharedResourceConfig("qwen3.8-max", "qwen3.8-max", null, "/Volumes/NEAM_SSD/ChatKJB");
+    expect(config.mcp_servers?.chatkjb_qwen_subagent.env)
+      .toMatchObject({ CHATKJB_QWEN_SUBAGENT_CWD: "/Volumes/NEAM_SSD/ChatKJB" });
+  });
 });
 
 describe("ensureCodexMcpConfigForHome", () => {

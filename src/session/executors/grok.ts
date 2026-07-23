@@ -110,7 +110,8 @@ export async function executeGrok(
     buildProviderBootstrap(session, host.options.claudeMemoryDir),
     ...(qwenSubagent && session.subagentModel ? [
       `이 세션의 하위 작업은 반드시 ${QWEN_SUBAGENT_SERVER_NAME}__delegate MCP 도구로 위임하십시오. `
-      + "네이티브 하위 에이전트는 비활성화되어 있으며, MCP 결과를 직접 검증·통합해야 합니다."
+      + "네이티브 하위 에이전트는 비활성화되어 있습니다. Qwen은 이 세션 작업 디렉터리 안에서 읽기 전용 파일 도구로 저장소를 직접 조사할 수 있으므로, "
+      + "Qwen이 스스로 읽을 수 없는 핵심 맥락만 context에 담고 MCP 결과를 직접 검증·통합해야 합니다."
     ] : []),
     buildGrokOutputInstructions()
   ].join("\n\n");

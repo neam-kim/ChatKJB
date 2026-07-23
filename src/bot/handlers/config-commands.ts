@@ -33,6 +33,7 @@ import {
   resolveCodexModel,
   resolveGrokModel,
   resolveModel,
+  refreshAlibabaTokenPlanModels,
   thinkingLabel,
   thinkingToggleOptionsForModel
 } from "../../model-catalog.js";
@@ -63,6 +64,7 @@ import {
   defaultsProviderKeyboard,
   defaultsSummary,
   grokModelKeyboard,
+  qwenModelKeyboard,
   modelKeyboard,
   parseMode,
   powerKeyboardForSession,
@@ -310,6 +312,16 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       return;
     }
     const input = ctx.match.trim();
+    if (session.provider === "qwen" && config.alibabaTokenPlan) {
+      try {
+        config.modelCatalog = await refreshAlibabaTokenPlanModels(
+          config.modelCatalog,
+          config.alibabaTokenPlan
+        );
+      } catch {
+        // 마지막으로 성공한 동적 목록을 유지해 일시적 네트워크 실패가 모델 선택을 막지 않게 한다.
+      }
+    }
     if (!input) {
       if (session.provider === "cline") {
         const provider = clineProviderOption(config.modelCatalog, session.clineProviderId);
@@ -347,6 +359,8 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
           ? `현재: Antigravity · ${agyModelLabel(config.modelCatalog, session.agyModel ?? DEFAULT_AGY_MODEL)}`
           : session.provider === "grok"
             ? `현재: Grok · ${grokModelLabel(config.modelCatalog, session.grokModel ?? DEFAULT_GROK_MODEL)}`
+            : session.provider === "qwen"
+              ? `현재: Qwen · ${session.qwenModel ?? config.alibabaTokenPlan?.defaultModel ?? "모델 없음"}`
             : `현재: Claude · ${modelLabel(config.modelCatalog, session.model ?? DEFAULT_CLAUDE_MODEL)}`;
       const modelBoard = session.provider === "codex"
         ? codexModelKeyboard(config.modelCatalog)
@@ -354,6 +368,8 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
           ? agyModelKeyboard(config.modelCatalog)
           : session.provider === "grok"
             ? grokModelKeyboard(config.modelCatalog)
+            : session.provider === "qwen"
+              ? qwenModelKeyboard(config.modelCatalog)
             : modelKeyboard(config.modelCatalog);
       await ctx.reply(
         `${current}\n모델을 바꾸려면 아래에서 선택하세요.`,
@@ -401,6 +417,16 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       }
       store.updateSession(session.id, { grokModel });
       await ctx.reply(`다음 실행부터 Grok ${grokModelLabel(config.modelCatalog, grokModel)} 모델을 사용합니다.`);
+      return;
+    }
+    if (session.provider === "qwen") {
+      const qwenModel = (config.modelCatalog.qwenModels ?? []).find((item) => item.id.toLowerCase() === input.toLowerCase())?.id;
+      if (!qwenModel) {
+        await ctx.reply("지원하지 않는 Qwen 모델입니다. /model 버튼의 모델을 사용하세요.");
+        return;
+      }
+      store.updateSession(session.id, { qwenModel, qwenReasoning: "off" });
+      await ctx.reply(`다음 실행부터 Qwen ${qwenModel} 모델을 사용합니다.`);
       return;
     }
     if (session.provider === "cline") {
@@ -782,7 +808,6 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       await ctx.reply(`다음 실행부터 Grok 추론 강도를 ${option.label}(으)로 사용합니다.`);
       return;
     }
-
     if (provider === "cline") {
       if (session.provider !== "cline") {
         await ctx.answerCallbackQuery({ text: "Cline 세션이 아닙니다.", show_alert: true });
@@ -881,7 +906,7 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
 
   bot.callbackQuery(/^mprov:/, async (ctx) => {
     const target = ctx.callbackQuery.data.slice("mprov:".length) as ProviderKind;
-    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "grok" && target !== "cline") {
+    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "grok" && target !== "cline" && target !== "qwen") {
       await ctx.answerCallbackQuery({ text: "알 수 없는 제공자입니다.", show_alert: true });
       return;
     }
@@ -919,6 +944,8 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
           ? `Grok · ${grokModelLabel(config.modelCatalog, updated?.grokModel ?? DEFAULT_GROK_MODEL)}`
           : target === "cline"
             ? `Cline · ${clineProviderOption(config.modelCatalog, updated?.clineProviderId)?.label ?? "감지 없음"} · ${clineModelOption(config.modelCatalog, updated?.clineProviderId, updated?.clineModel)?.label ?? "감지된 모델 없음"}`
+          : target === "qwen"
+            ? `Qwen · ${updated?.qwenModel ?? config.alibabaTokenPlan?.defaultModel ?? "모델 없음"}`
           : `Claude · ${modelLabel(config.modelCatalog, updated?.model ?? DEFAULT_CLAUDE_MODEL)}`;
     await ctx.reply(
       `제공자를 ${label}로 전환했습니다. 다음 메시지부터 새 제공자가 직전 작업 요약을 이어받아 진행합니다.`
@@ -929,7 +956,7 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
 
   bot.callbackQuery(/^dprov:/, async (ctx) => {
     const target = ctx.callbackQuery.data.slice("dprov:".length) as ProviderKind;
-    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "grok" && target !== "cline") {
+    if (target !== "claude" && target !== "codex" && target !== "agy" && target !== "grok" && target !== "cline" && target !== "qwen") {
       await ctx.answerCallbackQuery();
       return;
     }
@@ -1028,6 +1055,24 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
     store.updateSession(session.id, { grokModel: option.id });
     await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
     await ctx.reply(`다음 실행부터 Grok ${option.label} 모델을 사용합니다.`);
+  });
+
+  bot.callbackQuery(/^qmodel:/, async (ctx) => {
+    const modelId = ctx.callbackQuery.data.slice("qmodel:".length);
+    const option = (config.modelCatalog.qwenModels ?? []).find((item) => item.id === modelId);
+    const topicId = ctx.callbackQuery.message?.message_thread_id;
+    const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+    if (!option || !session || session.provider !== "qwen") {
+      await ctx.answerCallbackQuery({ text: "Qwen 모델을 확인할 수 없습니다.", show_alert: true });
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.answerCallbackQuery({ text: "실행 중에는 바꿀 수 없습니다.", show_alert: true });
+      return;
+    }
+    store.updateSession(session.id, { qwenModel: option.id, qwenReasoning: "off" });
+    await ctx.answerCallbackQuery({ text: `${option.label} 선택` });
+    await ctx.reply(`다음 실행부터 Qwen ${option.label} 모델을 사용합니다.`);
   });
 
   function clineSnapshotError(reason: string): string {
@@ -1407,6 +1452,19 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       const defaults = store.updateSessionDefaults({ grokModel: option.id });
       await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
       await ctx.reply(`새 세션 기본 Grok 모델: ${option.label}`, {
+        reply_markup: defaultPanelKeyboard(defaults)
+      });
+      return;
+    }
+    if (provider === "qwen") {
+      const option = (config.modelCatalog.qwenModels ?? []).find((item) => item.id === modelId);
+      if (!option) {
+        await ctx.answerCallbackQuery({ text: "지원하지 않는 Qwen 모델입니다.", show_alert: true });
+        return;
+      }
+      const defaults = store.updateSessionDefaults({ qwenModel: option.id, qwenReasoning: "off" });
+      await ctx.answerCallbackQuery({ text: `${option.label} 기본값` });
+      await ctx.reply(`새 세션 기본 Qwen 모델: ${option.label}`, {
         reply_markup: defaultPanelKeyboard(defaults)
       });
       return;

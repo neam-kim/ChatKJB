@@ -51,6 +51,15 @@ describe("Qwen Claude subagent bridge", () => {
     expect(server.command).toBe(process.execPath);
     expect(server.args[0]).toContain("qwen-subagent-server.js");
     expect(server.env.CHATKJB_QWEN_SUBAGENT_MODEL).toBe("qwen3.8-max");
+    // cwd를 넘기지 않으면 파일 도구 루트 env를 붙이지 않는다(파일 도구는 fail-closed로 비활성).
+    expect(server.env.CHATKJB_QWEN_SUBAGENT_CWD).toBeUndefined();
+  });
+
+  it("passes the session working directory so Qwen can scope its read-only file tools", () => {
+    const server = qwenSubagentMcpServer("qwen3.8-max", "/Volumes/NEAM_SSD/ChatKJB") as {
+      env: Record<string, string>;
+    };
+    expect(server.env.CHATKJB_QWEN_SUBAGENT_CWD).toBe("/Volumes/NEAM_SSD/ChatKJB");
   });
 
   it("keeps the Qwen MCP delegate visible in the Claude panel even with multiple tokens", () => {

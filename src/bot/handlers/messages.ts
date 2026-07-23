@@ -102,6 +102,16 @@ export function registerMessageHandlers(bot: Bot, deps: BotDeps): void {
 
   bot.hears(/^🧠 모델/, async (ctx) => {
     const defaults = store.getSessionDefaults();
+    if (defaults.provider === "qwen" && config.alibabaTokenPlan) {
+      try {
+        config.modelCatalog = await refreshAlibabaTokenPlanModels(
+          config.modelCatalog,
+          config.alibabaTokenPlan
+        );
+      } catch {
+        // 네트워크 장애 때도 마지막으로 성공한 동적 목록을 계속 제공한다.
+      }
+    }
     if (defaults.provider === "cline") {
       const provider = clineProviderOption(config.modelCatalog, defaults.clineProviderId);
       const models = clineModelsForProvider(config.modelCatalog, provider?.id);

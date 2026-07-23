@@ -91,6 +91,20 @@ describe("StateStore", () => {
     store.close();
   });
 
+  it("falls back from the retired ChatKJB path when reading sessions and projects", () => {
+    const store = makeStore();
+    const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));
+    store.createSession(session);
+    store.db.prepare("UPDATE projects SET cwd = ? WHERE name = ?")
+      .run("/Users/neam/ChatKJB", "test");
+    store.db.prepare("UPDATE sessions SET cwd = ? WHERE id = ?")
+      .run("/Users/neam/ChatKJB", session.id);
+
+    expect(store.getSession(session.id)?.cwd).toBe("/Volumes/NEAM_SSD/ChatKJB");
+    expect(store.listProjects()[0]?.cwd).toBe("/Volumes/NEAM_SSD/ChatKJB");
+    store.close();
+  });
+
   it("persists a session model and defaults new sessions to null", () => {
     const store = makeStore();
     const session = makeSession(store.db.name.replace(/\/state\.sqlite$/, ""));

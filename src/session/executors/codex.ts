@@ -118,26 +118,18 @@ const DEFAULT_DEPENDENCIES: CodexExecutorDependencies = {
   copyRollout: copyRolloutToHome
 };
 
-/** 인증·공유 리소스·환경 설정을 한 번의 공통 경로로 구성한다. */
-function isAlibabaTokenPlanModel(options: ExecutorOptions, model: string): boolean {
-  return Boolean(options.alibabaTokenPlan) && options.modelCatalog.codexModels.some((option) =>
-    option.source === "token-plan" && option.id.toLowerCase() === model.toLowerCase()
-  );
-}
-
 export function createCodexClient(
   options: ExecutorOptions,
   codexHome: string,
-  model: string,
+  _model: string,
   subagentModel?: string | null,
-  subagentReasoning?: string | null
+  subagentReasoning?: string | null,
+  cwd?: string | null
 ): Codex {
   requireCodexSubscriptionAuth(codexHome);
   syncSharedResourcesCached();
   // 계정 전환·앱 재배포 뒤에도 선택 계정이 현재 공유 MCP 레지스트리를 즉시 쓰게 한다.
   ensureCodexMcpConfigForHome(codexHome);
-  const usesAlibabaTokenPlan = isAlibabaTokenPlanModel(options, model);
-  const alibaba = options.alibabaTokenPlan;
   const qwenSubagent = isQwenSubagentModel(options.modelCatalog, subagentModel);
   return new Codex({
     ...(options.codexExecutable ? { codexPathOverride: options.codexExecutable } : {}),
@@ -146,19 +138,9 @@ export function createCodexClient(
       ...codexSharedResourceConfig(
         subagentModel,
         qwenSubagent ? subagentModel : null,
-        subagentReasoning
-      ),
-      ...(usesAlibabaTokenPlan && alibaba ? {
-        model_provider: "alibaba_token_plan",
-        model_providers: {
-          alibaba_token_plan: {
-            name: "Alibaba Cloud Model Studio Token Plan",
-            base_url: alibaba.baseUrl,
-            env_key: "DASHSCOPE_API_KEY",
-            wire_api: "chat"
-          }
-        }
-      } : {})
+        subagentReasoning,
+        cwd
+      )
     }
   });
 }
@@ -335,7 +317,8 @@ export class CodexExecutor {
         prefixSections: qwenSubagent
           ? [
             `Qwen 하위 작업은 반드시 ${QWEN_SUBAGENT_TOOL_NAME} 도구로 위임하십시오. `
-            + "요청을 작고 독립적으로 나누고, 필요한 파일 내용과 조사 결과를 context에 함께 전달한 뒤 응답을 직접 검증·통합하십시오."
+            + "Qwen은 이 세션 작업 디렉터리 안에서 읽기 전용 파일 도구(read_file·list_files·search_files)로 저장소를 직접 조사할 수 있으므로, "
+            + "요청을 작고 독립적으로 나누어 task로 주고 Qwen이 스스로 읽을 수 없는 핵심 맥락만 context에 담은 뒤 응답을 직접 검증·통합하십시오."
           ]
           : []
       })

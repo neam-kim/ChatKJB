@@ -77,12 +77,15 @@ export function grokSubagentModelOptions(catalog: ModelCatalog): GrokSubagentMod
 }
 
 /** Claude Agent SDK의 네이티브 Task는 Claude 모델만 지원하므로 Qwen은 별도 MCP 도구로 실행한다. */
-export function qwenSubagentMcpServer(model: string): McpServerConfig {
-  return qwenSubagentProcessConfig(model) as McpServerConfig;
+export function qwenSubagentMcpServer(model: string, cwd?: string): McpServerConfig {
+  return qwenSubagentProcessConfig(model, cwd) as McpServerConfig;
 }
 
-/** Codex config에는 SDK 객체가 아닌 TOML로 직렬화 가능한 값만 넘긴다. */
-export function qwenSubagentProcessConfig(model: string): {
+/**
+ * Codex config에는 SDK 객체가 아닌 TOML로 직렬화 가능한 값만 넘긴다.
+ * cwd를 함께 넘기면 Qwen 서버가 그 디렉터리 안에서만 read-only 파일 도구를 쓸 수 있다.
+ */
+export function qwenSubagentProcessConfig(model: string, cwd?: string): {
   command: string;
   args: string[];
   env: Record<string, string>;
@@ -94,7 +97,8 @@ export function qwenSubagentProcessConfig(model: string): {
     env: {
       DASHSCOPE_API_KEY: process.env.DASHSCOPE_API_KEY ?? "",
       DASHSCOPE_BASE_URL: process.env.DASHSCOPE_BASE_URL ?? "",
-      CHATKJB_QWEN_SUBAGENT_MODEL: model
+      CHATKJB_QWEN_SUBAGENT_MODEL: model,
+      ...(cwd ? { CHATKJB_QWEN_SUBAGENT_CWD: cwd } : {})
     }
   };
 }

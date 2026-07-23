@@ -26,6 +26,7 @@ import {
   thinkingToggleOptionsForModel
 } from "../model-catalog.js";
 import type { ProviderKind, SessionDefaults, SessionRecord } from "../types.js";
+import { qwenModelLabel } from "../model-catalog.js";
 import type { DriveEntry, FolderBrowserState } from "./drive-browser.js";
 import {
   CLINE_MODEL_PAGE_SIZE,
@@ -171,6 +172,8 @@ function defaultsKeyboard(
         ? grokModelLabel(catalog, defaults.grokModel)
         : defaults.provider === "cline"
           ? clineModelOption(catalog, defaults.clineProviderId, defaults.clineModel)?.label ?? "감지된 모델 없음"
+        : defaults.provider === "qwen"
+          ? qwenModelLabel(catalog, defaults.qwenModel)
         : modelLabel(catalog, defaults.claudeModel);
   const fourth = defaults.provider === "codex"
     ? `💭 추론: ${codexReasoningLabel(defaults.codexReasoning)}`
@@ -180,6 +183,8 @@ function defaultsKeyboard(
         ? `💭 추론: ${grokReasoningLabel(defaults.grokReasoning)}`
         : defaults.provider === "cline"
           ? `💭 추론: ${clineReasoningLabel(defaults.clineReasoning)}`
+        : defaults.provider === "qwen"
+          ? "💭 추론: 끄기 (Off)"
         : `💭 thinking: ${defaults.thinking === "off" ? "off" : "on"}`;
   const subagentLabel = defaults.subagentModel
     ? (defaults.provider === "codex"
@@ -249,6 +254,8 @@ function defaultsModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog)
         ? catalog.grokModels.map((option) => ({ id: option.id, label: option.label }))
         : defaults.provider === "cline"
           ? []
+        : defaults.provider === "qwen"
+          ? (catalog.qwenModels ?? []).map((option) => ({ id: option.id, label: option.label }))
         : catalog.claudeModels.map((option) => ({ id: option.id, label: option.label }));
   for (const [index, option] of options.entries()) {
     keyboard.text(option.label, `setm:${defaults.provider}:${option.id}`);
@@ -387,6 +394,9 @@ function defaultsSummary(defaults: SessionDefaults, catalog: ModelCatalog): stri
     const model = clineModelOption(catalog, provider?.id, defaults.clineModel);
     return `Cline · ${provider?.label ?? "감지 없음"} · ${model?.label ?? "감지된 모델 없음"} · reasoning ${clineReasoningLabel(normalizeClineReasoning(defaults.clineReasoning, model))}`;
   }
+  if (defaults.provider === "qwen") {
+    return `Qwen · ${qwenModelLabel(catalog, defaults.qwenModel)} · 추론 off`;
+  }
   return `Claude · ${modelLabel(catalog, defaults.claudeModel)} · thinking ${defaults.thinking === "off" ? "off" : "on"} · 작업량 ${claudeEffortLabel(defaults.claudeEffort)}`;
 }
 
@@ -465,10 +475,19 @@ function grokModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
   return keyboard;
 }
 
-// /provider에서 제공자를 고르는 인라인 키보드. mprov:claude|codex|agy|grok|cline
+function qwenModelKeyboard(catalog: ModelCatalog): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [index, option] of (catalog.qwenModels ?? []).entries()) {
+    keyboard.text(option.label, `qmodel:${option.id}`);
+    if (index < (catalog.qwenModels ?? []).length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+// /provider에서 제공자를 고르는 인라인 키보드.
 function providerKeyboard(
   current: ProviderKind,
-  available: readonly ProviderKind[] = ["claude", "codex", "agy", "grok", "cline"]
+  available: readonly ProviderKind[] = ["claude", "codex", "agy", "grok", "cline", "qwen"]
 ): InlineKeyboard {
   return providerSelectionKeyboard(current, available, "mprov");
 }
@@ -476,7 +495,7 @@ function providerKeyboard(
 // 기본값 패널: 새 세션 기본 제공자 선택. 콜백 dprov:<provider> (mprov:과 의미 다름 — 요약 인계 없음)
 function defaultsProviderKeyboard(
   current: ProviderKind,
-  available: readonly ProviderKind[] = ["claude", "codex", "agy", "grok", "cline"]
+  available: readonly ProviderKind[] = ["claude", "codex", "agy", "grok", "cline", "qwen"]
 ): InlineKeyboard {
   return providerSelectionKeyboard(current, available, "dprov");
 }
@@ -491,7 +510,8 @@ function providerSelectionKeyboard(
     ["codex", "Codex"],
     ["agy", "Antigravity"],
     ["grok", "Grok"],
-    ["cline", "Cline"]
+    ["cline", "Cline"],
+    ["qwen", "Qwen"]
   ];
   const options = allOptions.filter(([kind]) => available.includes(kind));
   const keyboard = new InlineKeyboard();
@@ -538,6 +558,7 @@ export {
   defaultsSummary,
   defaultsTokenKeyboard,
   grokModelKeyboard,
+  qwenModelKeyboard,
   modelKeyboard,
   parseMode,
   powerKeyboardForSession,

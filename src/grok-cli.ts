@@ -255,7 +255,7 @@ function createQwenGrokHome(baseEnvironment: NodeJS.ProcessEnv, model: string): 
     `[mcp_servers.${QWEN_SUBAGENT_SERVER_NAME}]`,
     `command = ${JSON.stringify(process.execPath)}`,
     `args = [${JSON.stringify(serverScript)}]`,
-    "env = { DASHSCOPE_API_KEY = \"${DASHSCOPE_API_KEY}\", DASHSCOPE_BASE_URL = \"${DASHSCOPE_BASE_URL}\", CHATKJB_QWEN_SUBAGENT_MODEL = \"${CHATKJB_QWEN_SUBAGENT_MODEL}\" }",
+    "env = { DASHSCOPE_API_KEY = \"${DASHSCOPE_API_KEY}\", DASHSCOPE_BASE_URL = \"${DASHSCOPE_BASE_URL}\", CHATKJB_QWEN_SUBAGENT_MODEL = \"${CHATKJB_QWEN_SUBAGENT_MODEL}\", CHATKJB_QWEN_SUBAGENT_CWD = \"${CHATKJB_QWEN_SUBAGENT_CWD}\" }",
     "enabled = true",
     ""
   ].join("\n");
@@ -315,7 +315,9 @@ export async function runGrokCli(
         env: {
           ...(options.env ?? process.env),
           GROK_HOME: qwenHome,
-          CHATKJB_QWEN_SUBAGENT_MODEL: options.qwenSubagentModel
+          CHATKJB_QWEN_SUBAGENT_MODEL: options.qwenSubagentModel,
+          // config.toml의 ${CHATKJB_QWEN_SUBAGENT_CWD} 치환에 쓰인다. Qwen 파일 도구의 루트.
+          CHATKJB_QWEN_SUBAGENT_CWD: options.cwd
         }
       }
       : options;

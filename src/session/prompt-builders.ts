@@ -114,7 +114,8 @@ export function buildClaudeSystemPromptAppend(
         ? opts.qwenSubagent
           ? [
             `Qwen 하위 작업은 반드시 ${QWEN_SUBAGENT_TOOL_NAME} 도구로 위임하십시오. `
-            + "요청을 작고 독립적으로 나누고, 필요한 파일 내용과 조사 결과를 context에 함께 전달한 뒤 응답을 직접 검증·통합하십시오."
+            + "Qwen은 이 세션 작업 디렉터리 안에서 읽기 전용 파일 도구(read_file·list_files·search_files)로 저장소를 직접 조사할 수 있으므로, "
+            + "요청을 작고 독립적으로 나누어 task로 주고 Qwen이 스스로 읽을 수 없는 핵심 맥락만 context에 담은 뒤 응답을 직접 검증·통합하십시오."
           ]
           : [
             "하위 작업을 위임할 때는 반드시 Task 도구의 subagent_type을 chatkjb_subagent로 지정하십시오. "

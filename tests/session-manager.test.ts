@@ -1338,6 +1338,30 @@ describe("goal state", () => {
     }
   });
 
+  it("queues a Qwen follow-up when its SDK session is persisted", () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-qwen-resume-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    const session = {
+      ...baseSession("qwen-resume-session", directory),
+      provider: "qwen" as const,
+      qwenModel: "qwen3.8-max-preview",
+      qwenReasoning: "off",
+      qwenSessionId: "qwen-native-session"
+    };
+    store.createSession(session);
+    const manager = new SessionManager(store, fakeTransport, new PermissionBroker(store, fakeTransport, 1000), sessionManagerOptions(directory));
+    const neverDispatches = new Promise<void>(() => undefined);
+    try {
+      (manager as unknown as { projectTails: Map<string, Promise<void>>; }).projectTails.set(directory, neverDispatches);
+      expect(manager.resume(session, "이전 조사에 이어서 수정해")).toBe(true);
+      expect(store.getSession(session.id)?.status).toBe("queued");
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps same-project queuedCounts consistent across serialized sessions", async () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-queue-counts-"));
     const store = new StateStore(join(directory, "state.sqlite"));
@@ -1562,6 +1586,38 @@ describe("goal state", () => {
         .rejects.toThrow("unsupported method");
       expect(store.getSession("codex-goal-native-failure")?.goalCondition).toBeNull();
       expect(store.getSession("codex-goal-native-failure")?.status).toBe("done");
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a missing Codex thread while clearing a native goal on stop", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-goal-missing-thread-"));
+    const store = new StateStore(join(directory, "state.sqlite"));
+    store.syncProjects([{ name: "test", cwd: directory, defaultMode: "default" }]);
+    store.createSession({
+      ...baseSession("codex-goal-missing-thread", directory),
+      provider: "codex",
+      codexThreadId: "deleted-thread"
+    });
+    const permissions = new PermissionBroker(store, fakeTransport, 1000);
+    const manager = new SessionManager(store, fakeTransport, permissions, {
+      ...sessionManagerOptions(directory, [join(directory, "codex-home")]),
+      codexGoalClient: {
+        async setGoal() {},
+        async clearGoal() {
+          throw new Error("thread not found");
+        }
+      },
+      deleteClaudeSession: async () => {}
+    });
+    const logError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      expect(manager.stop("codex-goal-missing-thread")).toBe(false);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(logError).not.toHaveBeenCalled();
     } finally {
       store.close();
       rmSync(directory, { recursive: true, force: true });

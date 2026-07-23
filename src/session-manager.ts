@@ -268,6 +268,7 @@ export class SessionManager {
   private readonly claudeExecutor: ClaudeExecutor;
   private readonly codexExecutor: CodexExecutor;
   private readonly clineExecutor: ClineExecutor;
+  private readonly qwenExecutor: ClineExecutor;
   private readonly tokenPool: TokenPool;
   private readonly oauthTokens: string[];
   // Codex 다중 계정 풀(CODEX_HOME 디렉터리 기준, sticky 선택 + reactive 페일오버).
@@ -346,6 +347,10 @@ export class SessionManager {
       ...this.baseExecutorHost(),
       permissions: this.permissions
     });
+    this.qwenExecutor = new ClineExecutor({
+      ...this.baseExecutorHost(),
+      permissions: this.permissions
+    }, undefined, "qwen");
   }
 
   async dispose(): Promise<void> {
@@ -373,6 +378,7 @@ export class SessionManager {
     ])];
     await Promise.allSettled(tasks);
     await this.clineExecutor.dispose();
+    await this.qwenExecutor.dispose();
     this.active.clear();
     this.projectTails.clear();
     this.queuedCounts.clear();
@@ -385,7 +391,7 @@ export class SessionManager {
   }
 
   private isProviderAvailable(provider: ProviderKind): boolean {
-    return (this.options.availableProviders ?? ["claude", "codex", "agy", "grok", "cline"])
+    return (this.options.availableProviders ?? ["claude", "codex", "agy", "grok", "cline", "qwen"])
       .includes(provider);
   }
 
@@ -461,6 +467,10 @@ export class SessionManager {
       claudeTokenIndex: claudeTokenIndex ?? null,
       codexModel: codexModel ?? null,
       codexReasoning: codexReasoning ?? null,
+      qwenModel: selectedProvider === "qwen" ? (this.store.getSessionDefaults().qwenModel || this.options.alibabaTokenPlan?.defaultModel || null) : null,
+      qwenReasoning: selectedProvider === "qwen" ? "off" : null,
+      qwenSessionId: null,
+      qwenUsage: null,
       subagentModel: subagentModel ?? null,
       subagentReasoning: subagentReasoning ?? null,
       subagentEffort: subagentEffort ?? null,
@@ -581,6 +591,10 @@ export class SessionManager {
       claudeTokenIndex: defaults.claudeTokenIndex ?? null,
       codexModel: defaults.codexModel ?? null,
       codexReasoning: defaults.codexReasoning ?? null,
+      qwenModel: defaults.qwenModel || this.options.alibabaTokenPlan?.defaultModel || null,
+      qwenReasoning: defaults.qwenReasoning ?? "off",
+      qwenSessionId: null,
+      qwenUsage: null,
       codexHome: defaults.codexHome ?? null,
       codexThreadId: null,
       agyModel: defaults.agyModel ?? null,
@@ -752,7 +766,14 @@ export class SessionManager {
         if (tried.has(codexHome)) break;
         tried.add(codexHome);
         const model = session.codexModel ?? DEFAULT_CODEX_MODEL;
-        const codex = createCodexClient(this.options, codexHome, model);
+        const codex = createCodexClient(
+          this.options,
+          codexHome,
+          model,
+          session.subagentModel,
+          session.subagentReasoning,
+          session.cwd
+        );
         const reasoning =
           (session.codexReasoning as CodexReasoningEffort | null) ?? DEFAULT_CODEX_REASONING;
         const thread = codex.startThread(
@@ -796,6 +817,11 @@ export class SessionManager {
 
     if (provider === "cline") {
       return this.clineExecutor.runReadOnly(session, options.prompt, {
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs })
+      });
+    }
+    if (provider === "qwen") {
+      return this.qwenExecutor.runReadOnly(session, options.prompt, {
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs })
       });
     }
@@ -860,6 +886,7 @@ export class SessionManager {
       || current.provider === "agy"
       || current.provider === "grok"
       || current.provider === "cline"
+      || current.provider === "qwen"
       || !!current.sdkSessionId
       || !!current.handoffSummary;
     if (!canResume) return false;
@@ -916,6 +943,7 @@ export class SessionManager {
     if (session.provider === "agy") return session.agyConversationId;
     if (session.provider === "grok") return session.grokSessionId ?? null;
     if (session.provider === "cline") return session.clineSessionId ?? null;
+    if (session.provider === "qwen") return session.qwenSessionId ?? null;
     return session.sdkSessionId;
   }
 
@@ -1060,9 +1088,16 @@ export class SessionManager {
     const session = this.store.getSession(sessionId);
     if (!session) return false;
     if (session.provider === "codex" && session.codexThreadId && this.codexGoalClient) {
-      return this.codexGoalClient.clearGoal(session.codexThreadId, {
-        codexHome: this.selectCodexHome(session)
-      });
+      try {
+        return await this.codexGoalClient.clearGoal(session.codexThreadId, {
+          codexHome: this.selectCodexHome(session)
+        });
+      } catch (error) {
+        // 이미 삭제된 Codex thread에는 지울 native goal도 없다. /stop을 실패로
+        // 보이게 하지 않고, 그 밖의 app-server 오류는 기존처럼 상위에서 기록한다.
+        if (/\bthread\s+not\s+found\b/i.test(safeErrorMessage(error, this.oauthTokens))) return false;
+        throw error;
+      }
     }
     return false;
   }
@@ -1475,6 +1510,15 @@ export class SessionManager {
         ...seeded,
         ...(summary ? { handoffSummary: summary } : {})
       });
+    } else if (target === "qwen") {
+      this.store.updateSession(sessionId, {
+        provider: "qwen",
+        qwenModel: session.qwenModel || this.store.getSessionDefaults().qwenModel || this.options.alibabaTokenPlan?.defaultModel || null,
+        qwenReasoning: "off",
+        qwenSessionId: null,
+        qwenUsage: null,
+        ...(summary ? { handoffSummary: summary } : {})
+      });
     } else {
       // 대상=Claude: 새 SDK 세션에서 요약을 받아 시작한다.
       this.store.updateSession(sessionId, {
@@ -1518,6 +1562,13 @@ export class SessionManager {
         this.store.updateSession(session.id, {
           clineSessionId: null,
           clineUsage: null,
+          handoffSummary: null
+        });
+      } else if (session.provider === "qwen") {
+        await this.qwenExecutor.reset(session);
+        this.store.updateSession(session.id, {
+          qwenSessionId: null,
+          qwenUsage: null,
           handoffSummary: null
         });
       } else {
@@ -1596,11 +1647,22 @@ export class SessionManager {
       if (!session.clineSessionId) return "";
       return this.clineExecutor.summarizeForHandoff(session, prompt);
     }
+    if (session.provider === "qwen") {
+      if (!session.qwenSessionId) return "";
+      return this.qwenExecutor.summarizeForHandoff(session, prompt);
+    }
     // Codex: 직전 스레드를 재개해 비스트리밍으로 요약 한 턴을 받는다.
     if (!session.codexThreadId) return "";
     const codexHome = this.selectCodexHome(session);
     const codexModel = session.codexModel ?? DEFAULT_CODEX_MODEL;
-    const codex = createCodexClient(this.options, codexHome, codexModel);
+    const codex = createCodexClient(
+      this.options,
+      codexHome,
+      codexModel,
+      session.subagentModel,
+      session.subagentReasoning,
+      session.cwd
+    );
     const thread = codex.resumeThread(
       session.codexThreadId,
       buildCodexThreadOptions(
@@ -1632,6 +1694,11 @@ export class SessionManager {
     if (session.clineSessionId) {
       await this.clineExecutor.reset(session).catch((error) => {
         console.error("Cline session deletion failed:", safeErrorMessage(error));
+      });
+    }
+    if (session.qwenSessionId) {
+      await this.qwenExecutor.reset(session).catch((error) => {
+        console.error("Qwen session deletion failed:", safeErrorMessage(error));
       });
     }
     this.store.deleteSession(session.id);
@@ -1859,6 +1926,10 @@ export class SessionManager {
     }
     if (provider === "cline") {
       await this.clineExecutor.execute(request);
+      return;
+    }
+    if (provider === "qwen") {
+      await this.qwenExecutor.execute(request);
       return;
     }
     await this.execute(request);
@@ -2118,7 +2189,14 @@ export class SessionManager {
         try {
           const model = options.codexModelOverride ?? session.codexModel ?? DEFAULT_CODEX_MODEL;
           isolated = options.toolFree ? this.createToolFreeCodexClient(codexHome) : null;
-          const codex = isolated?.codex ?? createCodexClient(this.options, codexHome, model);
+          const codex = isolated?.codex ?? createCodexClient(
+            this.options,
+            codexHome,
+            model,
+            session.subagentModel,
+            session.subagentReasoning,
+            isolated ? isolated.workspace : session.cwd
+          );
           const reasoning = options.codexReasoningOverride
             ?? (session.codexReasoning as CodexReasoningEffort | null)
             ?? DEFAULT_CODEX_REASONING;
@@ -2187,6 +2265,12 @@ export class SessionManager {
     }
     if (provider === "cline") {
       return this.clineExecutor.runReadOnly(session, prompt, {
+        ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+        ...(options.toolFree !== undefined ? { toolFree: options.toolFree } : {})
+      });
+    }
+    if (provider === "qwen") {
+      return this.qwenExecutor.runReadOnly(session, prompt, {
         ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
         ...(options.toolFree !== undefined ? { toolFree: options.toolFree } : {})
       });

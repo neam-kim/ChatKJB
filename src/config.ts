@@ -104,7 +104,7 @@ const environmentSchema = z.object({
   DASHSCOPE_BASE_URL: z.string().url().default(
     "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
   ),
-  DASHSCOPE_MODEL: z.string().trim().min(1).default("qwen3.8-max"),
+  DASHSCOPE_MODEL: z.string().trim().min(1).default("qwen3.8-max-preview"),
   CODEX_MCP_TIMEOUT_MINUTES: z.coerce.number().int().min(1).default(30),
   // 0이면 provider 턴의 절대 시간 제한을 두지 않는다.
   PROVIDER_TURN_TIMEOUT_MINUTES: z.coerce.number().int().min(0).default(0),
@@ -314,6 +314,7 @@ function hasGrokSubscriptionAuth(home: string): boolean {
 export function detectAuthenticatedProviders(options: {
   claudeOauthTokens: readonly string[];
   codexAccountHomes: readonly string[];
+  qwenApiKey?: string | undefined;
   home?: string;
 }): ProviderKind[] {
   const home = options.home ?? homedir();
@@ -322,6 +323,7 @@ export function detectAuthenticatedProviders(options: {
   if (options.codexAccountHomes.some(hasCodexSubscriptionAuth)) providers.push("codex");
   if (hasAgySubscriptionAuth(home)) providers.push("agy");
   if (hasGrokSubscriptionAuth(home)) providers.push("grok");
+  if (options.qwenApiKey?.trim()) providers.push("qwen");
   return providers;
 }
 
@@ -642,13 +644,14 @@ export async function loadConfig() {
   const availableProviders = detectAuthenticatedProviders({
     claudeOauthTokens: claudeCodeOauthTokens,
     codexAccountHomes,
+    qwenApiKey: env.DASHSCOPE_API_KEY,
     home: process.env.HOME?.trim() || homedir()
   });
   if (await hasReadyClineProvider().catch(() => false)) availableProviders.push("cline");
   if (availableProviders.length === 0) {
     throw new Error(
       "사용 가능한 AI 제공자 인증이 없습니다. Claude OAuth, Codex ChatGPT 로그인, "
-      + "Antigravity OAuth, Grok 로그인 또는 실행 가능한 Cline provider 중 하나 이상이 필요합니다."
+      + "Antigravity OAuth, Grok 로그인, Qwen Token API 또는 실행 가능한 Cline provider 중 하나 이상이 필요합니다."
     );
   }
   // 실제 카탈로그는 시작 시 index.ts가 제공사에서 읽어 config.modelCatalog에 채운다.

@@ -102,6 +102,7 @@ class ClaudeStreamEndedWithoutResultError extends Error {
   }
 }
 
+
 export interface ClaudeExecutorHost extends BaseExecutorHost {
   permissions: PermissionBroker;
   tokenPool: TokenPool;
@@ -320,7 +321,7 @@ export class ClaudeExecutor {
           this.host.options.longRunningMcpServers
         ),
         ...(qwenSubagent && ctx.session.subagentModel ? {
-          [QWEN_SUBAGENT_SERVER_NAME]: qwenSubagentMcpServer(ctx.session.subagentModel)
+          [QWEN_SUBAGENT_SERVER_NAME]: qwenSubagentMcpServer(ctx.session.subagentModel, ctx.session.cwd)
         } : {})
       },
       hooks: {
@@ -687,6 +688,7 @@ export class ClaudeExecutor {
     await ctx.renderer.finish("error", String(error));
     await this.host.safeRename(ctx.session, `[ERROR] ${ctx.session.title}`);
   }
+
 
   private async recoverEmptyResumeStream(
     error: unknown,

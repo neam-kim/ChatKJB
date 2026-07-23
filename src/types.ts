@@ -12,7 +12,7 @@ export type SessionStatus =
   | "error"
   | "interrupted";
 
-export type ProviderKind = "claude" | "codex" | "agy" | "grok" | "cline";
+export type ProviderKind = "claude" | "codex" | "agy" | "grok" | "cline" | "qwen";
 
 export interface ProjectConfig {
   name: string;
@@ -27,6 +27,8 @@ export interface SessionDefaults {
   claudeModel: string;
   claudeTokenIndex: number;
   codexModel: string;
+  qwenModel?: string;
+  qwenReasoning?: string;
   agyModel: string;
   grokModel: string;
   grokReasoning: string;
@@ -87,6 +89,8 @@ export interface ReservedTaskStartOptions {
   claudeTokenIndex?: number | null;
   codexModel?: string;
   codexReasoning?: string;
+  qwenModel?: string;
+  qwenReasoning?: string;
   codexHome?: string | null;
   agyThinkingLevel?: string;
   agyModel?: string;
@@ -203,6 +207,10 @@ export interface SessionRecord {
   // Codex 전용 설정. codexModel/codexReasoning은 provider="codex"일 때 사용한다.
   codexModel: string | null;
   codexReasoning: string | null;
+  qwenModel?: string | null;
+  qwenReasoning?: string | null;
+  qwenSessionId?: string | null;
+  qwenUsage?: string | null;
   // 새 세션에서만 고정하는 Claude/Codex 하위 에이전트 모델. null이면 기본 상속.
   subagentModel?: string | null;
   // 하위 에이전트의 모델별 동적 조절값. null이면 해당 모델의 기본값을 쓴다.

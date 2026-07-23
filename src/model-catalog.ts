@@ -62,6 +62,12 @@ export interface CodexModelOption {
   source: "cli" | "token-plan" | "fallback";
 }
 
+export interface QwenModelOption {
+  id: string;
+  label: string;
+  source: "token-plan" | "fallback";
+}
+
 // agy 추론 강도는 CLI 모델명의 (Low/Medium/High) 변형으로 제어한다.
 // null이면 선택한 모델 변형을 그대로 쓴다. Codex와 동일하게 /effort 명령으로 노출한다.
 export type AgyThinkingLevel = "minimal" | "low" | "medium" | "high";
@@ -86,6 +92,7 @@ export interface GrokModelOption {
 export interface ModelCatalog {
   claudeModels: ClaudeModelOption[];
   codexModels: CodexModelOption[];
+  qwenModels?: QwenModelOption[];
   agyModels: AgyModelOption[];
   grokModels: GrokModelOption[];
   clineProviders: ClineProviderOption[];
@@ -96,6 +103,7 @@ export interface ModelCatalog {
 
 export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
+export const DEFAULT_QWEN_MODEL = "qwen3.8-max";
 export const DEFAULT_AGY_MODEL = "gemini-3.1-pro-preview";
 export const DEFAULT_GROK_MODEL = "grok-4.5";
 export const DEFAULT_THINKING_LEVEL: ClaudeThinkingLevel = "adaptive";
@@ -171,16 +179,28 @@ export const FALLBACK_CODEX_MODELS: CodexModelOption[] = [
   }
 ];
 
-function alibabaCodexModel(id: string): CodexModelOption {
+function alibabaQwenModel(id: string): QwenModelOption {
   return {
     id,
     label: id,
-    // Token Plan의 OpenAI-compatible Chat API는 Codex의 GPT 추론 강도 제어를 보장하지 않는다.
+    source: "token-plan"
+  };
+}
+
+/** 기존 Claude/Codex Qwen 서브에이전트 선택지는 유지하되, Codex 실행 카탈로그와는 분리한다. */
+function alibabaSubagentModel(id: string): CodexModelOption {
+  return {
+    id,
+    label: id,
     reasoningOptions: codexReasoningOptions(["low", "medium", "high"]),
     defaultReasoning: "high",
     source: "token-plan"
   };
 }
+
+export const FALLBACK_QWEN_MODELS: QwenModelOption[] = [
+  { id: DEFAULT_QWEN_MODEL, label: DEFAULT_QWEN_MODEL, source: "fallback" }
+];
 
 export const FALLBACK_AGY_MODELS: AgyModelOption[] = [
   { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", source: "fallback" },
@@ -198,6 +218,7 @@ export const FALLBACK_GROK_MODELS: GrokModelOption[] = [
 export const FALLBACK_MODEL_CATALOG: ModelCatalog = {
   claudeModels: FALLBACK_CLAUDE_MODELS,
   codexModels: FALLBACK_CODEX_MODELS,
+  qwenModels: FALLBACK_QWEN_MODELS,
   agyModels: FALLBACK_AGY_MODELS,
   grokModels: FALLBACK_GROK_MODELS,
   clineProviders: [],
@@ -291,6 +312,16 @@ export function modelLabel(catalog: ModelCatalog, id: string): string {
 export function codexModelLabel(catalog: ModelCatalog, id: string | null | undefined): string {
   if (!id) return codexModelLabel(catalog, DEFAULT_CODEX_MODEL);
   return catalog.codexModels.find((option) => option.id === id)?.label ?? id;
+}
+
+export function qwenModelLabel(catalog: ModelCatalog, id: string | null | undefined): string {
+  const requested = id?.trim() || DEFAULT_QWEN_MODEL;
+  return (catalog.qwenModels ?? FALLBACK_QWEN_MODELS).find((option) => option.id === requested)?.label ?? requested;
+}
+
+export function resolveQwenModel(catalog: ModelCatalog, input: string): string | undefined {
+  const value = input.trim().toLowerCase();
+  return value ? (catalog.qwenModels ?? FALLBACK_QWEN_MODELS).find((option) => option.id.toLowerCase() === value)?.id : undefined;
 }
 
 export function resolveModel(catalog: ModelCatalog, input: string): string | undefined {
@@ -485,12 +516,12 @@ export type AlibabaTokenPlanConfig = NonNullable<CatalogProbe["alibabaTokenPlan"
 
 export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalog> {
   const available = new Set<string>(
-    probe.availableProviders ?? ["claude", "codex", "agy", "grok", "cline"]
+    probe.availableProviders ?? ["claude", "codex", "agy", "grok", "cline", "qwen"]
   );
   const [
     claudeModels,
     codexModels,
-    alibabaModels,
+    qwenModels,
     agyModels,
     grokModels,
     grokReasoningEfforts,
@@ -502,10 +533,10 @@ export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalo
     available.has("codex")
       ? discoverCodexModels(probe).catch(() => FALLBACK_CODEX_MODELS)
       : Promise.resolve(FALLBACK_CODEX_MODELS),
-    probe.alibabaTokenPlan
+    probe.alibabaTokenPlan && available.has("qwen")
       ? discoverAlibabaTokenPlanModels(probe.alibabaTokenPlan)
-        .catch(() => [alibabaCodexModel(probe.alibabaTokenPlan!.defaultModel)])
-      : Promise.resolve([]),
+        .catch((): QwenModelOption[] => [{ id: probe.alibabaTokenPlan!.defaultModel, label: probe.alibabaTokenPlan!.defaultModel, source: "fallback" }])
+      : Promise.resolve(FALLBACK_QWEN_MODELS),
     available.has("agy")
       ? discoverAgyModels(probe).catch(() => FALLBACK_AGY_MODELS)
       : Promise.resolve(FALLBACK_AGY_MODELS),
@@ -521,25 +552,14 @@ export async function loadModelCatalog(probe: CatalogProbe): Promise<ModelCatalo
   ]);
   return {
     claudeModels: claudeModels.length ? claudeModels : FALLBACK_CLAUDE_MODELS,
-    codexModels: mergeCodexModels(codexModels.length ? codexModels : FALLBACK_CODEX_MODELS, alibabaModels),
+    codexModels: codexModels.length ? codexModels : FALLBACK_CODEX_MODELS,
+    qwenModels: qwenModels.length ? qwenModels : FALLBACK_QWEN_MODELS,
     agyModels: agyModels.length ? agyModels : FALLBACK_AGY_MODELS,
     grokModels: grokModels.length ? grokModels : FALLBACK_GROK_MODELS,
     clineProviders: clineCatalog.providers,
     clineModelsByProvider: clineCatalog.modelsByProvider,
     grokReasoningEfforts
   };
-}
-
-function mergeCodexModels(
-  codexModels: readonly CodexModelOption[],
-  alibabaModels: readonly CodexModelOption[]
-): CodexModelOption[] {
-  const merged = new Map<string, CodexModelOption>();
-  for (const model of [...alibabaModels, ...codexModels]) {
-    const key = model.id.toLowerCase();
-    if (!merged.has(key)) merged.set(key, model);
-  }
-  return [...merged.values()];
 }
 
 export function parseAlibabaTokenPlanModels(payload: unknown): string[] {
@@ -554,7 +574,7 @@ export function parseAlibabaTokenPlanModels(payload: unknown): string[] {
 }
 
 export async function discoverAlibabaTokenPlanModels(plan: AlibabaTokenPlanConfig)
-  : Promise<CodexModelOption[]> {
+  : Promise<QwenModelOption[]> {
   const response = await fetch(`${plan.baseUrl.replace(/\/$/, "")}/models`, {
     headers: { Authorization: `Bearer ${plan.apiKey}` },
     signal: AbortSignal.timeout(CODEX_DISCOVERY_TIMEOUT_MS)
@@ -562,10 +582,10 @@ export async function discoverAlibabaTokenPlanModels(plan: AlibabaTokenPlanConfi
   if (!response.ok) throw new Error(`Alibaba Token Plan model discovery failed (${response.status})`);
   const ids = parseAlibabaTokenPlanModels(await response.json());
   if (ids.length === 0) throw new Error("Alibaba Token Plan returned no models");
-  return ids.map(alibabaCodexModel);
+  return ids.map(alibabaQwenModel);
 }
 
-/** Qwen MCP 선택 패널을 열 때 현재 제공자 목록으로 카탈로그를 갱신한다. */
+/** Qwen 선택 패널을 열 때 현재 제공자 목록으로 카탈로그를 갱신한다. */
 export async function refreshAlibabaTokenPlanModels(
   catalog: ModelCatalog,
   plan: AlibabaTokenPlanConfig
@@ -573,11 +593,23 @@ export async function refreshAlibabaTokenPlanModels(
   const discovered = await discoverAlibabaTokenPlanModels(plan);
   return {
     ...catalog,
+    qwenModels: discovered,
     codexModels: mergeCodexModels(
       catalog.codexModels.filter((option) => option.source !== "token-plan"),
-      discovered
+      discovered.map((model) => alibabaSubagentModel(model.id))
     )
   };
+}
+
+function mergeCodexModels(
+  codexModels: readonly CodexModelOption[],
+  extraModels: readonly CodexModelOption[]
+): CodexModelOption[] {
+  const merged = new Map<string, CodexModelOption>();
+  for (const model of [...extraModels, ...codexModels]) {
+    if (!merged.has(model.id.toLowerCase())) merged.set(model.id.toLowerCase(), model);
+  }
+  return [...merged.values()];
 }
 
 async function discoverGrokModels(probe: CatalogProbe): Promise<GrokModelOption[]> {

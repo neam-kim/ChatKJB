@@ -13,6 +13,7 @@ function hasProviderContext(session: SessionRecord): boolean {
   if (session.provider === "codex") return !!session.codexThreadId;
   if (session.provider === "agy") return !!session.agyConversationId;
   if (session.provider === "grok") return !!session.grokSessionId;
+  if (session.provider === "qwen") return !!session.qwenSessionId;
   return !!session.clineSessionId;
 }
 

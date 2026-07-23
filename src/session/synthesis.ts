@@ -21,7 +21,7 @@ const JUDGE_CLAUDE_EFFORT = "high";
 // SDK/CLI 초기화를 같은 순간에 몰아 저수준 read 실패와 fd 스파이크를 일으키지 않도록
 // 시작 시점만 어긋나게 한다. 시작된 provider들은 계속 병렬로 실행된다.
 const PROVIDER_START_STAGGER_MS = 400;
-const SYNTHESIS_PROVIDERS = ["claude", "codex", "agy", "grok", "cline"] as const;
+const SYNTHESIS_PROVIDERS = ["claude", "codex", "agy", "grok", "cline", "qwen"] as const;
 
 export interface ReadOnlyExecutionOptions {
   claudeModelOverride?: string;

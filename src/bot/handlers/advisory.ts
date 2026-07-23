@@ -310,7 +310,17 @@ export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
       return;
     }
     transcriptDumpRunning = true;
-    await ctx.reply("트랜스크립트 덤프를 시작합니다.");
+    // 첫 실행은 데스크톱 세션을 새로 덤프하느라 수십 초~수 분 걸릴 수 있다. 백그라운드로
+    // 실행하되, 응답이 끊긴 것처럼 보이지 않도록 시작 시 안내하고 진행 중 하트비트를 남긴다.
+    const startedAt = Date.now();
+    await ctx.reply(
+      "트랜스크립트 덤프를 백그라운드로 시작했습니다. 세션이 많으면 수 분 걸릴 수 있으며, 완료되면 결과를 알려드립니다."
+    );
+    const heartbeat = setInterval(() => {
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      void ctx.reply(`트랜스크립트 덤프 진행 중… (${elapsed}초 경과)`).catch(() => {});
+    }, 30_000);
+    heartbeat.unref?.();
     void execFileAsync(process.execPath, ["--no-warnings", scriptPath], {
       cwd: sourceDir,
       env: { ...process.env, DUMP_NOTIFY: "0" },
@@ -318,10 +328,12 @@ export function registerAdvisoryHandlers(bot: Bot, deps: BotDeps): void {
     }).then(async ({ stdout, stderr }) => {
       const output = [stdout, stderr].filter(Boolean).join("\n").trim();
       const tail = output.length > 3000 ? output.slice(-3000) : output;
-      await ctx.reply(`트랜스크립트 덤프를 완료했습니다.${tail ? `\n\n${tail}` : ""}`);
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      await ctx.reply(`트랜스크립트 덤프를 완료했습니다. (${elapsed}초)${tail ? `\n\n${tail}` : ""}`);
     }).catch(async (error: unknown) => {
       await ctx.reply(`트랜스크립트 덤프 중 오류가 발생했습니다: ${safeErrorMessage(error)}`);
     }).finally(() => {
+      clearInterval(heartbeat);
       transcriptDumpRunning = false;
     });
   });

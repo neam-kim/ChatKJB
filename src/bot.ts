@@ -176,6 +176,7 @@ export function createBot(
     additionalOauthTokens: config.claudeCodeOauthTokens.slice(1),
     availableProviders: config.availableProviders,
     codexAccountHomes: config.codexAccountHomes,
+    ...(config.alibabaTokenPlan ? { alibabaTokenPlan: config.alibabaTokenPlan } : {}),
     mcpToolTimeoutMs: config.mcpToolTimeoutMs,
     mcpMaxAttempts: config.mcpMaxAttempts,
     codexMcpTimeoutMs: config.codexMcpTimeoutMs,

@@ -27,6 +27,7 @@ import {
   isPathWithinWorkspace
 } from "../../cline-permissions.js";
 import { resolveClineConnection } from "../../cline-sdk.js";
+import { resolveQwenConnection } from "../../qwen-sdk.js";
 import type { PermissionBroker } from "../../permission-broker.js";
 import { MessageQueue } from "../../session-collectors.js";
 import { buildProviderBootstrap, buildUserMessage } from "../../session-prompts.js";
@@ -109,8 +110,23 @@ export class ClineExecutor {
 
   constructor(
     private readonly host: ClineExecutorHost,
-    private readonly dependencies: ClineExecutorDependencies = DEFAULT_DEPENDENCIES
+    private readonly dependencies: ClineExecutorDependencies = DEFAULT_DEPENDENCIES,
+    private readonly providerKind: "cline" | "qwen" = "cline"
   ) {}
+
+  private get name(): string { return this.providerKind === "qwen" ? "Qwen" : "Cline"; }
+  private sessionIdOf(session: SessionRecord): string | null | undefined {
+    return this.providerKind === "qwen" ? session.qwenSessionId : session.clineSessionId;
+  }
+  private persistSessionState(sessionId: string, sdkSessionId: string, usage?: unknown): void {
+    this.host.store.updateSession(sessionId, this.providerKind === "qwen"
+      ? { qwenSessionId: sdkSessionId, ...(usage ? { qwenUsage: JSON.stringify(usage) } : {}) }
+      : { clineSessionId: sdkSessionId, ...(usage ? { clineUsage: JSON.stringify(usage) } : {}) });
+  }
+  private newSessionId(): string {
+    const id = this.dependencies.createSessionId();
+    return this.providerKind === "qwen" ? `qwen-${id}` : id;
+  }
 
   private core(): Promise<ClineCoreLike> {
     this.corePromise ??= this.dependencies.createCore((request) => this.requestApproval(request));
@@ -145,6 +161,15 @@ export class ClineExecutor {
   }
 
   private selection(session: SessionRecord) {
+    if (this.providerKind === "qwen") {
+      const qwenModels = this.host.options.modelCatalog.qwenModels ?? [];
+      const requested = session.qwenModel?.trim() || this.host.options.alibabaTokenPlan?.defaultModel;
+      const modelId = qwenModels.find((model) => model.id.toLowerCase() === requested?.toLowerCase())?.id
+        ?? qwenModels[0]?.id
+        ?? requested;
+      if (!modelId) throw new Error("Qwen 모델 설정을 찾지 못했습니다.");
+      return { providerId: "openai-compatible", modelId };
+    }
     const providerId = session.clineProviderId?.trim()
       || this.host.options.modelCatalog.clineProviders?.[0]?.id;
     if (!providerId) throw new Error("실행 가능한 Cline 내부 제공자가 없습니다.");
@@ -158,6 +183,7 @@ export class ClineExecutor {
 
   private async connection(session: SessionRecord) {
     const { providerId, modelId } = this.selection(session);
+    if (this.providerKind === "qwen") return resolveQwenConnection(this.host.options.alibabaTokenPlan, modelId);
     return this.dependencies.resolveConnection(providerId, modelId, session.clineReasoning);
   }
 
@@ -292,7 +318,7 @@ export class ClineExecutor {
     if (existing) return existing;
     const task = (async () => {
       const record = await core.get(clineSessionId);
-      if (!record) throw new Error("저장된 Cline 세션 artifact를 찾지 못했습니다. /reset 후 다시 시작하세요.");
+      if (!record) throw new Error(`저장된 ${this.name} 세션 artifact를 찾지 못했습니다. /reset 후 다시 시작하세요.`);
       const initialMessages = await core.readMessages(clineSessionId);
       await core.start({
         ...await this.config(session, clineSessionId),
@@ -312,8 +338,8 @@ export class ClineExecutor {
     const renderer = new StreamRenderer(session, this.host.transport, this.host.options.debounceMs, {
       resolveStatus: () => this.host.store.getSession(session.id)?.status
     });
-    renderer.setRemainingPlan(degradedPlanForProvider("cline"));
-    renderer.note(steerCapabilityNote("cline"));
+    renderer.setRemainingPlan(degradedPlanForProvider(this.providerKind));
+    renderer.note(steerCapabilityNote(this.providerKind));
     const controller = new AbortController();
     const input = new MessageQueue();
     input.push(buildUserMessage(promptForCodexRequest(request)));
@@ -332,18 +358,18 @@ export class ClineExecutor {
     this.host.active.set(session.id, run);
     this.host.store.updateSession(session.id, { status: "running" });
     const core = await this.core();
-    const clineSessionId = session.clineSessionId ?? this.dependencies.createSessionId();
+    const clineSessionId = this.sessionIdOf(session) ?? this.newSessionId();
     this.chatSessionByClineId.set(clineSessionId, session.id);
     const abort = () => { void core.abort(clineSessionId).catch(() => undefined); };
     controller.signal.addEventListener("abort", abort, { once: true });
     let lastResponse = "";
-    let first = session.clineSessionId == null;
+    let first = this.sessionIdOf(session) == null;
     let turnTimedOut = false;
     try {
       await this.host.safeRename(session, `[RUNNING] ${session.title}`);
       await renderer.start(false);
       const selected = this.selection(session);
-      renderer.note(`Cline SDK 실행 (${selected.providerId} · ${selected.modelId})`);
+      renderer.note(`${this.name} 실행 (${selected.modelId})`);
       const iterator = input[Symbol.asyncIterator]();
       let pending = await iterator.next();
       while (!pending.done) {
@@ -384,7 +410,7 @@ export class ClineExecutor {
             }));
             result = started.result;
             this.hydrated.add(clineSessionId);
-            this.host.store.updateSession(session.id, { clineSessionId });
+            this.persistSessionState(session.id, clineSessionId);
             first = false;
           } else {
             await guard(this.ensureHydrated(core, session, clineSessionId));
@@ -395,7 +421,7 @@ export class ClineExecutor {
             throw new Error("aborted");
           }
           await delivery;
-          const response = result?.text?.trim() || eventText || "Cline 실행 완료";
+          const response = result?.text?.trim() || eventText || `${this.name} 실행 완료`;
           lastResponse = await queueRequestedUserInput(
             this.host,
             session,
@@ -405,10 +431,7 @@ export class ClineExecutor {
             response
           ) || lastResponse;
           const usage = await core.getAccumulatedUsage(clineSessionId);
-          this.host.store.updateSession(session.id, {
-            clineSessionId,
-            ...(usage ? { clineUsage: JSON.stringify(usage) } : {})
-          });
+          this.persistSessionState(session.id, clineSessionId, usage);
         } finally {
           if (turnTimeout) clearTimeout(turnTimeout);
           if (timedOut) turnTimedOut = true;
@@ -419,14 +442,14 @@ export class ClineExecutor {
         pending = await iterator.next();
       }
       this.host.store.updateSession(session.id, { status: "done" });
-      await renderer.finish("done", lastResponse || "Cline 실행 완료");
+      await renderer.finish("done", lastResponse || `${this.name} 실행 완료`);
       await this.host.safeRename(session, `[DONE] ${session.title}`);
     } catch (error) {
       if (this.host.deleting.has(session.id) || !this.host.store.getSession(session.id)) return;
       if (run.serviceShutdownRequested && controller.signal.aborted) return;
       // 워치독이 끊은 턴은 사용자의 중단과 구분해 원인을 남긴다.
       const aborted = !turnTimedOut && (controller.signal.aborted || run.stopRequested === true);
-      console.error(`Cline run failed (session=${session.id}):`, safeErrorMessage(error));
+      console.error(`${this.name} run failed (session=${session.id}):`, safeErrorMessage(error));
       const minutes = Math.round((this.host.options.providerTurnTimeoutMs ?? 0) / 60_000);
       this.host.store.updateSession(session.id, { status: aborted ? "aborted" : "error" });
       await renderer.finish(
@@ -434,9 +457,9 @@ export class ClineExecutor {
         aborted
           ? "사용자가 작업을 중단했습니다."
           : turnTimedOut
-            ? `Cline이 ${minutes}분 동안 응답하지 않아 턴을 중단했습니다. `
+            ? `${this.name}이 ${minutes}분 동안 응답하지 않아 턴을 중단했습니다. `
               + "제공자 게이트웨이가 도구 스키마를 거부했을 수 있으니 모델을 바꿔 다시 시도하세요."
-            : `Cline 실행 실패: ${safeErrorMessage(error)}`
+            : `${this.name} 실행 실패: ${safeErrorMessage(error)}`
       );
       await this.host.safeRename(session, `${aborted ? "[STOP]" : "[ERROR]"} ${session.title}`);
     } finally {
@@ -453,7 +476,7 @@ export class ClineExecutor {
     toolFree?: boolean;
   } = {}): Promise<string> {
     const core = await this.core();
-    const id = this.dependencies.createSessionId();
+    const id = this.newSessionId();
     const readOnlySession = { ...session, permissionMode: "plan" as const };
     const timeout = options.timeoutMs
       ? setTimeout(() => { void core.abort(id).catch(() => undefined); }, options.timeoutMs)
@@ -465,7 +488,7 @@ export class ClineExecutor {
         interactive: false
       });
       const text = result.result?.text?.trim();
-      if (!text) throw new Error("Cline 읽기 전용 단계가 빈 응답을 반환했습니다.");
+      if (!text) throw new Error(`${this.name} 읽기 전용 단계가 빈 응답을 반환했습니다.`);
       return text;
     } finally {
       if (timeout) clearTimeout(timeout);
@@ -474,17 +497,19 @@ export class ClineExecutor {
   }
 
   async updateConnection(session: SessionRecord): Promise<void> {
-    if (!session.clineSessionId) return;
+    const sessionId = this.sessionIdOf(session);
+    if (!sessionId) return;
     const core = await this.core();
-    await core.updateSessionConnection(session.clineSessionId, await this.connection(session));
+    await core.updateSessionConnection(sessionId, await this.connection(session));
   }
 
   async summarizeForHandoff(session: SessionRecord, prompt: string): Promise<string> {
-    if (!session.clineSessionId) return "";
+    const sessionId = this.sessionIdOf(session);
+    if (!sessionId) return "";
     const core = await this.core();
-    await this.ensureHydrated(core, session, session.clineSessionId);
+    await this.ensureHydrated(core, session, sessionId);
     const result = await core.send({
-      sessionId: session.clineSessionId,
+      sessionId,
       prompt,
       mode: "plan"
     });
@@ -492,13 +517,14 @@ export class ClineExecutor {
   }
 
   async reset(session: SessionRecord): Promise<void> {
-    if (!session.clineSessionId) return;
+    const sessionId = this.sessionIdOf(session);
+    if (!sessionId) return;
     const core = await this.core();
-    await core.abort(session.clineSessionId).catch(() => undefined);
-    await core.delete(session.clineSessionId);
-    this.hydrated.delete(session.clineSessionId);
-    this.hydration.delete(session.clineSessionId);
-    this.chatSessionByClineId.delete(session.clineSessionId);
+    await core.abort(sessionId).catch(() => undefined);
+    await core.delete(sessionId);
+    this.hydrated.delete(sessionId);
+    this.hydration.delete(sessionId);
+    this.chatSessionByClineId.delete(sessionId);
   }
 
   async dispose(): Promise<void> {

@@ -28,9 +28,18 @@ import type {
 } from "./types.js";
 
 function normalizeProvider(value: string | null | undefined): ProviderKind {
-  return value === "codex" || value === "agy" || value === "grok" || value === "cline"
+  return value === "codex" || value === "agy" || value === "grok" || value === "cline" || value === "qwen"
     ? value
     : "claude";
+}
+
+// 저장소를 외장 볼륨으로 옮긴 뒤에도 기존 세션을 재개할 수 있게, 실제로 사용했던
+// 단일 구경로만 읽기 시점에 보정한다. 다른 프로젝트 경로에는 영향을 주지 않는다.
+const LEGACY_CHATKJB_CWD = "/Users/neam/ChatKJB";
+const CHATKJB_CWD = "/Volumes/NEAM_SSD/ChatKJB";
+
+function resolveStoredCwd(cwd: string): string {
+  return cwd === LEGACY_CHATKJB_CWD ? CHATKJB_CWD : cwd;
 }
 
 const SESSION_DEFAULT_SEED: SessionDefaults = {
@@ -38,6 +47,8 @@ const SESSION_DEFAULT_SEED: SessionDefaults = {
   claudeModel: DEFAULT_CLAUDE_MODEL,
   claudeTokenIndex: 0,
   codexModel: DEFAULT_CODEX_MODEL,
+  qwenModel: "",
+  qwenReasoning: "off",
   agyModel: DEFAULT_AGY_MODEL,
   grokModel: DEFAULT_GROK_MODEL,
   grokReasoning: DEFAULT_GROK_REASONING,
@@ -91,6 +102,10 @@ interface SessionRow {
   claude_token_index: number | null;
   codex_model: string | null;
   codex_reasoning: string | null;
+  qwen_model: string | null;
+  qwen_reasoning: string | null;
+  qwen_session_id: string | null;
+  qwen_usage: string | null;
   subagent_model: string | null;
   subagent_reasoning: string | null;
   subagent_effort: string | null;
@@ -190,6 +205,10 @@ export class StateStore {
         thinking TEXT,
         claude_token_index INTEGER,
         codex_model TEXT,
+        qwen_model TEXT,
+        qwen_reasoning TEXT,
+        qwen_session_id TEXT,
+        qwen_usage TEXT,
         subagent_model TEXT,
         subagent_reasoning TEXT,
         subagent_effort TEXT,
@@ -302,6 +321,18 @@ export class StateStore {
     if (!sessionColumns.some((column) => column.name === "codex_model")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN codex_model TEXT");
     }
+    if (!sessionColumns.some((column) => column.name === "qwen_model")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN qwen_model TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "qwen_reasoning")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN qwen_reasoning TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "qwen_session_id")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN qwen_session_id TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "qwen_usage")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN qwen_usage TEXT");
+    }
     if (!sessionColumns.some((column) => column.name === "subagent_model")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN subagent_model TEXT");
     }
@@ -362,12 +393,12 @@ export class StateStore {
     this.db.exec(`
       UPDATE sessions
       SET provider = 'claude'
-      WHERE provider IS NULL OR provider NOT IN ('claude', 'codex', 'agy', 'grok', 'cline');
+      WHERE provider IS NULL OR provider NOT IN ('claude', 'codex', 'agy', 'grok', 'cline', 'qwen');
 
       UPDATE app_settings
       SET value = 'claude'
       WHERE key = 'default.provider'
-        AND value NOT IN ('claude', 'codex', 'agy', 'grok', 'cline');
+        AND value NOT IN ('claude', 'codex', 'agy', 'grok', 'cline', 'qwen');
     `);
     const agyThinkingDefault = this.db
       .prepare("SELECT value FROM app_settings WHERE key = 'default.agyThinkingLevel'")
@@ -428,12 +459,12 @@ export class StateStore {
       INSERT INTO sessions(
         id, sdk_session_id, chat_id, topic_id, project_name, cwd, title,
         status, permission_mode, provider, model, thinking, claude_effort,
-        claude_token_index, codex_model, codex_reasoning, subagent_model, subagent_reasoning, subagent_effort, codex_home, codex_thread_id, agy_model, grok_model, grok_reasoning, grok_session_id, agy_thinking_level,
+        claude_token_index, codex_model, codex_reasoning, qwen_model, qwen_reasoning, qwen_session_id, qwen_usage, subagent_model, subagent_reasoning, subagent_effort, codex_home, codex_thread_id, agy_model, grok_model, grok_reasoning, grok_session_id, agy_thinking_level,
         agy_conversation_id, agy_usage, grok_usage,
         cline_provider_id, cline_model, cline_reasoning, cline_session_id, cline_usage,
         handoff_summary, goal_condition, lean_mode, usage_snapshot,
         always_allowed_tools, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.sdkSessionId,
@@ -451,6 +482,10 @@ export class StateStore {
       session.claudeTokenIndex ?? null,
       session.codexModel ?? null,
       session.codexReasoning ?? null,
+      session.qwenModel ?? null,
+      session.qwenReasoning ?? null,
+      session.qwenSessionId ?? null,
+      session.qwenUsage ?? null,
       session.subagentModel ?? null,
       session.subagentReasoning ?? null,
       session.subagentEffort ?? null,
@@ -509,7 +544,7 @@ export class StateStore {
     id: string,
     fields: Partial<Pick<
       SessionRecord,
-      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "claudeTokenIndex" | "codexModel" | "codexReasoning" | "subagentReasoning" | "subagentEffort" | "codexHome" | "codexThreadId" | "agyModel" | "grokModel" | "grokReasoning" | "grokSessionId" | "agyThinkingLevel" | "agyConversationId" | "agyUsage" | "grokUsage" | "clineProviderId" | "clineModel" | "clineReasoning" | "clineSessionId" | "clineUsage" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
+      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "claudeTokenIndex" | "codexModel" | "codexReasoning" | "qwenModel" | "qwenReasoning" | "qwenSessionId" | "qwenUsage" | "subagentReasoning" | "subagentEffort" | "codexHome" | "codexThreadId" | "agyModel" | "grokModel" | "grokReasoning" | "grokSessionId" | "agyThinkingLevel" | "agyConversationId" | "agyUsage" | "grokUsage" | "clineProviderId" | "clineModel" | "clineReasoning" | "clineSessionId" | "clineUsage" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
     >>
   ): void {
     const entries: Array<[string, unknown]> = [];
@@ -524,6 +559,10 @@ export class StateStore {
     if ("claudeTokenIndex" in fields) entries.push(["claude_token_index", fields.claudeTokenIndex]);
     if ("codexModel" in fields) entries.push(["codex_model", fields.codexModel]);
     if ("codexReasoning" in fields) entries.push(["codex_reasoning", fields.codexReasoning]);
+    if ("qwenModel" in fields) entries.push(["qwen_model", fields.qwenModel ?? null]);
+    if ("qwenReasoning" in fields) entries.push(["qwen_reasoning", fields.qwenReasoning ?? null]);
+    if ("qwenSessionId" in fields) entries.push(["qwen_session_id", fields.qwenSessionId ?? null]);
+    if ("qwenUsage" in fields) entries.push(["qwen_usage", fields.qwenUsage ?? null]);
     if ("subagentReasoning" in fields) entries.push(["subagent_reasoning", fields.subagentReasoning]);
     if ("subagentEffort" in fields) entries.push(["subagent_effort", fields.subagentEffort]);
     if ("codexHome" in fields) entries.push(["codex_home", fields.codexHome]);
@@ -579,6 +618,8 @@ export class StateStore {
       claudeModel: stored.get("claudeModel") ?? SESSION_DEFAULT_SEED.claudeModel,
       claudeTokenIndex: normalizeDefaultIndex(stored.get("claudeTokenIndex")),
       codexModel: stored.get("codexModel") ?? SESSION_DEFAULT_SEED.codexModel,
+      qwenModel: stored.get("qwenModel") ?? SESSION_DEFAULT_SEED.qwenModel ?? "",
+      qwenReasoning: stored.get("qwenReasoning") ?? SESSION_DEFAULT_SEED.qwenReasoning ?? "off",
       agyModel: stored.get("agyModel") ?? SESSION_DEFAULT_SEED.agyModel,
       grokModel: stored.get("grokModel") ?? SESSION_DEFAULT_SEED.grokModel,
       grokReasoning: stored.get("grokReasoning") ?? SESSION_DEFAULT_SEED.grokReasoning,
@@ -794,7 +835,7 @@ export class StateStore {
       chatId: row.chat_id,
       topicId: row.topic_id,
       projectName: row.project_name,
-      cwd: row.cwd,
+      cwd: resolveStoredCwd(row.cwd),
       title: row.title,
       status: row.status,
       permissionMode: row.permission_mode,
@@ -805,6 +846,10 @@ export class StateStore {
       claudeTokenIndex: row.claude_token_index,
       codexModel: row.codex_model,
       codexReasoning: row.codex_reasoning,
+      qwenModel: row.qwen_model,
+      qwenReasoning: row.qwen_reasoning,
+      qwenSessionId: row.qwen_session_id,
+      qwenUsage: row.qwen_usage,
       subagentModel: row.subagent_model,
       subagentReasoning: row.subagent_reasoning,
       subagentEffort: row.subagent_effort,
@@ -835,7 +880,7 @@ export class StateStore {
   private mapProject(row: ProjectRow): ProjectConfig {
     return {
       name: row.name,
-      cwd: row.cwd,
+      cwd: resolveStoredCwd(row.cwd),
       defaultMode: row.default_mode
     };
   }

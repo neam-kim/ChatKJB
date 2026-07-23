@@ -92,7 +92,8 @@ export function requireCodexSubscriptionAuth(
 export function codexSharedResourceConfig(
   subagentModel?: string | null,
   qwenSubagentModel?: string | null,
-  subagentReasoning?: string | null
+  subagentReasoning?: string | null,
+  cwd?: string | null
 ) {
   const liteAgent = subagentModel && !qwenSubagentModel
     ? pinnedCodexChildAgentPath(subagentModel, subagentReasoning)
@@ -136,7 +137,7 @@ export function codexSharedResourceConfig(
     // 루트에만 짧은 전용 MCP를 붙이고, GPT 루트가 이 도구로 위임·검증한다.
     ...(qwenSubagentModel ? {
       mcp_servers: {
-        [QWEN_SUBAGENT_SERVER_NAME]: qwenSubagentProcessConfig(qwenSubagentModel)
+        [QWEN_SUBAGENT_SERVER_NAME]: qwenSubagentProcessConfig(qwenSubagentModel, cwd ?? undefined)
       }
     } : {})
   };

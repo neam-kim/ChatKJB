@@ -375,7 +375,7 @@ describe("Cline bot configuration UI", () => {
     const catalog = clineCatalog(1, 1);
     const planned = pendingFieldsFromDefaults({ ...defaultsFor(catalog), defaultPermissionMode: "plan" });
     expect(planned).toMatchObject({ provider: "cline", permissionMode: "plan" });
-    for (const provider of ["claude", "codex", "cline", "agy", "grok"] as const) {
+    for (const provider of ["claude", "codex", "cline", "agy", "grok", "qwen"] as const) {
       expect(pendingFieldsFromDefaults({ ...defaultsFor(catalog), provider }))
         .toMatchObject({ provider, permissionMode: "auto" });
     }

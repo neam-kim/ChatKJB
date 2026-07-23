@@ -110,6 +110,13 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
       leanMode: true
     };
   }
+  if (defaults.provider === "qwen") {
+    return {
+      provider: "qwen",
+      permissionMode,
+      leanMode: true
+    };
+  }
   return {
     provider: "claude",
     permissionMode,
