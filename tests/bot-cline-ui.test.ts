@@ -300,8 +300,8 @@ describe("Cline bot configuration UI", () => {
       const sixth = defaultsKeyboard(defaults, catalog).build()[2]?.[1];
       return typeof sixth === "string" ? sixth : sixth?.text ?? "";
     };
-    // 미설정 기본값은 프로젝트의 안전 기본값(plan)을 따른다.
-    expect(labelOf(defaultsFor(catalog))).toContain("Plan");
+    // 미설정 전역 기본값은 Auto로 고정되어 프로젝트별 과거 plan을 따르지 않는다.
+    expect(labelOf(defaultsFor(catalog))).toContain("⚠️ Auto");
     expect(labelOf({ ...defaultsFor(catalog), defaultPermissionMode: "plan" })).toContain("Plan");
     expect(labelOf({ ...defaultsFor(catalog), defaultPermissionMode: "auto" })).toContain("⚠️ Auto");
     // Claude 기본값에서는 이 슬롯이 토큰/예약이라 Plan/Auto가 나오면 안 된다(회귀 방지).
@@ -371,12 +371,14 @@ describe("Cline bot configuration UI", () => {
     expect(test.callbackAnswers.at(-1)).toMatchObject({ show_alert: true });
   });
 
-  it("carries the Cline default permission mode into pending starts", () => {
+  it("carries the global Auto default into every provider pending start", () => {
     const catalog = clineCatalog(1, 1);
     const planned = pendingFieldsFromDefaults({ ...defaultsFor(catalog), defaultPermissionMode: "plan" });
     expect(planned).toMatchObject({ provider: "cline", permissionMode: "plan" });
-    // 미설정이면 permissionMode 키를 넣지 않아 프로젝트 defaultMode를 따른다.
-    expect("permissionMode" in pendingFieldsFromDefaults(defaultsFor(catalog))).toBe(false);
+    for (const provider of ["claude", "codex", "cline", "agy", "grok"] as const) {
+      expect(pendingFieldsFromDefaults({ ...defaultsFor(catalog), provider }))
+        .toMatchObject({ provider, permissionMode: "auto" });
+    }
   });
 
   it("formats Cline provider, model, and reasoning status", () => {
@@ -397,7 +399,7 @@ describe("Cline bot configuration UI", () => {
     await test.bot.handleUpdate(messageUpdate("🔌 Cline 제공자: Provider 0", 1));
 
     const providerCallbacks = callbacks(test.sent.at(-1));
-    expect(providerCallbacks.filter((value) => value.includes(":i"))).toHaveLength(8);
+    expect(providerCallbacks.filter((value) => /:i\d+$/.test(value))).toHaveLength(8);
     expect(providerCallbacks).toContainEqual(expect.stringMatching(/^clp:[A-Za-z0-9_-]{16}:p1$/));
     expect(providerCallbacks.every((value) => Buffer.byteLength(value, "utf8") < 64)).toBe(true);
     expect(providerCallbacks.join("\n")).not.toContain("p".repeat(100));
@@ -405,7 +407,7 @@ describe("Cline bot configuration UI", () => {
     const selectProvider = providerCallbacks.find((value) => value.endsWith(":i0"))!;
     await test.bot.handleUpdate(callbackUpdate(selectProvider, 2));
     const modelCallbacks = callbacks(test.sent.at(-1));
-    expect(modelCallbacks.filter((value) => value.includes(":i"))).toHaveLength(10);
+    expect(modelCallbacks.filter((value) => /:i\d+$/.test(value))).toHaveLength(10);
     expect(modelCallbacks).toContainEqual(expect.stringMatching(/^clm:[A-Za-z0-9_-]{16}:p1$/));
     expect(modelCallbacks.every((value) => Buffer.byteLength(value, "utf8") < 64)).toBe(true);
     expect(modelCallbacks.join("\n")).not.toContain("m".repeat(100));

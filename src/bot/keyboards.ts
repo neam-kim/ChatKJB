@@ -79,10 +79,10 @@ export function folderBrowserKeyboard(
 // (user 요청: 빈 패널은 '-' 표기, 추후 배선 가능성만 열어둔다.)
 const RESERVED_SLOT_LABEL = "➖";
 
-// Cline 새 세션 기본값 패널의 6번째 슬롯 라벨. 미설정은 프로젝트의 안전 기본값(plan)을
-// 따르므로 Plan으로 표시하고, auto는 승인 요청을 생략하는 위험한 모드임을 분명히 표시한다.
+// Cline 새 세션 기본값 패널의 6번째 슬롯 라벨. 미설정도 전역 Auto 기본값을 따른다.
+// auto는 승인 요청을 생략하는 모드임을 분명히 표시한다.
 function clineDefaultModeLabel(mode: PermissionMode | undefined): string {
-  return mode === "auto" ? "⚠️ Auto" : "🧭 Plan";
+  return mode === "plan" ? "🧭 Plan" : "⚠️ Auto";
 }
 
 // Cline 기본 모드 토글의 다음 값. plan↔auto 두 값만 순환한다.

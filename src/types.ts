@@ -43,8 +43,7 @@ export interface SessionDefaults {
   subagentReasoning?: string | null;
   subagentEffort?: string | null;
   agyThinkingLevel: string;
-  // 새 세션의 시작 권한 모드. 현재는 Cline만 General 패널에서 Plan(=plan)↔Auto(=auto)로
-  // 토글해 사용한다. 비어 있으면 프로젝트 defaultMode를 따른다.
+  // 새 세션의 시작 권한 모드. 기본은 auto이며, 사용자가 명시적으로 변경할 수 있다.
   defaultPermissionMode?: PermissionMode;
 }
 

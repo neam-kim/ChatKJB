@@ -19,6 +19,7 @@ import {
   buildCodexEnvironment,
   codexSandboxMode,
   codexSharedResourceConfig,
+  ensureCodexMcpConfigForHome,
   requireCodexSubscriptionAuth
 } from "../../session-environment.js";
 import { buildProviderBootstrap, buildUserMessage } from "../../session-prompts.js";
@@ -133,6 +134,8 @@ export function createCodexClient(
 ): Codex {
   requireCodexSubscriptionAuth(codexHome);
   syncSharedResourcesCached();
+  // 계정 전환·앱 재배포 뒤에도 선택 계정이 현재 공유 MCP 레지스트리를 즉시 쓰게 한다.
+  ensureCodexMcpConfigForHome(codexHome);
   const usesAlibabaTokenPlan = isAlibabaTokenPlanModel(options, model);
   const alibaba = options.alibabaTokenPlan;
   const qwenSubagent = isQwenSubagentModel(options.modelCatalog, subagentModel);

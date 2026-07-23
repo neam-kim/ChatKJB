@@ -244,6 +244,12 @@ describe("StateStore", () => {
     store.close();
   });
 
+  it("uses Auto as the global permission default when no setting is stored", () => {
+    const store = makeStore();
+    expect(store.getSessionDefaults().defaultPermissionMode).toBe("auto");
+    store.close();
+  });
+
   it("migrates agy_thinking_level column to null on existing databases", () => {
     const directory = mkdtempSync(join(tmpdir(), "telegram-claude-agy-think-"));
     tempDirs.push(directory);

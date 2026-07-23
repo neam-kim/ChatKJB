@@ -6,7 +6,9 @@ const serverName = "chatkjb_qwen_subagent";
 const apiKey = process.env.DASHSCOPE_API_KEY?.trim();
 const baseUrl = (process.env.DASHSCOPE_BASE_URL?.trim()
   || "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1").replace(/\/$/, "");
-const model = process.env.CHATKJB_QWEN_SUBAGENT_MODEL?.trim() || "qwen3.8-max";
+// Token Plan의 이전 기본값 qwen3.8-max는 더 이상 제공되지 않아 404를 반환한다.
+// 정상 경로는 선택 모델을 항상 넘기며, 누락 시에도 현재 지원되는 모델로 안전하게 복구한다.
+const model = process.env.CHATKJB_QWEN_SUBAGENT_MODEL?.trim() || "qwen3.8-max-preview";
 
 function send(message: JsonRecord): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);

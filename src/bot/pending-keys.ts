@@ -63,10 +63,13 @@ export function selectedClaudeTokenIndex(
 }
 
 // 새 세션 기본값을 PendingStart 필드로 변환한다. provider에 따라 해당 제공자 설정만 채운다.
+// 프로젝트별 과거 plan 값과 무관하게 전역 새 세션 기본값 Auto를 항상 명시적으로 넘긴다.
 export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<PendingStartOptions> {
+  const permissionMode = defaults.defaultPermissionMode ?? "auto";
   if (defaults.provider === "codex") {
     return {
       provider: "codex",
+      permissionMode,
       codexModel: defaults.codexModel,
       codexReasoning: defaults.codexReasoning,
       codexHome: defaults.codexHome,
@@ -79,6 +82,7 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
   if (defaults.provider === "agy") {
     return {
       provider: "agy",
+      permissionMode,
       agyThinkingLevel: defaults.agyThinkingLevel,
       agyModel: defaults.agyModel,
       leanMode: true
@@ -87,6 +91,7 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
   if (defaults.provider === "grok") {
     return {
       provider: "grok",
+      permissionMode,
       grokModel: defaults.grokModel,
       grokReasoning: defaults.grokReasoning,
       subagentModel: defaults.subagentModel ?? null,
@@ -101,13 +106,13 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
       clineProviderId: defaults.clineProviderId ?? "",
       clineModel: defaults.clineModel ?? "",
       clineReasoning: defaults.clineReasoning ?? "off",
-      // General 패널의 Plan/Auto 토글값. 미설정이면 undefined로 두어 프로젝트 defaultMode를 따른다.
-      ...(defaults.defaultPermissionMode ? { permissionMode: defaults.defaultPermissionMode } : {}),
+      permissionMode,
       leanMode: true
     };
   }
   return {
     provider: "claude",
+    permissionMode,
     model: defaults.claudeModel,
     thinking: defaults.thinking,
     claudeEffort: defaults.claudeEffort,

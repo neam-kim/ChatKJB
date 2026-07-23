@@ -51,7 +51,10 @@ const SESSION_DEFAULT_SEED: SessionDefaults = {
   subagentModel: null,
   subagentReasoning: null,
   subagentEffort: null,
-  agyThinkingLevel: ""
+  agyThinkingLevel: "",
+  // 모든 제공자의 새 세션은 명시적으로 Auto로 시작한다. 프로젝트별 과거 plan 값이
+  // 기본값 경로를 통해 다시 적용되지 않도록 전역 기본값에도 저장한다.
+  defaultPermissionMode: "auto"
 };
 
 function normalizeDefaultAgyThinkingLevel(value: string | null | undefined): string {
@@ -64,8 +67,8 @@ function normalizeDefaultIndex(value: string | number | null | undefined): numbe
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
-// 저장된 새 세션 기본 권한 모드를 정규화한다. 알 수 없는 값이나 미설정이면 undefined를
-// 반환해 새 세션이 프로젝트 defaultMode를 따르게 한다.
+// 저장된 새 세션 기본 권한 모드를 정규화한다. 알 수 없는 값이나 미설정이면 전역 Auto
+// 기본값을 적용한다. 프로젝트별 과거 defaultMode가 새 세션 기본값을 덮어쓰지 않는다.
 function normalizeDefaultPermissionMode(value: string | null | undefined): PermissionMode | undefined {
   const modes: PermissionMode[] = ["default", "acceptEdits", "plan", "dontAsk", "auto", "bypassPermissions"];
   return value && modes.includes(value as PermissionMode) ? (value as PermissionMode) : undefined;
@@ -568,7 +571,9 @@ export class StateStore {
       .prepare("SELECT key, value FROM app_settings WHERE key LIKE 'default.%'")
       .all() as Array<{ key: string; value: string; }>;
     const stored = new Map(rows.map((row) => [row.key.slice("default.".length), row.value]));
-    const defaultPermissionMode = normalizeDefaultPermissionMode(stored.get("defaultPermissionMode"));
+    const defaultPermissionMode = normalizeDefaultPermissionMode(stored.get("defaultPermissionMode"))
+      ?? SESSION_DEFAULT_SEED.defaultPermissionMode
+      ?? "auto";
     return {
       provider: normalizeProvider(stored.get("provider")),
       claudeModel: stored.get("claudeModel") ?? SESSION_DEFAULT_SEED.claudeModel,
@@ -588,7 +593,7 @@ export class StateStore {
       subagentReasoning: stored.get("subagentReasoning") || null,
       subagentEffort: stored.get("subagentEffort") || null,
       agyThinkingLevel: normalizeDefaultAgyThinkingLevel(stored.get("agyThinkingLevel")),
-      ...(defaultPermissionMode ? { defaultPermissionMode } : {})
+      defaultPermissionMode
     };
   }
 

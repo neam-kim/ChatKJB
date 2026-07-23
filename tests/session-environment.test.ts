@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildCodexEnvironment,
+  agyPermissionArgs,
+  codexSandboxMode,
   codexSharedResourceConfig,
   ensureCodexMcpConfigForHome,
   pinnedCodexChildAgentPath
@@ -129,5 +131,12 @@ describe("번들 실행 시 provider CLI 탐색 경로", () => {
   it("미설정이어도 기존 동작을 유지한다", () => {
     const env = buildCodexEnvironment(undefined, { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv);
     expect(env["PATH"]).toContain("/usr/bin");
+  });
+});
+
+describe("Auto 권한 매핑", () => {
+  it("Codex와 agy가 MCP 승인 없이 실행할 수 있는 권한으로 Auto를 전달한다", () => {
+    expect(codexSandboxMode("auto")).toBe("danger-full-access");
+    expect(agyPermissionArgs("auto")).toEqual(["--dangerously-skip-permissions"]);
   });
 });
