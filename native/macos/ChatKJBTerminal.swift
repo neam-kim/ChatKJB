@@ -342,6 +342,7 @@ private final class AppDelegate: NSObject,
     private var smokePageReady = false
     private var smokeAuthReady = false
     private var downloads: [ObjectIdentifier: WKDownload] = [:]
+    private var pendingDownloadDestinations: [ObjectIdentifier: (URL?) -> Void] = [:]
     private let smokeTest = CommandLine.arguments.contains("--smoke-test")
     private let diagnosticTest = CommandLine.arguments.contains("--diagnostic-test")
     private let noninteractive = CommandLine.arguments.contains("--smoke-test")
@@ -367,6 +368,7 @@ private final class AppDelegate: NSObject,
 
     func applicationWillTerminate(_ notification: Notification) {
         terminating = true
+        cancelPendingDownloadDestinations()
         closeQrPanel()
         pageTimer?.invalidate()
         pageTimer = nil
@@ -936,6 +938,7 @@ private final class AppDelegate: NSObject,
     }
 
     func windowWillClose(_ notification: Notification) {
+        cancelPendingDownloadDestinations()
         NSApp.terminate(nil)
     }
 
@@ -1092,7 +1095,7 @@ private final class AppDelegate: NSObject,
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
         panel.beginSheetModal(for: window) { response in
             completionHandler(response == .OK ? panel.urls : nil)
         }
@@ -1120,14 +1123,39 @@ private final class AppDelegate: NSObject,
             : String(trimmed.prefix(180))
         let panel = NSSavePanel()
         panel.nameFieldStringValue = safeName
-        completionHandler(panel.runModal() == .OK ? panel.url : nil)
+        let identifier = ObjectIdentifier(download)
+        var completed = false
+        let finish: (URL?) -> Void = { [weak self] destination in
+            guard !completed else { return }
+            completed = true
+            self?.pendingDownloadDestinations.removeValue(forKey: identifier)
+            completionHandler(destination)
+        }
+        guard let parentWindow = window else {
+            finish(nil)
+            return
+        }
+        pendingDownloadDestinations[identifier] = finish
+        panel.beginSheetModal(for: parentWindow) { response in
+            finish(response == .OK ? panel.url : nil)
+        }
+    }
+
+    private func cancelPendingDownloadDestinations() {
+        let completions = Array(pendingDownloadDestinations.values)
+        pendingDownloadDestinations.removeAll()
+        for completion in completions {
+            completion(nil)
+        }
     }
 
     func downloadDidFinish(_ download: WKDownload) {
+        pendingDownloadDestinations.removeValue(forKey: ObjectIdentifier(download))?(nil)
         downloads.removeValue(forKey: ObjectIdentifier(download))
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        pendingDownloadDestinations.removeValue(forKey: ObjectIdentifier(download))?(nil)
         downloads.removeValue(forKey: ObjectIdentifier(download))
         showAlert("파일 다운로드를 완료하지 못했습니다.")
     }

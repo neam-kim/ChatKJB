@@ -43,7 +43,9 @@ import {
 } from "./bot/time-parse.js";
 import { TransientMap } from "./bot/transient-store.js";
 import { CodexAppServerGoalClient, type CodexGoalClient } from "./codex-app-server.js";
+import { fetchClaudeWebUsage } from "./claude-web-usage.js";
 import { resolveProject, type AppConfig } from "./config.js";
+import type { GuiClaudeUsageDto } from "./gui/protocol.js";
 import {
   normalizeAgyModelForCatalog
 } from "./model-catalog.js";
@@ -92,6 +94,8 @@ export interface BotRuntimeDependencies {
   projectCatalogRoots?: () => Promise<readonly string[]>;
   runProjectSelector?: (prompt: string, defaults: SessionDefaults) => Promise<string>;
   topicDeletionSource?: TopicDeletionSource;
+  /** 테스트 등에서 Claude 웹 구독 사용량 조회를 대체한다. */
+  fetchClaudeUsage?: () => Promise<GuiClaudeUsageDto | null>;
 }
 
 export async function resolveSessionUploadPath(cwd: string, inputPath: string): Promise<string> {
@@ -152,6 +156,7 @@ export function createBot(
     }
   });
   const transport = new TelegramTransport(bot.api);
+  const fetchClaudeUsage = runtime.fetchClaudeUsage ?? fetchClaudeWebUsage;
   const permissions = new PermissionBroker(store, transport, config.approvalTimeoutMs);
   const projectCatalog = new ProjectCatalog({
     catalogPath: join(dirname(config.databasePath), "project-catalog.md"),
@@ -895,6 +900,7 @@ export function createBot(
     transport,
     permissions,
     sessions,
+    fetchClaudeUsage,
     pendingStarts,
     pendingReserves,
     folderBrowsers,

@@ -1,5 +1,6 @@
 import type { InlineKeyboard, Keyboard } from "grammy";
 import type { AppConfig } from "../config.js";
+import type { GuiClaudeUsageDto } from "../gui/protocol.js";
 import type { PermissionBroker } from "../permission-broker.js";
 import type { SessionManager } from "../session-manager.js";
 import type { StateStore } from "../store.js";
@@ -44,6 +45,8 @@ export interface BotDeps {
   transport: TelegramTransport;
   permissions: PermissionBroker;
   sessions: SessionManager;
+  /** Terminal 사용량 바와 같은 Claude 웹 구독 수치 조회. */
+  fetchClaudeUsage: () => Promise<GuiClaudeUsageDto | null>;
   pendingStarts: Map<string, PendingStart>;
   pendingReserves: Map<string, PendingReserve>;
   folderBrowsers: Map<string, FolderBrowserState>;

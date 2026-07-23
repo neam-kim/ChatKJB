@@ -579,19 +579,13 @@ export class SessionManager {
   }
 
   private toolFreeProvider(preferred: ProviderKind): ProviderKind {
-    const candidates: ProviderKind[] = [preferred, "claude", "codex", "grok", "cline"];
-    const provider = candidates.find((candidate, index) =>
-      candidate !== "agy"
-      && candidates.indexOf(candidate) === index
-      && this.isProviderAvailable(candidate)
-    );
-    if (!provider) {
+    if (!this.isProviderAvailable(preferred)) {
       throw new Error(
-        "프로젝트 자동 선택에는 도구 없는 분류를 지원하는 Claude, Codex, Grok 또는 Cline 인증이 필요합니다. "
+        `${preferred} 제공자는 인증되지 않아 프로젝트를 자동 선택할 수 없습니다. `
         + "/new browse 또는 /reserve browse로 직접 선택하세요."
       );
     }
-    return provider;
+    return preferred;
   }
 
   private createOneOffSession(

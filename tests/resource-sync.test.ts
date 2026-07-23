@@ -656,9 +656,9 @@ describe("selectedClineMcpConnectors", () => {
     obsidian: { type: "stdio", command: "c" }
   } as never;
 
-  it("drops every known Moonshot-incompatible server by default", () => {
+  it("drops only the currently known Moonshot-incompatible servers by default", () => {
     const selected = selectedClineMcpConnectors(connectors);
-    expect(Object.keys(selected).sort()).toEqual(["llm-wiki", "obsidian"]);
+    expect(Object.keys(selected).sort()).toEqual(["interactive-brokers", "llm-wiki", "obsidian"]);
   });
 
   it("honours an explicit exclusion list and keeps everything when it is empty", () => {

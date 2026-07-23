@@ -132,6 +132,7 @@ function botSetup(extra?: {
     }
   } satisfies AppConfig;
   const instance = createBot(config, store, {
+    fetchClaudeUsage: async () => null,
     projectCatalogRoots: async () => [directory],
     ...extra?.runtime
   });
@@ -2227,6 +2228,29 @@ describe("/provider command", () => {
 // /usage는 Claude 스냅샷만 mock하고 Codex 계정 상태는 실제로 조회한다. 기기 부하에
 // 따라 기본 5초 제한을 넘겨 간헐적으로 실패하므로 이 묶음만 여유를 둔다.
 describe("/usage command", { timeout: 20_000 }, () => {
+  it("uses the same Claude web subscription source as the Terminal usage bar", async () => {
+    const { bot, sessions, calls } = botSetup({
+      runtime: {
+        fetchClaudeUsage: async () => ({
+          fiveHour: { utilization: 98, resetsAt: null },
+          sevenDay: { utilization: 8, resetsAt: null },
+          stale: false,
+          capturedAt: Date.parse("2026-07-23T01:48:00.000Z")
+        })
+      }
+    });
+    const oauthLookup = vi.spyOn(sessions, "fetchCurrentUsageSnapshots");
+
+    await bot.handleUpdate(usageCommand());
+
+    const reply = calls.find((call) => call.method === "sendMessage")?.payload.text;
+    expect(reply).toContain("Claude 구독 사용량");
+    expect(reply).toContain("5시간 한도: 98% 사용");
+    expect(reply).toContain("주간 한도: 8% 사용");
+    expect(reply).toContain("Terminal 사용량 바와 동일");
+    expect(oauthLookup).not.toHaveBeenCalled();
+  });
+
   it("fetches a live Claude usage snapshot before using cached data", async () => {
     const { bot, sessions, calls } = botSetup();
     vi.spyOn(sessions, "fetchCurrentUsageSnapshots").mockResolvedValue([

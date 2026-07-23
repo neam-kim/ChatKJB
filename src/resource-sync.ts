@@ -427,10 +427,11 @@ function selectedGrokMcpConnectors(
 // 제공자마다 다르다. Moonshot(Kimi)은 `#/$defs/`로 시작하는 $ref만 허용하는데
 // 도구가 하나라도 어기면 요청 전체가 400으로 거부된다. 확인된 위반 서버:
 //   apple-mail          search-messages → "#/properties/dateFrom" (2.3.0~2.8.11 동일)
-//   interactive-brokers place_order     → "#/properties/conid"
+//   (2026-07-22부터 interactive-brokers는 TWS socket 기반 ibkr-mcp로 교체되어
+//    인라인 JSON Schema만 제공하므로 이 호환성 제외 목록에서 해제했다.)
 // HTTP 커넥터 등 미검증 서버가 남아 있어 이 목록이 완전하다는 보장은 없다. 새 위반이
 // 보이면 여기 추가하거나 CLINE_MCP_EXCLUDED_SERVERS로 우회한다.
-export const CLINE_INCOMPATIBLE_MCP_SERVERS = "apple-mail,interactive-brokers";
+export const CLINE_INCOMPATIBLE_MCP_SERVERS = "apple-mail";
 
 export function selectedClineMcpConnectors(
   connectors: Record<string, McpServerConfig>,

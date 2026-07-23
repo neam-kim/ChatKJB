@@ -328,8 +328,14 @@ a:focus-visible {
 .composer textarea { width: 100%; min-width: 0; height: var(--composer-control-height); min-height: var(--composer-control-height); max-height: 10rem; resize: none; padding: .5rem .8rem; border: 1px solid var(--line); background: #090d10; color: var(--text); font-size: .84rem; line-height: 1.45; }
 .composer textarea::placeholder { color: var(--faint); }
 #attach-button { width: var(--composer-control-height); min-width: var(--composer-control-height); height: var(--composer-control-height); min-height: var(--composer-control-height); font-size: .84rem; line-height: 1; }
-.selected-file { display: flex; align-items: center; justify-content: space-between; gap: .7rem; margin-bottom: .45rem; padding: .45rem .6rem; border: 1px solid var(--line); color: var(--muted); font-size: .7rem; overflow-wrap: anywhere; }
+.selected-file { display: flex; align-items: flex-start; justify-content: space-between; gap: .7rem; margin-bottom: .45rem; padding: .45rem .6rem; border: 1px solid var(--line); color: var(--muted); font-size: .7rem; overflow-wrap: anywhere; }
 .selected-file[hidden] { display: none; }
+.selected-file-list { display: grid; gap: .25rem; min-width: 0; flex: 1; }
+.selected-file-summary { color: var(--text); }
+.selected-file-entry { display: flex; align-items: center; gap: .45rem; min-width: 0; }
+.selected-file-entry-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.selected-file-entry-status { flex: 0 0 auto; color: var(--faint); }
+.selected-file-entry .quiet-button { margin-left: auto; }
 .selected-file .quiet-button { flex: 0 0 auto; padding: .3rem .5rem; }
 
 /* 작성창 하단 사용량 스트립. selected-file과 같은 톤의 작은 글씨, 제공자당 1줄. */

@@ -5,6 +5,7 @@ import type {
 import type { GrokLiveUsageResult } from "./grok-live-usage.js";
 import type { LocalTokenUsageReport } from "./local-token-usage.js";
 import { appLocale, appTimeZone } from "./localization.js";
+import type { GuiClaudeUsageDto, GuiUsageWindowDto } from "./gui/protocol.js";
 import type {
   CodexAccountUsageSnapshot,
   CodexLiveUsageSnapshot,
@@ -151,6 +152,19 @@ function formatWindow(label: string, window: UsageWindow): string {
     }).format(new Date(window.resetsAt))} 초기화`
     : "";
   return `${label}: ${utilization}${reset}`;
+}
+
+/** Terminal 사용량 바와 동일한 Claude 웹 구독 수치를 텔레그램용으로 표시한다. */
+export function formatClaudeWebUsage(usage: GuiClaudeUsageDto): string {
+  const formatWebWindow = (label: string, window: GuiUsageWindowDto | null): string => {
+    if (!window || window.utilization === null) return `${label}: 사용률 확인 불가`;
+    return `${label}: ${Math.round(window.utilization)}% 사용`;
+  };
+  return [
+    "Claude 구독 사용량",
+    formatWebWindow("5시간 한도", usage.fiveHour),
+    formatWebWindow("주간 한도", usage.sevenDay)
+  ].join("\n");
 }
 
 function formatExtraUsage(extra: ExtraUsage): string | null {

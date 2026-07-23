@@ -22,8 +22,8 @@
 //      하나가 실패해도 나머지 업데이트와 아래 리컨실 단계는 계속 진행된다.
 //   1) 업데이트로 전역 codex 버전이 봇 codex-sdk 버전과 달라지면 codex-sdk를 안전 절차로 락스텝
 //      → 재시작(즉 "codex CLI 업데이트 후 봇이 새 버전으로 동작"까지 자동 완결).
-//   2) Claude/Grok/agy는 같은 경로 in-place 갱신이라 다음 스폰에 자동 반영 — 해석 경로가 바뀐
-//      경우에만 재시작(버전만 바뀌면 재시작 불필요).
+//   2) 어느 provider CLI든 실제 버전이 갱신되면, 현재 실행 중인 봇도 새 런타임을 쓰도록
+//      데몬을 한 번 재시작한다. 경로 변경도 동일한 재시작 사유에 함께 기록한다.
 //   3) 아무 변동이 없으면 재시작하지 않는다. 텔레그램 보고는 매 실행 후 보낸다
 //      (AGENT_SYNC_NOTIFY=0 이면 비활성).
 //   위험한 npm 작업(공유 node_modules 갱신)은 codex 버전이 실제로 바뀐 경우에만 실행하며,
@@ -242,6 +242,17 @@ function restartDaemon(reason) {
     log(`재시작 실패: ${e?.message ?? e}`);
     return false;
   }
+}
+
+/**
+ * 실제로 갱신된 provider가 있으면 데몬 재시작 사유를 만든다.
+ * 업데이트 명령의 exit 0만으로는 부족하고, 전후 버전이 달라진 경우만 갱신으로 본다.
+ *
+ * @param {UpdateLine[]} updates
+ */
+function restartReasonForUpdates(updates) {
+  const updated = updates.filter((update) => update.status === "updated").map((update) => update.name);
+  return updated.length ? `provider 업데이트(${updated.join(", ")})` : null;
 }
 
 // codex-sdk를 targetVer에 맞춘다. 성공 시 true.
@@ -591,7 +602,13 @@ function main() {
     }
   }
 
-  // (2) Claude/Grok/agy/cline — 경로가 바뀐 경우에만 재해석 위해 재시작(버전만 바뀌면 자동).
+  // (2) 실제 CLI 갱신 뒤에는 실행 중인 봇도 새 런타임을 쓰도록 재시작한다.
+  // 경로 변경도 재시작 사유에 남겨 운영 보고에서 원인을 구분한다.
+  const updateRestartReason = restartReasonForUpdates(updates);
+  if (updateRestartReason) {
+    restartReason = restartReason ? `${restartReason}; ${updateRestartReason}` : updateRestartReason;
+  }
+
   for (const name of ["claude", "grok", "agy", "cline"]) {
     const p = prev[name];
     if (p && p.path && cur[name].path && p.path !== cur[name].path) {
@@ -605,12 +622,9 @@ function main() {
     const restarted = restartDaemon(restartReason);
     if (!restarted) outcome = `재시작 실패: ${restartReason}`;
   } else {
-    const changed = updates.some((u) => u.status === "updated");
     const failed = updates.some((u) => u.status === "failed");
-    if (changed || failed) {
-      outcome = failed
-        ? "일부 업데이트 실패 · 재시작 없음(다음 스폰/주기에 반영·재시도)"
-        : "CLI 갱신 반영 · 재시작 없음(다음 스폰에 자동 적용)";
+    if (failed) {
+      outcome = "일부 업데이트 실패 · 재시작 없음(다음 스폰/주기에 반영·재시도)";
     } else {
       outcome = "변동 없음 — 무동작";
     }
@@ -641,6 +655,7 @@ function main() {
 export {
   formatAgentSyncReport,
   parseTelegramResponse,
+  restartReasonForUpdates,
   resolveNodeBinDir,
   resolveBin
 };

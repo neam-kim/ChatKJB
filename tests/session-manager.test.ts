@@ -164,7 +164,7 @@ describe("read-only one-off task", () => {
     }
   });
 
-  it("uses a strict tool-free provider for selection when Antigravity is the task provider", async () => {
+  it("uses Antigravity itself for selection when Antigravity is the task provider", async () => {
     const directory = mkdtempSync(join(tmpdir(), "chatkjb-read-only-task-"));
     const store = new StateStore(join(directory, "state.sqlite"));
     const permissions = new PermissionBroker(store, fakeTransport, 1_000);
@@ -194,8 +194,8 @@ describe("read-only one-off task", () => {
         timeoutMs: 5_000
       });
       expect(runSilentReadOnly).toHaveBeenCalledWith(
-        expect.objectContaining({ provider: "claude", permissionMode: "plan" }),
-        "claude",
+        expect.objectContaining({ provider: "agy", permissionMode: "plan" }),
+        "agy",
         "select project",
         { timeoutMs: 5_000, toolFree: true }
       );

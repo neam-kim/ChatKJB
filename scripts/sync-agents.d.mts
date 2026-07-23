@@ -24,6 +24,9 @@ export type AgentSyncUpdateLine = {
   error?: string;
 };
 
+/** 실제 버전이 갱신된 provider들의 데몬 재시작 사유를 만든다. */
+export function restartReasonForUpdates(updates: AgentSyncUpdateLine[]): string | null;
+
 export function formatAgentSyncReport(
   report: {
     updates: AgentSyncUpdateLine[];

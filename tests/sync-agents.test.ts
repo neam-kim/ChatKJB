@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   formatAgentSyncReport,
   parseTelegramResponse,
+  restartReasonForUpdates,
   resolveBin,
   resolveNodeBinDir
 } from "../scripts/sync-agents.mjs";
@@ -122,21 +123,27 @@ describe("formatAgentSyncReport", () => {
     expect(text).toContain("· 변동 없음 — 무동작");
   });
 
-  it("CLI 갱신 후 재시작 없음 outcome을 포함한다", () => {
-    const text = formatAgentSyncReport({
-      updates: [
-        { name: "grok", status: "updated", before: "0.2.103", after: "0.2.106" }
-      ],
-      current: {
-        codexCli: "0.144.6",
-        codexSdk: "0.144.6",
-        claude: "2.1.215",
-        grok: "0.2.106",
-        agy: "1.1.4"
-      },
-      outcome: "CLI 갱신 반영 · 재시작 없음(다음 스폰에 자동 적용)"
-    });
-    expect(text).toContain("· CLI 갱신 반영 · 재시작 없음(다음 스폰에 자동 적용)");
+});
+
+describe("restartReasonForUpdates", () => {
+  it("실제 버전이 갱신된 모든 provider를 데몬 재시작 사유에 넣는다", () => {
+    expect(
+      restartReasonForUpdates([
+        { name: "codex", status: "updated", before: "0.145.0", after: "0.146.0" },
+        { name: "claude", status: "latest", before: "2.1.215", after: "2.1.215" },
+        { name: "grok", status: "updated", before: "0.2.103", after: "0.2.106" },
+        { name: "agy", status: "failed", error: "timeout" }
+      ])
+    ).toBe("provider 업데이트(codex, grok)");
+  });
+
+  it("버전 갱신이 없으면 데몬을 재시작하지 않는다", () => {
+    expect(
+      restartReasonForUpdates([
+        { name: "codex", status: "latest", before: "0.146.0", after: "0.146.0" },
+        { name: "grok", status: "failed", error: "timeout" }
+      ])
+    ).toBeNull();
   });
 });
 

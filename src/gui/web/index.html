@@ -74,14 +74,14 @@
       <footer class="composer-shell">
         <div id="general-panel" class="general-panel" role="group" aria-label="새 세션 기본값" hidden></div>
         <div id="selected-file" class="selected-file" role="status" hidden>
-          <span id="selected-file-label"></span>
-          <button id="selected-file-remove" class="quiet-button" type="button">첨부 제거</button>
+          <div id="selected-file-label"></div>
+          <button id="selected-file-remove" class="quiet-button" type="button">첨부 모두 제거</button>
         </div>
         <div id="command-menu" class="command-menu" role="listbox" aria-label="명령어 미리보기" hidden></div>
         <form id="composer" class="composer">
           <label class="sr-only" for="message-input">메시지</label>
           <textarea id="message-input" rows="1" maxlength="4096" placeholder="ChatKJB에 메시지 입력…" enterkeyhint="send" autocomplete="off" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="command-menu"></textarea>
-          <input id="file-input" class="sr-only" type="file">
+          <input id="file-input" class="sr-only" type="file" multiple>
           <button id="attach-button" class="icon-button" type="button" aria-label="사진 또는 문서 첨부">＋</button>
         </form>
         <div id="usage-strip" class="usage-strip" role="status" aria-live="polite" hidden></div>

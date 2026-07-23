@@ -5,6 +5,7 @@ const MAX_CACHED_BLOBS = 32;
 const MAX_CACHED_BLOB_BYTES = 128 * 1024 * 1024;
 const TOPIC_INVALIDATION_RETRIES = 3;
 const READ_CONFIRMATION_RETRY_DELAYS_MS = [750, 2000, 5000];
+const UPLOAD_RETRY_DELAYS_MS = [500, 1000, 1500, 2000, 3000];
 const GENERAL_TOPIC_ID = 1;
 export const GENERAL_PANEL_FALLBACK_ROWS = Object.freeze([
   Object.freeze(["⚙️ 새 세션 기본값", "🧠 모델"]),
@@ -138,7 +139,8 @@ function startApplication() {
     olderAbort: null,
     selectionGeneration: 0,
     topicReadGeneration: 0,
-    selectedFile: null,
+    selectedFiles: [],
+    uploadingFile: null,
     uploadAbort: null,
     limitsRefreshActive: false,
     composing: false,
@@ -189,9 +191,11 @@ function startApplication() {
     }, 5000);
   }
 
-  function apiError(code) {
+  function apiError(code, status = 0, retryAfterMs = 0) {
     const error = new Error("ChatKJB request failed");
     error.code = typeof code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(code) ? code : "REQUEST_FAILED";
+    error.status = Number.isSafeInteger(status) ? status : 0;
+    error.retryAfterMs = Number.isSafeInteger(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : 0;
     return error;
   }
 
@@ -207,7 +211,11 @@ function startApplication() {
       } catch {
         // Error bodies are optional and never surfaced verbatim.
       }
-      throw apiError(code);
+      const retryAfterSeconds = Number(response.headers.get("Retry-After"));
+      const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+        ? Math.min(300_000, Math.ceil(retryAfterSeconds * 1_000))
+        : 0;
+      throw apiError(code, response.status, retryAfterMs);
     }
     return response;
   }
@@ -333,9 +341,10 @@ function startApplication() {
       const session = await requestJson("/api/session", {}, false);
       applySessionLimits(session?.limits);
       applySessionCommands(session?.commands);
-      if (state.selectedFile && !isAllowedUploadFile(state.selectedFile, state.limits.uploadBytes)) {
-        showAlert(`현재 Telegram 계정의 ${formatBytes(state.limits.uploadBytes)} 상한을 초과하여 선택을 해제했습니다.`);
-        setSelectedFile(null);
+      const allowedFiles = state.selectedFiles.filter((file) => isAllowedUploadFile(file, state.limits.uploadBytes));
+      if (allowedFiles.length !== state.selectedFiles.length) {
+        showAlert(`현재 Telegram 계정의 ${formatBytes(state.limits.uploadBytes)} 상한을 초과한 첨부를 선택에서 해제했습니다.`);
+        setSelectedFiles(allowedFiles);
       }
     } catch {
       // Keep the conservative standard-account limit until the next ready event.
@@ -986,7 +995,11 @@ function startApplication() {
     return await request(`/api/attachments/${encodeURIComponent(token)}`, { signal });
   }
 
-  async function loadImage(message, attachmentElement, actionRegion, status) {
+  async function loadImage(message, attachmentElement, actionRegion, status, button) {
+    if (button) {
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+    }
     revokeMessageMedia(message.id);
     const controller = new AbortController();
     state.mediaControllers.set(message.id, controller);
@@ -1030,6 +1043,10 @@ function startApplication() {
     } catch (error) {
       if (controller.signal.aborted) return;
       status.textContent = `이미지를 불러올 수 없습니다 · ${errorCode(error)}`;
+      if (button) {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+      }
     } finally {
       if (state.mediaControllers.get(message.id) === controller) state.mediaControllers.delete(message.id);
     }
@@ -1110,11 +1127,18 @@ function startApplication() {
       return;
     }
     if (attachment.kind === "image") {
-      if (state.mediaControllers.size + state.blobUrls.size >= MAX_CACHED_BLOBS) {
-        status.textContent = "이 화면의 이미지 자동 로딩 한도에 도달했습니다.";
-        return;
-      }
-      void loadImage(message, element, actionRegion, status);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "attachment-button";
+      const icon = document.createElement("span");
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = "▧";
+      const label = document.createElement("span");
+      label.textContent = "미리보기 보기";
+      button.append(icon, label);
+      button.addEventListener("click", () => void loadImage(message, element, actionRegion, status, button));
+      actionRegion.append(button);
+      status.textContent = "미리보기 보기 가능";
       return;
     }
     const button = document.createElement("button");
@@ -1941,22 +1965,100 @@ function startApplication() {
     return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
   }
 
-  function setSelectedFile(file) {
-    if (!file) {
-      state.selectedFile = null;
+  function selectedFilesSize() {
+    return state.selectedFiles.reduce((total, file) => total + file.size, 0);
+  }
+
+  function renderSelectedFiles() {
+    if (state.selectedFiles.length === 0) {
       elements.fileInput.value = "";
       elements.selectedFile.hidden = true;
-      elements.selectedFileLabel.textContent = "";
+      elements.selectedFileLabel.replaceChildren();
+      elements.selectedFileRemove.textContent = "첨부 모두 제거";
       return;
     }
-    if (!isAllowedUploadFile(file, state.limits.uploadBytes)) {
-      showAlert(`${formatBytes(state.limits.uploadBytes)} 이하 파일 한 개만 전송할 수 있습니다.`);
-      setSelectedFile(null);
-      return;
-    }
-    state.selectedFile = file;
-    elements.selectedFileLabel.textContent = `첨부: ${file.name} · ${formatBytes(file.size)} · 전송 대기`;
     elements.selectedFile.hidden = false;
+    elements.selectedFileRemove.textContent = state.busy ? "전송 취소" : "첨부 모두 제거";
+    const list = document.createElement("div");
+    list.className = "selected-file-list";
+    const summary = document.createElement("div");
+    summary.className = "selected-file-summary";
+    summary.textContent = `첨부 ${state.selectedFiles.length}개 · ${formatBytes(selectedFilesSize())}`;
+    list.append(summary);
+    for (const [index, file] of state.selectedFiles.entries()) {
+      const entry = document.createElement("div");
+      entry.className = "selected-file-entry";
+      const name = document.createElement("span");
+      name.className = "selected-file-entry-name";
+      name.textContent = `${file.name} · ${formatBytes(file.size)}`;
+      const status = document.createElement("span");
+      status.className = "selected-file-entry-status";
+      status.textContent = state.uploadingFile === file ? "전송 중" : "전송 대기";
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "quiet-button";
+      remove.textContent = "제거";
+      remove.disabled = state.busy;
+      remove.addEventListener("click", () => {
+        if (state.busy) return;
+        setSelectedFiles(state.selectedFiles.filter((_, candidateIndex) => candidateIndex !== index));
+        elements.messageInput.focus();
+      });
+      entry.append(name, status, remove);
+      list.append(entry);
+    }
+    elements.selectedFileLabel.replaceChildren(list);
+  }
+
+  function setSelectedFiles(files) {
+    state.selectedFiles = files;
+    renderSelectedFiles();
+  }
+
+  function addSelectedFiles(files) {
+    const allowed = files.filter((file) => isAllowedUploadFile(file, state.limits.uploadBytes));
+    // 같은 파일을 다시 선택해 큐에 넣을 수 있게, FileList를 읽은 뒤 즉시 비운다.
+    elements.fileInput.value = "";
+    if (allowed.length !== files.length) {
+      showAlert(`${formatBytes(state.limits.uploadBytes)} 이하인 파일만 첨부할 수 있습니다.`);
+    }
+    if (allowed.length > 0) setSelectedFiles([...state.selectedFiles, ...allowed]);
+    else renderSelectedFiles();
+  }
+
+  function waitForUploadRetry(delay, signal) {
+    return new Promise((resolve, reject) => {
+      const timeout = window.setTimeout(resolve, delay);
+      signal.addEventListener("abort", () => {
+        window.clearTimeout(timeout);
+        reject(new DOMException("Upload cancelled", "AbortError"));
+      }, { once: true });
+    });
+  }
+
+  async function uploadSelectedFile(topicId, file, caption) {
+    const controller = new AbortController();
+    state.uploadAbort = controller;
+    for (let attempt = 0; ; attempt += 1) {
+      const headers = {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-ChatKJB-File-Name": utf8Base64Url(file.name)
+      };
+      if (caption) headers["X-ChatKJB-Caption"] = utf8Base64Url(caption);
+      try {
+        await request(`/api/topics/${topicId}/files`, {
+          method: "POST",
+          headers,
+          body: file,
+          signal: controller.signal
+        });
+        return;
+      } catch (error) {
+        const retryable = error?.status === 429;
+        if (!retryable || attempt >= UPLOAD_RETRY_DELAYS_MS.length || controller.signal.aborted) throw error;
+        await waitForUploadRetry(Math.max(UPLOAD_RETRY_DELAYS_MS[attempt], error.retryAfterMs || 0), controller.signal);
+      }
+    }
   }
 
   async function setTyping(active) {
@@ -1977,10 +2079,11 @@ function startApplication() {
 
   async function submitComposer() {
     if (state.busy || state.connection !== "ready" || state.activeTopicId === null) return;
+    const topicId = state.activeTopicId;
     const text = elements.messageInput.value;
-    const file = state.selectedFile;
-    if (!file && !text.trim()) return;
-    if (file && text.length > 1024) {
+    const files = [...state.selectedFiles];
+    if (files.length === 0 && !text.trim()) return;
+    if (files.length > 0 && text.length > 1024) {
       showAlert("파일 설명은 1,024자 이하여야 합니다. 입력 내용과 파일은 그대로 유지됩니다.");
       return;
     }
@@ -1988,38 +2091,34 @@ function startApplication() {
     elements.composer.setAttribute("aria-busy", "true");
     setConnection(state.connection);
     try {
-      if (file) {
-        const mimeType = file.type || "application/octet-stream";
-        const controller = new AbortController();
-        state.uploadAbort = controller;
-        elements.selectedFileLabel.textContent = `첨부: ${file.name} · ${formatBytes(file.size)} · 전송 중`;
-        const headers = {
-          "Content-Type": mimeType,
-          "X-ChatKJB-File-Name": utf8Base64Url(file.name)
-        };
-        if (text && text.length <= 1024) headers["X-ChatKJB-Caption"] = utf8Base64Url(text);
-        await request(`/api/topics/${state.activeTopicId}/files`, {
-          method: "POST",
-          headers,
-          body: file,
-          signal: controller.signal
-        });
-        setSelectedFile(null);
+      if (files.length > 0) {
+        for (const [index, file] of files.entries()) {
+          state.uploadingFile = file;
+          renderSelectedFiles();
+          await uploadSelectedFile(topicId, file, index === 0 ? text : "");
+          setSelectedFiles(state.selectedFiles.filter((candidate) => candidate !== file));
+          if (index === 0) elements.messageInput.value = "";
+        }
       } else {
-        await postJson(`/api/topics/${state.activeTopicId}/messages`, { text });
+        await postJson(`/api/topics/${topicId}/messages`, { text });
       }
       elements.messageInput.value = "";
       closeCommandMenu();
       elements.messageInput.style.height = "auto";
       await setTyping(false);
     } catch (error) {
-      if (state.selectedFile) {
-        elements.selectedFileLabel.textContent = `첨부: ${state.selectedFile.name} · ${formatBytes(state.selectedFile.size)} · 전송 대기`;
-      }
-      showAlert(`전송하지 못했습니다. 자동 재전송하지 않습니다 · ${errorCode(error)}`);
+      renderSelectedFiles();
+      const cancelled = state.uploadAbort?.signal.aborted === true;
+      showAlert(cancelled
+        ? "전송을 취소했습니다. 전송하지 않은 첨부는 선택 목록에 유지했습니다."
+        : files.length > 0
+        ? `일부 첨부를 전송하지 못했습니다. 성공분은 제거했고 실패·미전송분은 유지했습니다 · ${errorCode(error)}`
+        : `전송하지 못했습니다. 자동 재전송하지 않습니다 · ${errorCode(error)}`);
     } finally {
       state.uploadAbort = null;
+      state.uploadingFile = null;
       state.busy = false;
+      renderSelectedFiles();
       elements.composer.removeAttribute("aria-busy");
       setConnection(state.connection);
       elements.messageInput.focus();
@@ -2106,11 +2205,12 @@ function startApplication() {
   });
   elements.attachButton.addEventListener("click", () => elements.fileInput.click());
   elements.fileInput.addEventListener("change", () => {
-    setSelectedFile(elements.fileInput.files?.[0] || null);
+    addSelectedFiles([...(elements.fileInput.files || [])]);
     elements.messageInput.focus();
   });
   elements.selectedFileRemove.addEventListener("click", () => {
-    setSelectedFile(null);
+    if (state.busy) state.uploadAbort?.abort();
+    else setSelectedFiles([]);
     elements.messageInput.focus();
   });
   for (const eventName of ["dragenter", "dragover", "dragleave", "drop"]) {
@@ -2118,12 +2218,8 @@ function startApplication() {
   }
   elements.composer.addEventListener("drop", (event) => {
     const files = [...(event.dataTransfer?.files || [])];
-    if (files.length > 1) {
-      showAlert("파일은 한 번에 하나만 첨부할 수 있습니다. 기존 선택은 유지됩니다.");
-      return;
-    }
-    if (files[0]) {
-      setSelectedFile(files[0]);
+    if (files.length > 0) {
+      addSelectedFiles(files);
       elements.messageInput.focus();
     }
   });

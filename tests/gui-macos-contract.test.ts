@@ -68,15 +68,24 @@ describe("ChatKJB Terminal macOS shell contract", () => {
     expect(entry).toContain("void client.beginQrLogin().catch(() => undefined)");
   });
 
-  it("connects HTML file inputs to a single-file Finder sheet", () => {
+  it("connects HTML file inputs to a Finder sheet matching the input selection mode", () => {
     expect(swift).toContain("runOpenPanelWith parameters: WKOpenPanelParameters");
     expect(swift).toContain("initiatedByFrame frame: WKFrameInfo");
     expect(swift).toContain("let panel = NSOpenPanel()");
     expect(swift).toContain("panel.canChooseFiles = true");
     expect(swift).toContain("panel.canChooseDirectories = false");
-    expect(swift).toContain("panel.allowsMultipleSelection = false");
+    expect(swift).toContain("panel.allowsMultipleSelection = parameters.allowsMultipleSelection");
     expect(swift).toContain("panel.beginSheetModal(for: window)");
     expect(swift).toContain("completionHandler(response == .OK ? panel.urls : nil)");
+  });
+
+  it("uses a non-blocking save sheet and resolves each download destination once", () => {
+    expect(swift).toContain("pendingDownloadDestinations");
+    expect(swift).toContain("panel.beginSheetModal(for: parentWindow)");
+    expect(swift).toContain("guard !completed else { return }");
+    expect(swift).toContain("cancelPendingDownloadDestinations()");
+    expect(swift).toContain("guard let parentWindow = window else {");
+    expect(swift).toContain("finish(nil)");
   });
 
   it("routes window.alert and window.confirm through WKUIDelegate native panels", () => {

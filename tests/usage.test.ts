@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { SessionRecord } from "../src/types.js";
 import {
   formatAgyAccountUsage,
+  formatClaudeWebUsage,
   formatClineAccountUsage,
   isClineSubscriptionProvider,
   parseStoredClineUsage,
@@ -39,6 +40,15 @@ function usageResponse(
 }
 
 describe("usage limits", () => {
+  it("formats the same Claude web subscription windows used by the Terminal bar", () => {
+    expect(formatClaudeWebUsage({
+      fiveHour: { utilization: 98, resetsAt: null },
+      sevenDay: { utilization: 8, resetsAt: null },
+      stale: false,
+      capturedAt: 123
+    })).toBe("Claude 구독 사용량\n5시간 한도: 98% 사용\n주간 한도: 8% 사용");
+  });
+
   it("normalizes SDK rate-limit event utilization", () => {
     expect(snapshotFromRateLimitInfo({
       status: "allowed_warning",

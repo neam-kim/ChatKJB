@@ -76,6 +76,7 @@ class FixtureClient {
   delayNextFile = false;
   filePending = false;
   releaseFile = null;
+  failFileNames = new Set();
 
   constructor() {
     this.generalPanel = {
@@ -251,6 +252,7 @@ class FixtureClient {
       this.releaseFile = null;
     }
     await input.onFileReleased?.();
+    if (this.failFileNames.has(input.name)) throw new Error("fixture upload failure");
   }
   async downloadAttachment(token) {
     if (imageTokens.includes(token)) {
@@ -841,11 +843,11 @@ async function main() {
       await waitFor(async () => await evaluate(
         "document.querySelectorAll('.message-row').length >= 70"
       ), "fixture messages");
-      await waitFor(async () => await evaluate(
-        "document.querySelectorAll('.attachment img').length === 3 && [...document.querySelectorAll('.attachment img')].every((image) => image.complete)"
-      ), "fixture images");
-      if (client.calls.downloadMax > 2 || client.calls.downloadMax < 2) {
-        throw new Error(`Image download concurrency was ${client.calls.downloadMax}, expected exactly 2`);
+      if (await evaluate("document.querySelectorAll('.attachment img').length !== 0")) {
+        throw new Error("Image preview loaded without an explicit user action");
+      }
+      if (client.calls.downloadMax !== 0) {
+        throw new Error(`Image preview started ${client.calls.downloadMax} downloads before user action`);
       }
       const attachmentContract = await evaluate(`(() => {
         const row = (id) => document.querySelector('[data-message-id="' + id + '"]');
@@ -863,6 +865,7 @@ async function main() {
           imageDetails: text(image, '.attachment-details'),
           imageStatus: text(image, '.attachment-status'),
           imageCount: image?.querySelectorAll('.attachment img').length || 0,
+          imageAction: text(image, '.attachment-button'),
           documentCaption: text(documentRow, '.message-text'),
           documentName: text(documentRow, '.attachment-name'),
           documentDetails: text(documentRow, '.attachment-details'),
@@ -884,8 +887,9 @@ async function main() {
         attachmentContract.imageCaption !== "이미지 첨부"
         || attachmentContract.imageName !== "terminal-pixel.png"
         || !attachmentContract.imageDetails.includes("Telegram 원본 파일명 · PNG 이미지 · image/png")
-        || attachmentContract.imageStatus !== "미리보기 준비됨"
-        || attachmentContract.imageCount !== 1
+        || attachmentContract.imageStatus !== "미리보기 보기 가능"
+        || attachmentContract.imageCount !== 0
+        || attachmentContract.imageAction !== "▧미리보기 보기"
         || attachmentContract.documentCaption !== "문서와 callback"
         || attachmentContract.documentName !== "ChatKJB terminal fixture.txt"
         || !attachmentContract.documentDetails.includes("Telegram 원본 파일명 · 텍스트 문서 · text/plain · 16 B")
@@ -902,6 +906,13 @@ async function main() {
         || attachmentContract.svgImages !== 0
         || attachmentContract.svgStatus !== "이 첨부를 현재 다운로드할 수 없습니다."
       ) throw new Error(`Attachment identity contract failed: ${JSON.stringify(attachmentContract)}`);
+      await evaluate("document.querySelector('[data-message-id=\"293\"] .attachment-button').click(); true");
+      await waitFor(async () => await evaluate(
+        "document.querySelector('[data-message-id=\"293\"] .attachment-status')?.textContent === '미리보기 준비됨' && document.querySelector('[data-message-id=\"293\"] .attachment img')?.complete"
+      ), "explicit image preview");
+      if (client.calls.downloadMax !== 1) {
+        throw new Error(`Explicit image preview started ${client.calls.downloadMax} downloads, expected one`);
+      }
       await evaluate("document.querySelector('[data-message-id=\"294\"] .attachment-button').click(); true");
       await waitFor(async () => await evaluate(
         `(() => {
@@ -1140,9 +1151,9 @@ async function main() {
     if (client.calls.text !== 1 || !await evaluate("document.querySelector('#general-panel').hidden")) {
       throw new Error("General panel sent after topic selection changed or remained visible");
     }
-    await waitFor(async () => await evaluate(
-      "document.querySelectorAll('.attachment img').length === 3 && [...document.querySelectorAll('.attachment img')].every((image) => image.complete)"
-    ), "fixture images after General panel selection race");
+    if (await evaluate("document.querySelectorAll('.attachment img').length !== 0")) {
+      throw new Error("Image preview persisted across a re-render");
+    }
     process.stdout.write("G001 renderer: General alias, panel fallback/dynamic/cache/visibility/click passed\n");
 
     const measurements = [];
@@ -1799,8 +1810,8 @@ async function main() {
       document.querySelector('#composer').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
       return true;
     })()`);
-    if (!await evaluate("document.querySelector('#selected-file-label').textContent.includes('first.txt')")) {
-      throw new Error("Multiple-file drop silently replaced the selected file");
+    if (!await evaluate("document.querySelector('#selected-file-label').textContent.includes('첨부 3개') && document.querySelector('#selected-file-label').textContent.includes('first.txt') && document.querySelector('#selected-file-label').textContent.includes('second.txt') && document.querySelector('#selected-file-label').textContent.includes('third.txt')")) {
+      throw new Error("Multiple-file drop did not preserve every selected file");
     }
     await evaluate("document.querySelector('#selected-file-remove').focus(); true");
     await pressKey("Enter");
@@ -1854,6 +1865,111 @@ async function main() {
       || sentFile?.size !== 7
       || sentFile?.bytes !== "fixture"
     ) throw new Error(`Browser File streaming contract failed: ${JSON.stringify(client.calls.fileInputs)}`);
+    await evaluate(`(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['race one'], 'topic-race-one.txt', { type: 'text/plain' }));
+      transfer.items.add(new File(['race two'], 'topic-race-two.txt', { type: 'text/plain' }));
+      const input = document.querySelector('#file-input');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#message-input').focus();
+      return true;
+    })()`);
+    client.delayNextFile = true;
+    await pressKey("Enter");
+    await waitFor(() => client.filePending, "topic-switch upload pending");
+    await evaluate("document.querySelector('[data-topic-id=\"77\"]')?.click(); true");
+    client.releaseFile?.();
+    await waitFor(() => client.calls.file === 3, "topic-switch sequential upload");
+    if (client.calls.fileInputs.slice(1, 3).some((input) => input.topicId !== 42)) {
+      throw new Error(`Sequential upload leaked to the newly selected topic: ${JSON.stringify(client.calls.fileInputs.slice(1, 3))}`);
+    }
+    await evaluate("document.querySelector('[data-topic-id=\"42\"]')?.click(); true");
+    await waitFor(async () => await evaluate("document.querySelector('#topic-title')?.textContent === '반응형 터미널'"), "topic return after upload race");
+    await evaluate(`(() => {
+      window.__uploadRetryCalls = 0;
+      window.__uploadRetryFetch = window.fetch;
+      window.fetch = async (...args) => {
+        const target = String(args[0]);
+        if (target.includes('/files') && ++window.__uploadRetryCalls === 1) {
+          return new Response(JSON.stringify({ error: { code: 'RATE_LIMITED' } }), {
+            status: 429,
+            headers: { 'Retry-After': '0.001' }
+          });
+        }
+        return await window.__uploadRetryFetch(...args);
+      };
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['retry'], 'retry-rate-limit.txt', { type: 'text/plain' }));
+      const input = document.querySelector('#file-input');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#message-input').focus();
+      return true;
+    })()`);
+    await pressKey("Enter");
+    await waitFor(async () => await evaluate("window.__uploadRetryCalls === 2"), "Retry-After upload retry");
+    await waitFor(() => client.calls.file === 4, "rate-limited upload completion");
+    await evaluate("window.fetch = window.__uploadRetryFetch; true");
+    await evaluate(`(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['cancel one'], 'cancel-one.txt', { type: 'text/plain' }));
+      transfer.items.add(new File(['cancel two'], 'cancel-two.txt', { type: 'text/plain' }));
+      const input = document.querySelector('#file-input');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#message-input').focus();
+      return true;
+    })()`);
+    client.delayNextFile = true;
+    await pressKey("Enter");
+    await waitFor(() => client.filePending, "cancel upload pending");
+    await evaluate("document.querySelector('#selected-file-remove').click(); true");
+    client.releaseFile?.();
+    await waitFor(async () => await evaluate(
+      "document.querySelector('#selected-file-label').textContent.includes('cancel-one.txt') && document.querySelector('#selected-file-label').textContent.includes('cancel-two.txt') && document.querySelector('#selected-file-remove').textContent === '첨부 모두 제거'"
+    ), "cancelled upload queue preservation");
+    if (client.calls.file !== 5) throw new Error("Cancelling an upload started another queued file");
+    await evaluate("document.querySelector('#selected-file-remove').click(); true");
+    await evaluate(`(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['one'], 'album-one.txt', { type: 'text/plain' }));
+      transfer.items.add(new File(['two'], 'album-two.txt', { type: 'text/plain' }));
+      const input = document.querySelector('#file-input');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      const message = document.querySelector('#message-input');
+      message.value = 'album caption';
+      message.dispatchEvent(new Event('input', { bubbles: true }));
+      message.focus();
+      return true;
+    })()`);
+    await pressKey("Enter");
+    await waitFor(() => client.calls.file === 7, "sequential album upload");
+    await waitFor(async () => await evaluate("document.querySelector('#selected-file').hidden"), "album upload completion");
+    const album = client.calls.fileInputs.slice(5, 7);
+    if (
+      album[0]?.name !== "album-one.txt"
+      || album[0]?.caption !== "album caption"
+      || album[1]?.name !== "album-two.txt"
+      || album[1]?.caption !== undefined
+    ) throw new Error(`Sequential album caption contract failed: ${JSON.stringify(album)}`);
+    client.failFileNames.add("preserve-failure.txt");
+    await evaluate(`(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['success'], 'preserve-success.txt', { type: 'text/plain' }));
+      transfer.items.add(new File(['failure'], 'preserve-failure.txt', { type: 'text/plain' }));
+      const input = document.querySelector('#file-input');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#message-input').focus();
+      return true;
+    })()`);
+    await pressKey("Enter");
+    await waitFor(() => client.calls.file === 9, "partial album failure");
+    if (!await evaluate("document.querySelector('#selected-file-label').textContent.includes('preserve-failure.txt') && !document.querySelector('#selected-file-label').textContent.includes('preserve-success.txt')")) {
+      throw new Error("Partial album failure did not preserve only the failed file");
+    }
     process.stdout.write("G003 renderer: keyboard actions and direct File body passed\n");
 
     const finalMetrics = await evaluate(`({

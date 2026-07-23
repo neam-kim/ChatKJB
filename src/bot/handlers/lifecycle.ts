@@ -6,7 +6,7 @@ import { fetchGrokLiveUsage } from "../../grok-live-usage.js";
 import { collectLocalTokenUsage } from "../../local-token-usage.js";
 import { appLocale, appTimeZone } from "../../localization.js";
 import { safeErrorMessage } from "../../telegram-transport.js";
-import { formatAgyAccountUsage, formatAgyUsage, formatClineAccountUsage, formatClineUsage, formatCodexAccountUsage, formatGrokUsage, formatLocalTokenUsage, formatUsageSnapshot, isClineSubscriptionProvider, parseStoredAgyUsage, parseStoredClineUsage } from "../../usage.js";
+import { formatAgyAccountUsage, formatAgyUsage, formatClaudeWebUsage, formatClineAccountUsage, formatClineUsage, formatCodexAccountUsage, formatGrokUsage, formatLocalTokenUsage, formatUsageSnapshot, isClineSubscriptionProvider, parseStoredAgyUsage, parseStoredClineUsage } from "../../usage.js";
 import type { BotDeps } from "../deps.js";
 import {
   formatDuration,
@@ -29,6 +29,7 @@ export function registerLifecycleHandlers(bot: Bot, deps: BotDeps): void {
     store,
     transport,
     sessions,
+    fetchClaudeUsage,
     pendingStarts,
     defaultPanelKeyboard,
     pendingFieldsForDefaults,
@@ -309,8 +310,28 @@ export function registerLifecycleHandlers(bot: Bot, deps: BotDeps): void {
       );
       return;
     }
-    // 토픽 밖 전역 호출에서는 agy 토큰 사용량(대화 단위)을 임의 세션으로 보여주지 않고,
-    // 기존대로 Claude/Codex 한도(rate-limit) 스냅샷을 보여준다. agy 네이티브 토큰은
+    // Terminal 사용량 바와 같은 Claude 웹 구독 수치를 먼저 쓴다. Agent SDK OAuth 응답은
+    // 계정 전체 구독 한도와 다를 수 있어, 웹 조회 실패 때만 기존 경로로 폴백한다.
+    const claudeWebUsage = await fetchClaudeUsage();
+    if (claudeWebUsage) {
+      const codexSnapshots = await sessions.fetchCurrentCodexUsageSnapshots(
+        config.projects[0]?.cwd ?? process.cwd()
+      );
+      const grokUsage = await fetchGrokLiveUsage({ grokExecutable: config.grokExecutable });
+      const recentSessions = store.listSessions(200);
+      const measuredAt = claudeWebUsage.capturedAt === null
+        ? "측정 시각 없음"
+        : new Date(claudeWebUsage.capturedAt).toLocaleString(appLocale(), { timeZone: appTimeZone() });
+      await ctx.reply(
+        `${formatClaudeWebUsage(claudeWebUsage)}\n측정: ${measuredAt}\n원천: Claude 웹 구독 사용량 (Terminal 사용량 바와 동일)`
+        + `\n\n${formatCodexAccountUsage(codexSnapshots)}`
+        + `\n\n${formatAgyAccountUsage(recentSessions)}`
+        + `\n\n${formatGrokUsage(grokUsage)}`
+        + `\n\n${formatClineAccountUsage(recentSessions)}`
+      );
+      return;
+    }
+    // 웹 조회 실패 시 기존 Claude OAuth 한도 조회로 폴백한다. agy 네이티브 토큰은
     // 해당 agy 토픽 안에서 /usage를 호출할 때만 표시한다.
     const liveResults = await sessions.fetchCurrentUsageSnapshots(
       config.projects[0]?.cwd ?? process.cwd()
