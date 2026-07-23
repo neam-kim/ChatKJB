@@ -948,7 +948,8 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
             ? `Qwen · ${updated?.qwenModel ?? config.alibabaTokenPlan?.defaultModel ?? "모델 없음"}`
           : `Claude · ${modelLabel(config.modelCatalog, updated?.model ?? DEFAULT_CLAUDE_MODEL)}`;
     await ctx.reply(
-      `제공자를 ${label}로 전환했습니다. 다음 메시지부터 새 제공자가 직전 작업 요약을 이어받아 진행합니다.`
+      `제공자를 ${label}로 전환했습니다. 다음 메시지부터 새 제공자가 직전 작업 요약을 이어받아 진행합니다.`,
+      updated ? { reply_markup: powerKeyboardForSession(updated, config.modelCatalog) } : undefined
     );
   });
 
