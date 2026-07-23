@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error The browser module is copied verbatim and intentionally has no Node declaration file.
-import { attachmentProvenanceLabel, attachmentTypeLabel, formatBytes, GENERAL_PANEL_FALLBACK_ROWS, isAllowedUploadFile, parseEventId, shouldApplyGeneralPanelMessage, shouldSubmitComposerKey, topicSnapshotGenerationIsCurrent } from "../src/gui/web/app.js";
+import { attachmentProvenanceLabel, attachmentTypeLabel, formatBytes, GENERAL_PANEL_FALLBACK_ROWS, isAllowedUploadFile, mergeUsageWindow, parseEventId, remainingUsagePercent, shouldApplyGeneralPanelMessage, shouldSubmitComposerKey, topicSnapshotGenerationIsCurrent, usageResetLabel } from "../src/gui/web/app.js";
 
 const webDirectory = resolve(import.meta.dirname, "..", "src", "gui", "web");
 
@@ -90,6 +90,25 @@ describe("GUI web interaction helpers", () => {
     expect(topicSnapshotGenerationIsCurrent(1, 0)).toBe(false);
     expect(topicSnapshotGenerationIsCurrent(Number.MAX_SAFE_INTEGER + 1, Number.MAX_SAFE_INTEGER + 1)).toBe(false);
     expect(topicSnapshotGenerationIsCurrent(Number.NaN, Number.NaN)).toBe(false);
+  });
+});
+
+describe("GUI usage-strip contract", () => {
+  it("renders a bounded remaining quota and a Korea reset timestamp", () => {
+    expect(remainingUsagePercent(42)).toBe(58);
+    expect(remainingUsagePercent(-10)).toBe(100);
+    expect(remainingUsagePercent(110)).toBe(0);
+    expect(remainingUsagePercent(Number.NaN)).toBeNull();
+    expect(usageResetLabel("2026-07-23T12:00:00.000Z")).toContain("2026. 07. 23. 21:00");
+    expect(usageResetLabel("not a date")).toBe("초기화 시각 미상");
+  });
+
+  it("keeps a previously measured window when a refresh has no measurement, and replaces it when one arrives", () => {
+    const previous = { utilization: 42, resetsAt: "2026-07-23T12:00:00.000Z" };
+    expect(mergeUsageWindow(previous, null)).toBe(previous);
+    expect(mergeUsageWindow(previous, { utilization: null, resetsAt: "2026-07-24T12:00:00.000Z" })).toBe(previous);
+    expect(mergeUsageWindow(previous, { utilization: 25, resetsAt: "2026-07-24T12:00:00.000Z" }))
+      .toEqual({ utilization: 25, resetsAt: "2026-07-24T12:00:00.000Z" });
   });
 });
 

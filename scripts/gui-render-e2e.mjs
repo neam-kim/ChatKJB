@@ -385,8 +385,8 @@ class FixtureUsageProvider {
     if (this.pending) await new Promise((resolve) => { this.release = resolve; });
     if (this.failClaude) throw new Error("claude snapshot read failed");
     return {
-      fiveHour: { utilization: 42, resetsAt: null },
-      sevenDay: { utilization: 18, resetsAt: null },
+      fiveHour: { utilization: 42, resetsAt: "2026-07-23T12:00:00.000Z" },
+      sevenDay: { utilization: 18, resetsAt: "2026-07-30T12:00:00.000Z" },
       stale: true,
       capturedAt: 1_700_000_000_000
     };
@@ -398,18 +398,18 @@ class FixtureUsageProvider {
       accounts: [
         {
           label: ".codex",
-          fiveHour: { utilization: 7, resetsAt: null },
-          sevenDay: { utilization: 33, resetsAt: null }
+          fiveHour: { utilization: 7, resetsAt: "2026-07-23T12:00:00.000Z" },
+          sevenDay: { utilization: 33, resetsAt: "2026-07-30T12:00:00.000Z" }
         },
         {
           label: ".codex-acct-b",
-          fiveHour: { utilization: 41, resetsAt: null },
-          sevenDay: { utilization: 52, resetsAt: null }
+          fiveHour: { utilization: 41, resetsAt: "2026-07-23T12:00:00.000Z" },
+          sevenDay: { utilization: 52, resetsAt: "2026-07-30T12:00:00.000Z" }
         },
         {
           label: ".codex-acct-c",
-          fiveHour: { utilization: 68, resetsAt: null },
-          sevenDay: { utilization: 74, resetsAt: null }
+          fiveHour: { utilization: 68, resetsAt: "2026-07-23T12:00:00.000Z" },
+          sevenDay: { utilization: 74, resetsAt: "2026-07-30T12:00:00.000Z" }
         }
       ]
     };
@@ -418,7 +418,7 @@ class FixtureUsageProvider {
   async fetchGrokUsage() {
     this.calls.grok += 1;
     return {
-      weekly: { utilization: 63, resetsAt: null },
+      weekly: { utilization: 63, resetsAt: "2026-07-30T12:00:00.000Z" },
       monthly: null,
       weeklyReceived: true,
       monthlyReceived: false,
@@ -648,11 +648,11 @@ async function main() {
       throw new Error(`usage strip is not mounted directly after the composer form: ${JSON.stringify(usagePhase1)}`);
     }
     const expectedUsageLines = [
-      { provider: "Claude", cells: [["5h 42%", false], ["1w 18%", false]], notes: ["대화 전 갱신"] },
-      { provider: "Codex · .codex", cells: [["5h 7%", false], ["1w 33%", false]], notes: [] },
-      { provider: "Codex · .codex-acct-b", cells: [["5h 41%", false], ["1w 52%", false]], notes: [] },
-      { provider: "Codex · .codex-acct-c", cells: [["5h 68%", false], ["1w 74%", false]], notes: [] },
-      { provider: "Grok", cells: [["주간 63%", false], ["월간 미수신", true]], notes: [] }
+      { provider: "Claude", cells: [["5h 잔여 58%초기화 2026. 07. 23. 21:00", false], ["1w 잔여 82%초기화 2026. 07. 30. 21:00", false]], notes: ["대화 전 갱신"] },
+      { provider: "Codex · .codex", cells: [["5h 잔여 93%초기화 2026. 07. 23. 21:00", false], ["1w 잔여 67%초기화 2026. 07. 30. 21:00", false]], notes: [] },
+      { provider: "Codex · .codex-acct-b", cells: [["5h 잔여 59%초기화 2026. 07. 23. 21:00", false], ["1w 잔여 48%초기화 2026. 07. 30. 21:00", false]], notes: [] },
+      { provider: "Codex · .codex-acct-c", cells: [["5h 잔여 32%초기화 2026. 07. 23. 21:00", false], ["1w 잔여 26%초기화 2026. 07. 30. 21:00", false]], notes: [] },
+      { provider: "Grok", cells: [["주간 잔여 37%초기화 2026. 07. 30. 21:00", false], ["월간 미수신초기화 시각 미상", true]], notes: [] }
     ];
     const usageMismatch = JSON.stringify(usagePhase1.lines.map((line) => [
       line.provider,
@@ -671,14 +671,14 @@ async function main() {
       captureBeyondViewport: false
     }, sessionId);
     writeFileSync(join(evidenceDir, "usage-strip-values.png"), Buffer.from(usageValuesScreenshot.data, "base64"));
-    // Claude 강제 실패: 해당 칸만 "—"(usage-unknown)로 바뀌고 캐시된 Codex는 유지되어야 한다.
+    // Claude 강제 실패: 이전 실측값을 유지한다. 새 실측값이 오기 전에는 빈 칸으로 바꾸지 않는다.
     usageFixture.failClaude = true;
     server.publishAuthState({ state: "ready" });
     await waitFor(async () => await evaluate(`(() => {
       const line = document.querySelector('#usage-strip .usage-line');
       const cells = [...(line?.querySelectorAll('.usage-cell') || [])];
-      return cells.length === 2 && cells.every((cell) => cell.textContent.endsWith('—') && cell.classList.contains('usage-unknown'));
-    })()`), "usage strip forced failure dash cells");
+      return cells.length === 2 && cells.every((cell) => cell.textContent.includes('잔여') && !cell.classList.contains('usage-unknown'));
+    })()`), "usage strip retains last measured values after failed refresh");
     const usagePhase2 = await evaluate(`(() => {
       const lines = [...document.querySelectorAll('#usage-strip .usage-line')];
       return {
@@ -689,13 +689,13 @@ async function main() {
         }))
       };
     })()`);
-    if (usagePhase2.claudeNotes.includes("대화 전 갱신")) {
-      throw new Error("stale note survived the forced failure");
+    if (!usagePhase2.claudeNotes.includes("대화 전 갱신")) {
+      throw new Error("last measured Claude metadata was not retained after failed refresh");
     }
     const expectedCachedCodex = [
-      { provider: "Codex · .codex", cells: ["5h 7%", "1w 33%"] },
-      { provider: "Codex · .codex-acct-b", cells: ["5h 41%", "1w 52%"] },
-      { provider: "Codex · .codex-acct-c", cells: ["5h 68%", "1w 74%"] }
+      { provider: "Codex · .codex", cells: ["5h 잔여 93%초기화 2026. 07. 23. 21:00", "1w 잔여 67%초기화 2026. 07. 30. 21:00"] },
+      { provider: "Codex · .codex-acct-b", cells: ["5h 잔여 59%초기화 2026. 07. 23. 21:00", "1w 잔여 48%초기화 2026. 07. 30. 21:00"] },
+      { provider: "Codex · .codex-acct-c", cells: ["5h 잔여 32%초기화 2026. 07. 23. 21:00", "1w 잔여 26%초기화 2026. 07. 30. 21:00"] }
     ];
     if (JSON.stringify(usagePhase2.codexLines) !== JSON.stringify(expectedCachedCodex)) {
       throw new Error(`codex lines regressed during claude failure: ${JSON.stringify(usagePhase2.codexLines)}`);

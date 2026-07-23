@@ -85,6 +85,36 @@ export function isAllowedUploadFile(file, uploadBytes) {
     && file.size <= uploadBytes;
 }
 
+/** 마지막 실측값은 다음 실측값이 들어올 때까지 유지한다. */
+export function usageWindowHasMeasurement(window) {
+  return Boolean(window) && Number.isFinite(window.utilization);
+}
+
+export function mergeUsageWindow(previous, next) {
+  return usageWindowHasMeasurement(next) ? next : previous ?? next;
+}
+
+export function remainingUsagePercent(utilization) {
+  if (!Number.isFinite(utilization)) return null;
+  return Math.max(0, Math.min(100, 100 - Math.round(utilization)));
+}
+
+export function usageResetLabel(resetsAt) {
+  if (typeof resetsAt !== "string") return "초기화 시각 미상";
+  const timestamp = Date.parse(resetsAt);
+  if (Number.isNaN(timestamp)) return "초기화 시각 미상";
+  const formatted = new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(new Date(timestamp));
+  return `초기화 ${formatted}`;
+}
+
 function startApplication() {
   const timeFormatter = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" });
   const elements = {
@@ -402,14 +432,52 @@ function startApplication() {
     };
   }
 
+  function mergeUsage(previous, next) {
+    if (!previous) return next;
+    const previousAccounts = new Map(previous.codex.accounts.map((account) => [account.label, account]));
+    const codexAccounts = next.codex.accounts.length > 0
+      ? next.codex.accounts.map((account) => {
+        const prior = previousAccounts.get(account.label);
+        return {
+          ...account,
+          fiveHour: mergeUsageWindow(prior?.fiveHour, account.fiveHour),
+          sevenDay: mergeUsageWindow(prior?.sevenDay, account.sevenDay)
+        };
+      })
+      : previous.codex.accounts;
+    const hasClaudeMeasurement = usageWindowHasMeasurement(next.claude.fiveHour)
+      || usageWindowHasMeasurement(next.claude.sevenDay);
+    return {
+      claude: {
+        fiveHour: mergeUsageWindow(previous.claude.fiveHour, next.claude.fiveHour),
+        sevenDay: mergeUsageWindow(previous.claude.sevenDay, next.claude.sevenDay),
+        stale: hasClaudeMeasurement ? next.claude.stale : previous.claude.stale,
+        capturedAt: hasClaudeMeasurement ? next.claude.capturedAt : previous.claude.capturedAt
+      },
+      codex: { accounts: codexAccounts },
+      grok: {
+        weekly: mergeUsageWindow(previous.grok.weekly, next.grok.weekly),
+        monthly: mergeUsageWindow(previous.grok.monthly, next.grok.monthly),
+        weeklyReceived: next.grok.weeklyReceived || previous.grok.weeklyReceived,
+        monthlyReceived: next.grok.monthlyReceived || previous.grok.monthlyReceived,
+        loginRequired: next.grok.loginRequired
+      }
+    };
+  }
+
   function usageCell(label, window, unknownText = "—") {
     const cell = document.createElement("span");
     cell.className = "usage-cell";
-    const value = window && Number.isFinite(window.utilization)
-      ? `${Math.round(window.utilization)}%`
+    const value = usageWindowHasMeasurement(window)
+      ? `잔여 ${remainingUsagePercent(window.utilization)}%`
       : unknownText;
-    cell.textContent = `${label} ${value}`;
-    if (!window || !Number.isFinite(window.utilization)) cell.classList.add("usage-unknown");
+    const summary = document.createElement("span");
+    summary.textContent = `${label} ${value}`;
+    const reset = document.createElement("span");
+    reset.className = "usage-reset";
+    reset.textContent = usageResetLabel(window?.resetsAt);
+    cell.append(summary, reset);
+    if (!usageWindowHasMeasurement(window)) cell.classList.add("usage-unknown");
     return cell;
   }
 
@@ -489,7 +557,7 @@ function startApplication() {
     if (!state.csrf || state.usageRefreshActive || document.hidden) return;
     state.usageRefreshActive = true;
     try {
-      state.usage = normalizeUsage(await requestJson("/api/usage", {}, false));
+      state.usage = mergeUsage(state.usage, normalizeUsage(await requestJson("/api/usage", {}, false)));
     } catch {
       // 첫 조회 실패라면 값 부재 상태라도 렌더해 "불러오는 중"에 머물지 않게 한다.
       if (!state.usage) state.usage = normalizeUsage(null);

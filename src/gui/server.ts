@@ -1455,6 +1455,12 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
           }
           throw error;
         }
+        // 진단: 실제 업스트림(GramJS) 예외를 삼키기 전에 stderr로 남겨 사진/문서 전송 실패
+        // 원인을 특정한다. name/mimeType/size와 함께 원본 스택을 출력한다.
+        console.error(
+          `[gui-upload] sendFile failed name=${metadata.name} mime=${metadata.mimeType}`
+          + ` size=${spooled?.size ?? "?"}: ${error instanceof Error ? error.stack || error.message : String(error)}`
+        );
         diagnostic("upstream_failure", "TELEGRAM_OPERATION_FAILED");
         throw new HttpFailure(502, "TELEGRAM_OPERATION_FAILED");
       } finally {

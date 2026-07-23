@@ -20,3 +20,5 @@ projects.json
 .[Rr]esult.md
 
 AGENTS.md
+node_modules.backup-*/
+.env.backup-*

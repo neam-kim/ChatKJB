@@ -31,8 +31,7 @@ import {
   rmSync,
   writeFileSync
 } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildAppIcon } from "./macos-icon.mjs";
@@ -42,16 +41,10 @@ const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const DAEMON_APP_NAME = "ChatKJB";
 export const DAEMON_BUNDLE_ID = "com.chatkjb.bot";
 
-// 앱 번들은 저장소가 아니라 사용자 라이브러리에 둔다. 저장소를 옮기거나 다시
-// 클론해도 TCC가 부여한 권한이 유지되도록 경로를 고정한다.
+// 앱 번들은 Finder와 LaunchServices가 일반 응용 프로그램으로 인식하는
+// 시스템 응용 프로그램 폴더에 둔다.
 export function daemonAppPath() {
-  return join(
-    homedir(),
-    "Library",
-    "Application Support",
-    "ChatKJB",
-    `${DAEMON_APP_NAME}.app`
-  );
+  return join("/Applications", `${DAEMON_APP_NAME}.app`);
 }
 
 export function daemonExecutablePath() {
@@ -66,13 +59,29 @@ function receiptPath(appPath) {
   return join(appPath, "Contents", "Resources", "build-receipt.json");
 }
 
+/** Homebrew Node 26은 실행 파일과 libnode를 분리한다. 번들 안에서도 원래의
+ * `@loader_path/../lib` 검색 규칙이 성립하도록 libnode를 Contents/lib에 둔다. */
+function nodeLibraryPath(nodeSource) {
+  const library = execFileSync("/usr/bin/otool", ["-L", nodeSource], { encoding: "utf8" })
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim().split(" ", 1)[0])
+    .find((path) => /^@rpath\/libnode\.[0-9]+\.dylib$/.test(path));
+  if (!library) throw new Error("Node runtime does not declare a libnode dynamic library");
+  const source = resolve(dirname(nodeSource), "..", "lib", basename(library));
+  if (!existsSync(source)) throw new Error(`Node dynamic library is unavailable: ${source}`);
+  return source;
+}
+
 // 이미 만들어진 번들이 현재 Node와 아이콘 원본 기준으로 최신인지 확인한다.
-function isBundleCurrent(appPath, nodeSha256, iconSha256) {
+function isBundleCurrent(appPath, nodeSha256, nodeLibraryName, nodeLibrarySha256, iconSha256) {
   const executable = daemonExecutablePath();
-  if (!existsSync(executable) || !existsSync(receiptPath(appPath))) return false;
+  const nodeLibrary = join(appPath, "Contents", "lib", nodeLibraryName);
+  if (!existsSync(executable) || !existsSync(nodeLibrary) || !existsSync(receiptPath(appPath))) return false;
   try {
     const receipt = JSON.parse(readFileSync(receiptPath(appPath), "utf8"));
     return receipt.nodeSha256 === nodeSha256
+      && receipt.nodeLibrarySha256 === nodeLibrarySha256
       && receipt.iconSha256 === iconSha256
       && receipt.bundleId === DAEMON_BUNDLE_ID;
   } catch {
@@ -107,9 +116,6 @@ function infoPlist() {
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
-  <!-- 백그라운드 데몬이므로 Dock과 앱 전환기에 나타나지 않는다. -->
-  <key>LSUIElement</key>
-  <true/>
   <key>LSBackgroundOnly</key>
   <false/>
   <key>NSHumanReadableCopyright</key>
@@ -122,29 +128,28 @@ function infoPlist() {
 export function buildDaemonApp({ force = false, log = () => {} } = {}) {
   const appPath = daemonAppPath();
   const nodeSource = realpathSync(process.execPath);
+  const nodeLibrarySource = nodeLibraryPath(nodeSource);
+  const nodeLibraryName = basename(nodeLibrarySource);
   const nodeSha256 = sha256File(nodeSource);
+  const nodeLibrarySha256 = sha256File(nodeLibrarySource);
   const iconSource = join(projectDir, "native", "macos", "jb-logo.svg");
   const iconSha256 = sha256File(iconSource);
 
-  if (!force && isBundleCurrent(appPath, nodeSha256, iconSha256)) {
+  if (!force && isBundleCurrent(appPath, nodeSha256, nodeLibraryName, nodeLibrarySha256, iconSha256)) {
     log(`daemon app is current: ${appPath}`);
     return { appPath, executablePath: daemonExecutablePath(), rebuilt: false };
   }
 
   const contentsDir = join(appPath, "Contents");
   const macosDir = join(contentsDir, "MacOS");
+  const librariesDir = join(contentsDir, "lib");
   const resourcesDir = join(contentsDir, "Resources");
-  const buildDir = join(
-    homedir(),
-    "Library",
-    "Application Support",
-    "ChatKJB",
-    ".build-daemon-app"
-  );
+  const buildDir = join("/Applications", ".build-daemon-app");
 
   rmSync(appPath, { recursive: true, force: true });
   rmSync(buildDir, { recursive: true, force: true });
   mkdirSync(macosDir, { recursive: true });
+  mkdirSync(librariesDir, { recursive: true });
   mkdirSync(resourcesDir, { recursive: true });
 
   try {
@@ -155,6 +160,9 @@ export function buildDaemonApp({ force = false, log = () => {} } = {}) {
     const executablePath = daemonExecutablePath();
     copyFileSync(nodeSource, executablePath);
     chmodSync(executablePath, 0o755);
+    const bundledNodeLibrary = join(librariesDir, basename(nodeLibrarySource));
+    copyFileSync(nodeLibrarySource, bundledNodeLibrary);
+    chmodSync(bundledNodeLibrary, 0o755);
 
     buildAppIcon({
       projectDir,
@@ -167,8 +175,10 @@ export function buildDaemonApp({ force = false, log = () => {} } = {}) {
       `${JSON.stringify({
         bundleId: DAEMON_BUNDLE_ID,
         nodeSha256,
+        nodeLibrarySha256,
         nodeVersion: process.versions.node,
         nodeSource,
+        nodeLibrarySource,
         iconSha256
       }, null, 2)}\n`,
       "utf8"

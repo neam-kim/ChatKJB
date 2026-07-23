@@ -29,12 +29,15 @@ describe("ChatKJB 데몬 래퍼 앱 계약", () => {
     expect(daemonApp).toContain("<string>AppIcon</string>");
   });
 
-  it("백그라운드 데몬이므로 Dock에 노출하지 않는다", () => {
-    expect(daemonApp).toContain("<key>LSUIElement</key>");
+  it("일반 응용 프로그램으로 표시되도록 숨김 앱 플래그를 두지 않는다", () => {
+    expect(daemonApp).not.toContain("<key>LSUIElement</key>");
   });
 
-  it("Node 실행 파일을 번들의 주 실행 파일로 복사하고 ad-hoc 서명한다", () => {
+  it("Node 실행 파일과 필수 libnode 동적 라이브러리를 번들에 복사하고 ad-hoc 서명한다", () => {
     expect(daemonApp).toContain("copyFileSync(nodeSource, executablePath)");
+    expect(daemonApp).toContain("nodeLibraryPath(nodeSource)");
+    expect(daemonApp).toContain("copyFileSync(nodeLibrarySource, bundledNodeLibrary)");
+    expect(daemonApp).toContain('join(appPath, "Contents", "lib", nodeLibraryName)');
     expect(daemonApp).toContain('"/usr/bin/codesign"');
     expect(daemonApp).toContain('"--sign", "-"');
   });
@@ -45,10 +48,8 @@ describe("ChatKJB 데몬 래퍼 앱 계약", () => {
     expect(daemonApp).toContain("build-receipt.json");
   });
 
-  it("저장소가 아니라 사용자 라이브러리의 고정 경로에 설치한다", () => {
-    expect(daemonApp).toContain('"Library",');
-    expect(daemonApp).toContain('"Application Support",');
-    expect(daemonApp).toContain('"ChatKJB",');
+  it("Finder가 인식하는 시스템 응용 프로그램 경로에 설치한다", () => {
+    expect(daemonApp).toContain('join("/Applications", `${DAEMON_APP_NAME}.app`)');
   });
 
   it("LaunchAgent가 Node 대신 번들 실행 파일을 실행한다", () => {
