@@ -208,8 +208,10 @@ describe("shared memory resource text", () => {
     expect(text).toContain("native auto-memory fallback only if needed");
     expect(policy).toContain("Never have more than 4 active subagents");
     expect(policy).toContain("root session owns judgment, risk checks, work decomposition");
-    expect(policy).toContain("implementation, research, or testing");
-    expect(policy).toContain("Simple questions and single actions remain with the root session");
+    expect(policy).toContain("research or implementation must use at least one provider-native subagent");
+    expect(policy).toContain("root must not begin or complete that research or implementation alone");
+    expect(policy).toContain("If the work cannot be split independently");
+    expect(policy).toContain("explicit user prohibition on delegation");
     expect(policy).toContain("External MCP and connector calls remain with the root session");
     expect(policy).toContain("depth-one/no-recursive-fan-out rule");
     expect(policy).toContain("Use frontmatter with `name`");

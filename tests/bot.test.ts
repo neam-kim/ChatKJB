@@ -793,6 +793,7 @@ describe("/new defaults fast path", () => {
       const created = store.listSessions(10).find((item) => item.topicId === 7777);
       expect(created?.cwd).toBe(realpathSync(projectDir));
       expect(created?.projectName).toBe("Docs Project");
+      expect(created?.permissionMode).toBe("auto");
       expect(runProjectSelector).toHaveBeenCalledOnce();
       expect(runProjectSelector.mock.calls[0]?.[0]).toContain("제품 문서를 정리해줘");
       expect(calls.filter((call) => call.method === "createForumTopic")).toHaveLength(1);

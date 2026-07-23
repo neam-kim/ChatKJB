@@ -12,6 +12,7 @@ const entry = readFileSync(resolve(root, "src/gui-entry.ts"), "utf8");
 const audit = readFileSync(resolve(root, "scripts/audit-macos-app.mjs"), "utf8");
 const runner = readFileSync(resolve(root, "script/build_and_run.sh"), "utf8");
 const build = readFileSync(resolve(root, "scripts/build-macos-app.mjs"), "utf8");
+const releaseVersion = readFileSync(resolve(root, "scripts/release-version.mjs"), "utf8");
 // 아이콘 생성기는 Terminal 앱과 데몬 래퍼 앱이 공유한다.
 const iconBuilder = readFileSync(resolve(root, "scripts/macos-icon.mjs"), "utf8");
 const smoke = readFileSync(resolve(root, "scripts/smoke-macos-app.mjs"), "utf8");
@@ -106,6 +107,17 @@ describe("ChatKJB Terminal macOS shell contract", () => {
     for (const forbidden of ["ChatKJBProjectPath", "ChatKJBNodePath", "ChatKJBBackendPath"]) {
       expect(plist).not.toContain(forbidden);
     }
+  });
+
+  it("uses package.json as the only macOS app-version source", () => {
+    expect(releaseVersion).toContain("releaseVersionFromSemver");
+    expect(releaseVersion).toContain("major * 1_000_000");
+    expect(plist).toContain("__CHATKJB_VERSION__");
+    expect(plist).toContain("__CHATKJB_BUILD_NUMBER__");
+    expect(build).toContain('from "./release-version.mjs"');
+    expect(build).toContain("renderMacosInfoPlist(plistTemplate, releaseVersion)");
+    expect(audit).toContain("Info.plist version fields do not match package.json");
+    expect(smoke).toContain("Relocated app version does not match package.json");
   });
 
   it("pins esbuild directly and creates a self-contained backend and runtime", () => {

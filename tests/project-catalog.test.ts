@@ -46,7 +46,11 @@ describe("project catalog", () => {
     const snapshot = await catalog.refreshAll();
 
     expect(snapshot.entries).toHaveLength(1);
-    expect(snapshot.entries[0]).toMatchObject({ name: "alpha", description: "Alpha service" });
+    expect(snapshot.entries[0]).toMatchObject({
+      name: "alpha",
+      description: "Alpha service",
+      defaultMode: "auto"
+    });
     expect(snapshot.entries[0]?.path).toBe(realpathSync(alpha));
     const markdown = readFileSync(catalogPath, "utf8");
     expect(markdown).toContain("Alpha service");

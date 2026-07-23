@@ -279,18 +279,24 @@ export class ClaudeExecutor {
         "Glob",
         "Grep",
         "WebSearch",
-        "Task",
+        ...(!qwenSubagent ? ["Task"] : []),
         ...(qwenSubagent ? [QWEN_SUBAGENT_TOOL_NAME] : [])
       ],
-      ...(ctx.session.subagentModel && !qwenSubagent ? {
+      ...(ctx.session.subagentModel && !qwenSubagent ? (() => {
+        const subagentEffort = resolveClaudeEffort(ctx.session.subagentEffort);
+        return {
         agents: {
           chatkjb_subagent: {
             description: "Use for every delegated bounded subtask in this ChatKJB session.",
             prompt: "Complete the delegated bounded subtask, verify the result, and return concise evidence to the parent.",
-            model: ctx.session.subagentModel
+            model: ctx.session.subagentModel,
+            ...(subagentEffort
+              ? { effort: subagentEffort }
+              : {})
           }
         }
-      } : {}),
+      };
+      })() : {}),
       settingSources: ["user"],
       skills: "all",
       systemPrompt: {
@@ -324,6 +330,23 @@ export class ClaudeExecutor {
       },
       includePartialMessages: true,
       canUseTool: async (toolName, toolInput, permissionOptions) => {
+        if (toolName === "Task") {
+          const requestedType = toolInput && typeof toolInput === "object"
+            ? (toolInput as Record<string, unknown>).subagent_type
+            : undefined;
+          if (qwenSubagent) {
+            return {
+              behavior: "deny" as const,
+              message: "Qwen이 선택된 세션에서는 네이티브 Task를 사용할 수 없습니다. 전용 Qwen MCP 도구만 사용하세요."
+            };
+          }
+          if (ctx.session.subagentModel && requestedType !== "chatkjb_subagent") {
+            return {
+              behavior: "deny" as const,
+              message: "이 세션의 하위 에이전트는 선택된 chatkjb_subagent 모델로만 실행할 수 있습니다."
+            };
+          }
+        }
         const result = await this.host.permissions.request(
           this.host.store.getSession(ctx.session.id) ?? ctx.session,
           toolName,

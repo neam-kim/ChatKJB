@@ -1,8 +1,9 @@
 // 제공자별 실행 환경·권한 매핑 헬퍼. SessionManager 본체에서 분리한 순수 함수 모음으로
 // 클래스 상태(this)에 의존하지 않는다. session-manager.ts가 이 모듈을 재export하므로 기존
 // import 경로("./session-manager.js")는 변하지 않는다.
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { loadMergedConnectors, syncCodexMcpConfig } from "./connectors.js";
 import { sharedCodexLiteAgentPath } from "./resource-sync.js";
@@ -90,18 +91,27 @@ export function requireCodexSubscriptionAuth(
 
 export function codexSharedResourceConfig(
   subagentModel?: string | null,
-  qwenSubagentModel?: string | null
+  qwenSubagentModel?: string | null,
+  subagentReasoning?: string | null
 ) {
-  const liteAgent = sharedCodexLiteAgentPath();
+  const liteAgent = subagentModel && !qwenSubagentModel
+    ? pinnedCodexChildAgentPath(subagentModel, subagentReasoning)
+    : sharedCodexLiteAgentPath();
   return {
     // Codex native collaboration tools are enabled explicitly so ChatKJB sessions do not
     // depend on a provider-home default. Direct children only. max_threads는 루트를 제외한
     // 열려 있는 자식 수를 세므로, 결과 취합 뒤 close_agent로 슬롯을 반환해야 한다.
-    features: { memories: true, multi_agent: true },
+    // Token Plan Qwen은 Codex native child provider로 실행할 수 없다. Qwen을 선택한
+    // 세션에서 native collaboration을 켜 두면 spawn_agent가 부모 GPT 모델을 상속해
+    // 패널 선택을 우회하므로, 해당 경로를 완전히 끄고 아래의 전용 MCP만 허용한다.
+    features: { memories: true, multi_agent: !qwenSubagentModel },
     agents: {
       max_threads: 4,
       max_depth: 1,
       ...(subagentModel && !qwenSubagentModel ? { default_subagent_model: subagentModel } : {}),
+      ...(subagentReasoning && !qwenSubagentModel
+        ? { default_subagent_reasoning_effort: subagentReasoning }
+        : {}),
       // Codex child sessions otherwise inherit every root MCP and multiply the local stdio
       // process set by the number of active subagents. Root tools stay unchanged; repository
       // exploration/review children use a generated MCP-free role layer.
@@ -130,6 +140,30 @@ export function codexSharedResourceConfig(
       }
     } : {})
   };
+}
+
+/**
+ * Codex agent 파일의 model/model_reasoning_effort는 spawn 인자보다 우선한다. 따라서
+ * 선택한 하위 모델을 실제 강제하려면 [agents] 기본값만 두지 않고 각 built-in 역할이
+ * 참조하는 세션 전용 agent file에도 같은 값을 적어야 한다.
+ */
+export function pinnedCodexChildAgentPath(model: string, reasoning?: string | null): string {
+  const base = readFileSync(sharedCodexLiteAgentPath(), "utf8").trimEnd();
+  const content = [
+    base,
+    "",
+    `model = ${JSON.stringify(model)}`,
+    ...(reasoning ? [`model_reasoning_effort = ${JSON.stringify(reasoning)}`] : []),
+    ""
+  ].join("\n");
+  const directory = join(tmpdir(), "chatkjb-codex-agents");
+  const digest = createHash("sha256").update(content).digest("hex").slice(0, 20);
+  const path = join(directory, `pinned-${digest}.toml`);
+  mkdirSync(directory, { recursive: true });
+  if (!existsSync(path) || readFileSync(path, "utf8") !== content) {
+    writeFileSync(path, content, "utf8");
+  }
+  return path;
 }
 
 export interface CodexMcpConfigEnsureOptions {

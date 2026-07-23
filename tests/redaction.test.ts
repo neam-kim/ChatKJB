@@ -34,4 +34,27 @@ describe("persistent evidence redaction", () => {
       nested: ["[REDACTED]"]
     });
   });
+
+  it("redacts PEM private keys and service-account JSON secret fields", () => {
+    const pem = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "very-private-key-material",
+      "-----END RSA PRIVATE KEY-----"
+    ].join("\n");
+    const serviceAccount = JSON.stringify({
+      type: "service_account",
+      private_key: "not-a-public-value",
+      private_key_id: "public-key-identifier",
+      client_secret: "oauth-client-secret"
+    });
+
+    const redacted = redactSensitiveText(`${pem}\n${serviceAccount}`);
+
+    expect(redacted).not.toContain("very-private-key-material");
+    expect(redacted).not.toContain("not-a-public-value");
+    expect(redacted).not.toContain("oauth-client-secret");
+    expect(redacted).toContain('"private_key":"[REDACTED]"');
+    expect(redacted).toContain('"client_secret":"[REDACTED]"');
+    expect(redacted).toContain('"private_key_id":"public-key-identifier"');
+  });
 });

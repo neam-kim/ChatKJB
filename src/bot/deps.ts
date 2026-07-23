@@ -1,6 +1,6 @@
 import type { InlineKeyboard, Keyboard } from "grammy";
 import type { AppConfig } from "../config.js";
-import type { GuiClaudeUsageDto } from "../gui/protocol.js";
+import type { GuiClaudeUsageDto } from "../usage-contract.js";
 import type { PermissionBroker } from "../permission-broker.js";
 import type { SessionManager } from "../session-manager.js";
 import type { StateStore } from "../store.js";

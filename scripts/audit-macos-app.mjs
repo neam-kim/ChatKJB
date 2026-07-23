@@ -17,6 +17,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { builtinModules } from "node:module";
 import { fileURLToPath } from "node:url";
+import { readReleaseVersion } from "./release-version.mjs";
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const appPath = join(projectDir, ".artifacts", "ChatKJB Terminal.app");
@@ -30,6 +31,7 @@ const iconSource = join(projectDir, "native", "macos", "jb-logo.svg");
 const expectedIconSourceSha256 = "884f0791c73f826f12180ad7acb2cfa2dd286e8baf1d9153c348fafbfa7f7b76";
 const webAssetNames = ["app.js", "index.html", "manifest.webmanifest", "styles.css"];
 const nodeBuiltinModules = new Set(builtinModules.map((name) => name.replace(/^node:/, "")));
+const releaseVersion = readReleaseVersion(projectDir);
 
 function filesUnder(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -236,6 +238,10 @@ const plist = JSON.parse(execFileSync("/usr/bin/plutil", [
 ], { encoding: "utf8" }));
 if (plist.CFBundleIdentifier !== "com.chatkjb.terminal") throw new Error("Info.plist bundle identifier changed");
 if (plist.CFBundleIconFile !== "AppIcon") throw new Error("Info.plist must select the bundled AppIcon");
+if (
+  plist.CFBundleShortVersionString !== releaseVersion.shortVersion
+  || plist.CFBundleVersion !== releaseVersion.buildNumber
+) throw new Error("Info.plist version fields do not match package.json");
 for (const forbidden of ["ChatKJBProjectPath", "ChatKJBNodePath", "ChatKJBBackendPath"]) {
   if (forbidden in plist) throw new Error(`Info.plist contains a build-host path key: ${forbidden}`);
 }

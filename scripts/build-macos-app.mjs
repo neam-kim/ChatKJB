@@ -18,6 +18,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build as bundleWithEsbuild } from "esbuild";
 import { buildAppIcon } from "./macos-icon.mjs";
+import { readReleaseVersion, renderMacosInfoPlist } from "./release-version.mjs";
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const artifactsDir = join(projectDir, ".artifacts");
@@ -42,6 +43,7 @@ const cObject = join(buildDir, "backend_spawn.o");
 const iconSource = join(projectDir, "native", "macos", "jb-logo.svg");
 const expectedIconSourceSha256 = "884f0791c73f826f12180ad7acb2cfa2dd286e8baf1d9153c348fafbfa7f7b76";
 const webAssetNames = ["app.js", "index.html", "manifest.webmanifest", "styles.css"];
+const releaseVersion = readReleaseVersion(projectDir);
 
 if (process.platform !== "darwin") throw new Error("ChatKJB Terminal.app can only be built on macOS");
 if (process.arch !== "arm64") throw new Error("This build currently targets the verified arm64 Mac runtime");
@@ -279,10 +281,11 @@ try {
   ], { cwd: projectDir, stdio: "inherit" });
   chmodSync(executablePath, 0o755);
 
-  const plist = readFileSync(join(projectDir, "native", "macos", "Info.plist"), "utf8");
-  if (/__CHATKJB_|<key>ChatKJB(?:Project|Node|Backend)Path<\/key>/.test(plist)) {
+  const plistTemplate = readFileSync(join(projectDir, "native", "macos", "Info.plist"), "utf8");
+  if (/<key>ChatKJB(?:Project|Node|Backend)Path<\/key>/.test(plistTemplate)) {
     throw new Error("Info.plist must not contain build-host runtime paths");
   }
+  const plist = renderMacosInfoPlist(plistTemplate, releaseVersion);
   writeFileSync(join(contents, "Info.plist"), plist, { mode: 0o644 });
 
   execFileSync("/usr/bin/codesign", [

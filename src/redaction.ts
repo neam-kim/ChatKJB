@@ -1,5 +1,12 @@
 const REDACTED = "[REDACTED]";
 
+// Provider output occasionally includes credentials as structured snippets rather than
+// KEY=value text. Keep these patterns narrowly scoped to unambiguous credential forms.
+const pemPrivateKeyPattern =
+  /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9]+)* PRIVATE KEY-----/g;
+const serviceAccountJsonSecretPattern =
+  /("(?:private_key|client_secret)"\s*:\s*")(?:(?:\\.)|[^"\\])*(")/gi;
+
 const secretPatterns: RegExp[] = [
   /\bsk-ant-oat01-[A-Za-z0-9_-]+\b/g,
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
@@ -9,10 +16,13 @@ const secretPatterns: RegExp[] = [
 ];
 
 export function redactSensitiveText(value: string): string {
+  const structuredRedacted = value
+    .replace(pemPrivateKeyPattern, REDACTED)
+    .replace(serviceAccountJsonSecretPattern, `$1${REDACTED}$2`);
   return secretPatterns.reduce((text, pattern) =>
     text.replace(pattern, (_match, name: unknown) =>
       typeof name === "string" ? `${name}=${REDACTED}` : REDACTED
-    ), value);
+    ), structuredRedacted);
 }
 
 export function redactSensitiveValue(value: unknown): unknown {

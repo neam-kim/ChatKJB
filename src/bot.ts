@@ -45,7 +45,7 @@ import { TransientMap } from "./bot/transient-store.js";
 import { CodexAppServerGoalClient, type CodexGoalClient } from "./codex-app-server.js";
 import { fetchClaudeWebUsage } from "./claude-web-usage.js";
 import { resolveProject, type AppConfig } from "./config.js";
-import type { GuiClaudeUsageDto } from "./gui/protocol.js";
+import type { GuiClaudeUsageDto } from "./usage-contract.js";
 import {
   normalizeAgyModelForCatalog
 } from "./model-catalog.js";
@@ -323,7 +323,9 @@ export function createBot(
       options.clineModel ?? null,
       options.clineReasoning ?? null,
       options.permissionMode ?? null,
-      options.subagentModel ?? null
+      options.subagentModel ?? null,
+      options.subagentReasoning ?? null,
+      options.subagentEffort ?? null
     );
     const codexAccount = session.provider === "codex"
       ? codexAccountLabel(session.codexHome, config.codexAccountHomes)

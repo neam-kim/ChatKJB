@@ -146,8 +146,10 @@ export function buildOrchestrationBoundaryInstructions(): string {
     "상위 조정자는 ChatKJB이다. provider/model/session/goal/memory 설정을 자체 변경하거나 독립 native-app 세션으로 전환하지 않는다.",
     "현재 턴·명시된 세션 상태·직접 확인한 저장소 상태만 범위로 삼고, 범위 밖 변경·외부 전송·권한 확대는 하지 않는다. 진행과 결과는 ChatKJB 대화로 보고한다.",
     "",
-    "[SUBAGENT_DELEGATION_ENCOURAGED]",
-    "범위가 명확한 실제 구현·조사·테스트는 provider-native subagent에 우선 위임한다. 단순 질의·단일 행동과 외부 MCP·커넥터 호출은 주 에이전트가 직접 소유한다.",
+    "[SUBAGENT_DELEGATION_REQUIRED]",
+    "조사 또는 구현이 포함된 요청은 provider-native subagent에 반드시 위임한다. 주 에이전트 단독으로 조사·구현을 시작하거나 완료하지 않는다.",
+    "먼저 범위가 명확한 하위 작업을 하나 이상 분리해 위임한다. 독립 분리가 어렵더라도 사전 조사, 변경안 검토, 테스트 설계 또는 결과 검증 중 하나를 별도 하위 작업으로 위임한다.",
+    "예외는 사용자가 위임을 명시적으로 금지한 경우, provider-native subagent 통로가 실제로 없는 경우, 또는 외부 MCP·커넥터의 단일 호출뿐인 경우뿐이다. 통로가 없으면 주 에이전트 단독 수행으로 바꾸지 말고 그 제한을 ChatKJB 대화에 보고한다.",
     "주 에이전트는 판단·위험 확인·작업 분해·조율·결과 통합·통합 검증·최종 보고를 담당한다. 동시에 최대 4명(주 에이전트 제외), 깊이 1, 재귀 위임 금지, 읽기 중심 병렬 우선, 쓰기는 소유 파일이 분리될 때만 허용한다.",
     "Codex의 기본 탐색·작업 subagent는 MCP 기동을 생략한 경량 role을 사용한다.",
     `위임 전 ${sharedPolicyGuidePath()}#execution-and-subagents의 수명주기 규칙을 따른다.`

@@ -5,7 +5,7 @@ import type {
 import type { GrokLiveUsageResult } from "./grok-live-usage.js";
 import type { LocalTokenUsageReport } from "./local-token-usage.js";
 import { appLocale, appTimeZone } from "./localization.js";
-import type { GuiClaudeUsageDto, GuiUsageWindowDto } from "./gui/protocol.js";
+import type { GuiClaudeUsageDto, GuiUsageWindowDto } from "./usage-contract.js";
 import type {
   CodexAccountUsageSnapshot,
   CodexLiveUsageSnapshot,

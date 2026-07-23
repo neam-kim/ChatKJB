@@ -1,0 +1,180 @@
+name: macOS Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish macOS release
+    runs-on: macos-14
+    env:
+      APP_PATH: .artifacts/ChatKJB Terminal.app
+      APPLE_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+      APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+      APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26.4.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate TypeScript
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      # The audit intentionally precedes Developer ID signing: it verifies the
+      # reproducible ad-hoc bundle produced by the repository build script.
+      - name: Build, audit, smoke-test, and package the macOS app
+        run: |
+          npm run gui:macos:build
+          npm run gui:macos:audit
+          npm run gui:macos:smoke
+          npm run gui:macos:dmg
+
+      - name: Determine Apple trust-chain availability
+        id: signing
+        shell: bash
+        run: |
+          if [[ -n "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" \
+            && -n "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD" \
+            && -n "$APPLE_KEYCHAIN_PASSWORD" \
+            && -n "$APPLE_SIGNING_IDENTITY" \
+            && -n "$APPLE_ID" \
+            && -n "$APPLE_APP_SPECIFIC_PASSWORD" \
+            && -n "$APPLE_TEAM_ID" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Apple Developer ID signing and notarization are enabled."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Unsigned internal artifact::Apple signing/notarization secrets are incomplete. This tag will publish an unsigned internal artifact, not a Gatekeeper-trusted public distribution."
+          fi
+
+      - name: Prepare release paths
+        id: release
+        shell: bash
+        run: |
+          release_dir="$RUNNER_TEMP/chatkjb-release"
+          safe_tag="${GITHUB_REF_NAME//\//-}"
+          mkdir -p "$release_dir"
+          if [[ "${{ steps.signing.outputs.enabled }}" == "true" ]]; then
+            asset_name="ChatKJB-Terminal-${safe_tag}-macos-arm64.dmg"
+            release_note="Developer ID signed and notarized macOS artifact."
+          else
+            asset_name="ChatKJB-Terminal-${safe_tag}-macos-arm64-unsigned-internal.dmg"
+            release_note="UNSIGNED INTERNAL ARTIFACT: Apple signing and notarization secrets were unavailable. Do not treat this as a Gatekeeper-trusted public distribution."
+          fi
+          echo "directory=$release_dir" >> "$GITHUB_OUTPUT"
+          echo "dmg_path=$release_dir/$asset_name" >> "$GITHUB_OUTPUT"
+          echo "checksum_path=$release_dir/SHA256SUMS.txt" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$release_note" > "$release_dir/RELEASE-NOTES.md"
+
+      - name: Import Developer ID certificate
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          keychain_path="$RUNNER_TEMP/chatkjb-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/chatkjb-developer-id.p12"
+          printf '%s' "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" | /usr/bin/base64 -D > "$certificate_path"
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychain -d user -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" | grep -F "$APPLE_SIGNING_IDENTITY"
+          node_entitlements_path="$RUNNER_TEMP/chatkjb-node-entitlements.plist"
+          cat > "$node_entitlements_path" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.allow-jit</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          echo "KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          echo "NODE_ENTITLEMENTS_PATH=$node_entitlements_path" >> "$GITHUB_ENV"
+
+      - name: Sign the app with Developer ID
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          runtime_path="$APP_PATH/Contents/Resources/Runtime/node"
+          /usr/bin/codesign --force --options runtime --timestamp --entitlements "$NODE_ENTITLEMENTS_PATH" --sign "$APPLE_SIGNING_IDENTITY" "$runtime_path"
+          /usr/bin/codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$APP_PATH"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+      - name: Notarize and staple the app
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          app_archive="$RUNNER_TEMP/ChatKJB-Terminal.app.zip"
+          /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$app_archive"
+          xcrun notarytool submit "$app_archive" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$APP_PATH"
+
+      - name: Package, notarize, and staple signed DMG
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          node scripts/build-macos-dmg.mjs --out "${{ steps.release.outputs.dmg_path }}"
+          xcrun notarytool submit "${{ steps.release.outputs.dmg_path }}" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "${{ steps.release.outputs.dmg_path }}"
+
+      - name: Verify signed trust chain
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          spctl --assess --type execute --verbose=4 "$APP_PATH"
+          spctl --assess --type open --verbose=4 "${{ steps.release.outputs.dmg_path }}"
+
+      - name: Stage explicitly unsigned internal artifact
+        if: steps.signing.outputs.enabled != 'true'
+        shell: bash
+        run: |
+          cp ".artifacts/ChatKJB Terminal.dmg" "${{ steps.release.outputs.dmg_path }}"
+          echo "Unsigned internal DMG staged: ${{ steps.release.outputs.dmg_path }}"
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          release_dir="${{ steps.release.outputs.directory }}"
+          dmg_name="$(basename "${{ steps.release.outputs.dmg_path }}")"
+          (
+            cd "$release_dir"
+            shasum -a 256 "$dmg_name" > "$(basename "${{ steps.release.outputs.checksum_path }}")"
+          )
+
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          dmg_path="${{ steps.release.outputs.dmg_path }}"
+          checksum_path="${{ steps.release.outputs.checksum_path }}"
+          notes_path="${{ steps.release.outputs.directory }}/RELEASE-NOTES.md"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "ChatKJB Terminal $tag" --notes-file "$notes_path"
+            gh release upload "$tag" "$dmg_path" "$checksum_path" --clobber
+          else
+            gh release create "$tag" "$dmg_path" "$checksum_path" --title "ChatKJB Terminal $tag" --notes-file "$notes_path"
+          fi

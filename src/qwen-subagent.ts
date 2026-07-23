@@ -16,6 +16,12 @@ export interface CodexSubagentModelOption {
   kind: "codex" | "qwen";
 }
 
+export interface GrokSubagentModelOption {
+  id: string;
+  label: string;
+  kind: "grok" | "qwen";
+}
+
 /** Alibaba Token Plan에서 발견한 모델만 Claude의 Qwen 위임 대상으로 노출한다. */
 export function isQwenSubagentModel(catalog: ModelCatalog, model: string | null | undefined): boolean {
   return Boolean(model) && catalog.codexModels.some((option) =>
@@ -50,6 +56,24 @@ export function codexSubagentModelOptions(catalog: ModelCatalog): CodexSubagentM
     label: option.source === "token-plan" ? `Qwen · ${option.label}` : option.label,
     kind: option.source === "token-plan" ? "qwen" : "codex"
   }));
+}
+
+/** Grok native 모델과 전용 MCP Qwen을 함께 노출한다. */
+export function grokSubagentModelOptions(catalog: ModelCatalog): GrokSubagentModelOption[] {
+  return [
+    ...catalog.grokModels.map((option) => ({
+      id: option.id,
+      label: option.label,
+      kind: "grok" as const
+    })),
+    ...catalog.codexModels
+      .filter((option) => option.source === "token-plan")
+      .map((option) => ({
+        id: option.id,
+        label: `Qwen · ${option.label}`,
+        kind: "qwen" as const
+      }))
+  ];
 }
 
 /** Claude Agent SDK의 네이티브 Task는 Claude 모델만 지원하므로 Qwen은 별도 MCP 도구로 실행한다. */

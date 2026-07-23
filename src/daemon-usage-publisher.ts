@@ -2,7 +2,7 @@
 // (1) 공유 파일 캐시 (2) Tailscale/LAN HTTP 로 게시한다.
 // Terminal 은 데몬이 없는 Mac 에서 파일 또는 HTTP 로 **데몬 호스트 한도**를 표시한다.
 import { hostname } from "node:os";
-import { createUsageProvider } from "./gui/usage-source.js";
+import { createUsageProvider } from "./usage-source.js";
 import { fetchClaudeWebUsage } from "./claude-web-usage.js";
 import {
   ensureTailscaleUsageServe,

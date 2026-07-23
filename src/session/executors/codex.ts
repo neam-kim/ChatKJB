@@ -128,7 +128,8 @@ export function createCodexClient(
   options: ExecutorOptions,
   codexHome: string,
   model: string,
-  subagentModel?: string | null
+  subagentModel?: string | null,
+  subagentReasoning?: string | null
 ): Codex {
   requireCodexSubscriptionAuth(codexHome);
   syncSharedResourcesCached();
@@ -139,7 +140,11 @@ export function createCodexClient(
     ...(options.codexExecutable ? { codexPathOverride: options.codexExecutable } : {}),
     env: buildCodexEnvironment(codexHome),
     config: {
-      ...codexSharedResourceConfig(subagentModel, qwenSubagent ? subagentModel : null),
+      ...codexSharedResourceConfig(
+        subagentModel,
+        qwenSubagent ? subagentModel : null,
+        subagentReasoning
+      ),
       ...(usesAlibabaTokenPlan && alibaba ? {
         model_provider: "alibaba_token_plan",
         model_providers: {
@@ -300,7 +305,8 @@ export class CodexExecutor {
       this.host.options,
       ctx.codexHome,
       codexModel,
-      ctx.session.subagentModel
+      ctx.session.subagentModel,
+      ctx.session.subagentReasoning
     );
     const threadOptions = buildCodexThreadOptions(
       ctx.session,

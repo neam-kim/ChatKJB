@@ -121,7 +121,7 @@ async function run(): Promise<void> {
       import("./gui/protocol.js"),
       import("./gui/server.js"),
       import("./gui/telegram-user-client.js"),
-      import("./gui/usage-source.js")
+      import("./usage-source.js")
     ]);
     const { loadTelegramGuiConfig } = configModule;
     const { safeTelegramErrorCode } = protocolModule;

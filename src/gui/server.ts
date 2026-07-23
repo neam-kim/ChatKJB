@@ -31,7 +31,7 @@ import {
   type HistoryCursor,
   type TopicCursor
 } from "./protocol.js";
-import { createCachedUsageProvider, createEmptyUsageProvider } from "./usage-source.js";
+import { createCachedUsageProvider, createEmptyUsageProvider } from "../usage-source.js";
 import {
   HistoryInvalidatedError,
   ReadConfirmationPendingError,

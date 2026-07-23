@@ -34,7 +34,12 @@ import {
 } from "./cline-snapshots.js";
 import { providerDisplayLabel } from "./formatting.js";
 import { selectedClaudeTokenIndex, selectedCodexAccountIndex } from "./pending-keys.js";
-import { claudeSubagentModelOptions, codexSubagentModelOptions } from "../qwen-subagent.js";
+import {
+  claudeSubagentModelOptions,
+  codexSubagentModelOptions,
+  grokSubagentModelOptions,
+  isQwenSubagentModel
+} from "../qwen-subagent.js";
 
 export function driveListText(): string {
   return "드라이브를 선택하세요.";
@@ -74,17 +79,25 @@ export function folderBrowserKeyboard(
 // (user 요청: 빈 패널은 '-' 표기, 추후 배선 가능성만 열어둔다.)
 const RESERVED_SLOT_LABEL = "➖";
 
-// Cline 새 세션 기본값 패널의 6번째 슬롯 라벨. permissionMode가 "plan"이면 Plan,
-// 그 외("auto" 또는 미설정=프로젝트 defaultMode 따름)는 Act로 표시한다.
-// 미설정을 Act로 표기하는 이유: Cline은 auto(act)가 실질 기본이며, 이 버튼을 누르면
-// 명시적으로 plan/auto 중 하나로 확정되기 때문이다.
+// Cline 새 세션 기본값 패널의 6번째 슬롯 라벨. 미설정은 프로젝트의 안전 기본값(plan)을
+// 따르므로 Plan으로 표시하고, auto는 승인 요청을 생략하는 위험한 모드임을 분명히 표시한다.
 function clineDefaultModeLabel(mode: PermissionMode | undefined): string {
-  return mode === "plan" ? "🧭 Plan" : "▶️ Act";
+  return mode === "auto" ? "⚠️ Auto" : "🧭 Plan";
 }
 
 // Cline 기본 모드 토글의 다음 값. plan↔auto 두 값만 순환한다.
 function clineToggledDefaultMode(mode: PermissionMode | undefined): PermissionMode {
-  return mode === "plan" ? "auto" : "plan";
+  return mode === "auto" ? "plan" : "auto";
+}
+
+function autoModeConfirmationPrompt(subject: string): string {
+  return `⚠️ ${subject} Auto로 변경하면 다음 실행부터 권한 승인 요청을 생략합니다.\n계속하시겠습니까?`;
+}
+
+function autoModeConfirmationKeyboard(callbackPrefix: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("⚠️ Auto로 변경", `${callbackPrefix}:y`)
+    .text("취소", `${callbackPrefix}:n`);
 }
 
 function clineProviderOption(catalog: ModelCatalog, providerId: string | null | undefined) {
@@ -172,24 +185,29 @@ function defaultsKeyboard(
     ? (defaults.provider === "codex"
       ? codexSubagentModelOptions(catalog).find((option) => option.id === defaults.subagentModel)?.label
         ?? codexModelLabel(catalog, defaults.subagentModel)
+      : defaults.provider === "grok"
+        ? grokSubagentModelOptions(catalog).find((option) => option.id === defaults.subagentModel)?.label
+          ?? grokModelLabel(catalog, defaults.subagentModel)
       : claudeSubagentModelOptions(catalog).find((option) => option.id === defaults.subagentModel)?.label
         ?? modelLabel(catalog, defaults.subagentModel))
     : "기본 상속";
-  // 5번째 슬롯: Codex의 예약 칸은 하위 에이전트 모델 선택에 사용한다.
+  // 5번째 슬롯: Codex/Grok의 예약 칸은 하위 에이전트 모델 선택에 사용한다.
   // Claude는 기존 작업량(effort) 버튼을 유지한다.
   const fifth = defaults.provider === "claude"
     ? `🛠️ 작업량: ${claudeEffortLabel(defaults.claudeEffort)}`
     : defaults.provider === "codex"
       ? `🧑‍💻 서브에이전트: ${subagentLabel}`
+      : defaults.provider === "grok"
+        ? `🧑‍💻 서브에이전트: ${subagentLabel}`
     : defaults.provider === "cline"
       ? `🔌 Cline 제공자: ${clineProviderOption(catalog, defaults.clineProviderId)?.label ?? "감지 없음"}`
       : RESERVED_SLOT_LABEL;
   const codexAccountIndex = selectedCodexAccountIndex(defaults.codexHome, codexAccountHomes);
   const claudeTokenIndex = selectedClaudeTokenIndex(defaults.claudeTokenIndex, claudeTokenCount);
   // 6번째 슬롯: Claude/Codex는 토큰이 여러 개라 토큰 선택 버튼을 둔다.
-  // Cline은 토큰이 단수라 이 자리가 남으므로 Plan↔Act 토글 버튼을 배치한다(user 지시).
+  // Cline은 토큰이 단수라 이 자리가 남으므로 Plan↔Auto 토글 버튼을 배치한다(user 지시).
   // Claude는 토큰이 하나일 때 남는 칸에 하위 에이전트 모델 선택을 둔다.
-  // 그 외(agy/grok)는 예약 슬롯.
+  // agy는 예약 슬롯을 유지한다.
   const sixth = defaults.provider === "cline"
     ? clineDefaultModeLabel(defaults.defaultPermissionMode)
     : defaults.provider === "codex" && codexAccountHomes.length > 1 && codexAccountIndex >= 0
@@ -198,6 +216,8 @@ function defaultsKeyboard(
         ? `🔑 토큰: #${claudeTokenIndex + 1}`
         : defaults.provider === "claude"
           ? `🧑‍💻 서브에이전트: ${subagentLabel}`
+          : defaults.provider === "grok"
+            ? RESERVED_SLOT_LABEL
         : RESERVED_SLOT_LABEL;
   const keyboard = new Keyboard()
     .text("⚙️ 새 세션 기본값")
@@ -237,15 +257,60 @@ function defaultsModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog)
   return keyboard;
 }
 
-// 새 세션 기본값 패널: Claude/Codex 하위 에이전트 모델. setsa:<provider>:<id|inherit>
+// 새 세션 기본값 패널: Claude/Codex/Grok 하위 에이전트 모델. setsa:<provider>:<id|inherit>
 function defaultsSubagentModelKeyboard(defaults: SessionDefaults, catalog: ModelCatalog): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   const options = defaults.provider === "codex"
     ? codexSubagentModelOptions(catalog)
+    : defaults.provider === "grok"
+      ? grokSubagentModelOptions(catalog)
     : claudeSubagentModelOptions(catalog);
   keyboard.text(`${defaults.subagentModel ? "모델 기본값 상속" : "✅ 모델 기본값 상속"}`, `setsa:${defaults.provider}:inherit`).row();
   for (const [index, option] of options.entries()) {
     keyboard.text(`${option.id === defaults.subagentModel ? "✅ " : ""}${option.label}`, `setsa:${defaults.provider}:${option.id}`);
+    if (index < options.length - 1) keyboard.row();
+  }
+  return keyboard;
+}
+
+/** 선택한 서브 모델이 실제로 지원하는 조절값만 후속 버튼으로 노출한다. */
+function defaultsSubagentTuningKeyboard(
+  defaults: SessionDefaults,
+  catalog: ModelCatalog
+): InlineKeyboard | null {
+  const model = defaults.subagentModel;
+  if (!model || isQwenSubagentModel(catalog, model)) return null;
+  const keyboard = new InlineKeyboard();
+  if (defaults.provider === "claude") {
+    const options = claudeEffortOptionsForModel(catalog, model);
+    keyboard.text(
+      `${defaults.subagentEffort ? "작업량 기본값" : "✅ 작업량 기본값"}`,
+      "setsae:claude:inherit"
+    ).row();
+    for (const [index, option] of options.entries()) {
+      keyboard.text(
+        `${option.id === defaults.subagentEffort ? "✅ " : ""}${option.label}`,
+        `setsae:claude:${option.id}`
+      );
+      if (index < options.length - 1) keyboard.row();
+    }
+    return keyboard;
+  }
+  const options = defaults.provider === "codex"
+    ? codexReasoningOptionsForModel(catalog, model)
+    : defaults.provider === "grok"
+      ? grokReasoningOptions(catalog)
+      : [];
+  if (options.length === 0) return null;
+  keyboard.text(
+    `${defaults.subagentReasoning ? "추론 기본값" : "✅ 추론 기본값"}`,
+    `setsar:${defaults.provider}:inherit`
+  ).row();
+  for (const [index, option] of options.entries()) {
+    keyboard.text(
+      `${option.id === defaults.subagentReasoning ? "✅ " : ""}${option.label}`,
+      `setsar:${defaults.provider}:${option.id}`
+    );
     if (index < options.length - 1) keyboard.row();
   }
   return keyboard;
@@ -453,6 +518,8 @@ function usageRateLimitWarning(): string {
 
 export {
   agyModelKeyboard,
+  autoModeConfirmationKeyboard,
+  autoModeConfirmationPrompt,
   clineDefaultModeLabel,
   clineModelOption,
   clineModelSnapshotKeyboard,
@@ -467,6 +534,7 @@ export {
   defaultsSubagentModelKeyboard,
   defaultsProviderKeyboard,
   defaultsReasoningKeyboard,
+  defaultsSubagentTuningKeyboard,
   defaultsSummary,
   defaultsTokenKeyboard,
   grokModelKeyboard,

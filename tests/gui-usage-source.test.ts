@@ -6,8 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createCachedUsageProvider,
   createUsageProvider
-} from "../src/gui/usage-source.js";
-import type { GuiUsageProvider } from "../src/gui/protocol.js";
+} from "../src/usage-source.js";
+import type { GuiUsageProvider } from "../src/usage-contract.js";
 import type { CodexLiveUsageOptions, CodexLiveUsageResult } from "../src/codex-live-usage.js";
 import type { GrokLiveUsageResult } from "../src/grok-live-usage.js";
 

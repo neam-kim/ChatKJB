@@ -434,7 +434,9 @@ export class SessionManager {
     clineModel?: string | null,
     clineReasoning?: string | null,
     permissionMode?: SessionRecord["permissionMode"] | null,
-    subagentModel?: string | null
+    subagentModel?: string | null,
+    subagentReasoning?: string | null,
+    subagentEffort?: string | null
   ): SessionRecord {
     if (this.disposed) throw new Error("세션 관리자가 종료되어 새 세션을 만들 수 없습니다.");
     const selectedProvider = provider ?? this.defaultProvider();
@@ -460,6 +462,8 @@ export class SessionManager {
       codexModel: codexModel ?? null,
       codexReasoning: codexReasoning ?? null,
       subagentModel: subagentModel ?? null,
+      subagentReasoning: subagentReasoning ?? null,
+      subagentEffort: subagentEffort ?? null,
       codexHome: codexHome ?? null,
       codexThreadId: null,
       agyModel: agyModel ?? null,

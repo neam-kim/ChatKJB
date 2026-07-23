@@ -10,6 +10,7 @@ import {
   type RemainingPlan,
   type WaitReason
 } from "./session/progress-model.js";
+import { redactSensitiveText } from "./redaction.js";
 import { safeErrorMessage } from "./telegram-transport.js";
 import type { MessageTransport, SessionRecord, SessionStatus, UsageSnapshot } from "./types.js";
 import { resolveUploadPath } from "./upload-path.js";
@@ -150,7 +151,7 @@ export class StreamRenderer {
   // 실행 중 자라나는 답변 본문을 상태 메시지에 미리보기로 보여 준다(codex/agy 라이브 스트리밍).
   // 누적 전체 텍스트를 받아 저장하고, 실제 갱신은 기존 디바운스(schedule)로 throttle 한다.
   partial(fullTextSoFar: string): void {
-    const next = stripUserInputRequestBlocks(fullTextSoFar).trimEnd();
+    const next = redactSensitiveText(stripUserInputRequestBlocks(fullTextSoFar)).trimEnd();
     if (!next || next === this.partialText) return;
     this.partialText = next;
     if (!this.currentActivity || this.currentActivity === "세션 시작" || this.currentActivity === "응답 대기 중") {
@@ -162,7 +163,7 @@ export class StreamRenderer {
   async text(text: string): Promise<void> {
     // 선택형 UI 제어 블록은 사용자 본문이나 파일 전송 마커로 해석되기 전에 제거한다.
     const delivered = await this.deliverMarkedFiles(stripUserInputRequestBlocks(text));
-    const clean = delivered.trim();
+    const clean = redactSensitiveText(delivered).trim();
     if (!clean) return;
     const key = clean.replace(/\s+/g, " ");
     if (!this.rememberText(key)) return;
@@ -190,15 +191,16 @@ export class StreamRenderer {
     kind: "status" | "progress" | "terminal",
     keyboard?: InlineKeyboard
   ): Promise<number> {
+    const redacted = redactSensitiveText(text);
     try {
       const messageId = await this.transport.sendText(
         this.session.chatId,
         this.session.topicId,
-        text,
+        redacted,
         keyboard
       );
       console.log(
-        `[telegram] session=${this.session.id} ${kind} delivered message=${messageId} chars=${text.length}`
+        `[telegram] session=${this.session.id} ${kind} delivered message=${messageId} chars=${redacted.length}`
       );
       return messageId;
     } catch (error) {
@@ -275,17 +277,18 @@ export class StreamRenderer {
       if (summary.trim()) {
         // 마커를 먼저 처리해 파일을 전송하고, 남은 본문 길이에 따라 텍스트/문서로 보낸다.
         const cleaned = (await this.deliverMarkedFiles(stripUserInputRequestBlocks(summary))).trim();
-        if (cleaned) {
-          if (cleaned.length > 10_000) {
+        const redacted = redactSensitiveText(cleaned);
+        if (redacted) {
+          if (redacted.length > 10_000) {
             await this.transport.sendDocument(
               this.session.chatId,
               this.session.topicId,
               "claude-result.md",
-              cleaned,
+              redacted,
               "결과가 길어 파일로 첨부했습니다."
             );
           } else {
-            await this.text(cleaned);
+            await this.text(redacted);
           }
         }
       }
@@ -359,7 +362,7 @@ export class StreamRenderer {
 
   private async flushOnce(): Promise<void> {
     if (this.finished || this.statusMessageId === null) return;
-    const text = this.renderStatusText("running");
+    const text = redactSensitiveText(this.renderStatusText("running"));
     if (text === this.lastRendered) return;
     this.lastRendered = text;
     const keyboard = new InlineKeyboard().text("중단", `stop:${this.session.id}`);

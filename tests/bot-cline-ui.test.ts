@@ -186,6 +186,7 @@ function setup(options: { withSession?: boolean; active?: boolean; unsetConnecti
   const updateSession = vi.fn((_id: string, fields: Partial<SessionRecord>) => {
     if (session) session = { ...session, ...fields };
   });
+  const isActive = vi.fn(() => options.active ?? false);
   const deps = {
     config: {
       chatId: CHAT_ID,
@@ -205,7 +206,7 @@ function setup(options: { withSession?: boolean; active?: boolean; unsetConnecti
       updateSession
     },
     sessions: {
-      isActive: vi.fn(() => options.active ?? false),
+      isActive,
       resume: vi.fn(() => true),
       switchProvider: vi.fn(async () => ({ ok: true })),
       updateClineConnection: vi.fn(async (_id: string, fields: Partial<SessionRecord>) => {
@@ -235,6 +236,7 @@ function setup(options: { withSession?: boolean; active?: boolean; unsetConnecti
     edited,
     updateSessionDefaults,
     updateSession,
+    isActive,
     defaults: () => defaults,
     session: () => session
   };
@@ -292,34 +294,81 @@ describe("Cline bot configuration UI", () => {
     expect(codex.subagentModel).toBe("codex");
   });
 
-  it("shows the Plan/Act toggle in the sixth slot for Cline defaults", () => {
+  it("shows the Plan/Auto toggle in the sixth slot for Cline defaults", () => {
     const catalog = clineCatalog(1, 1);
     const labelOf = (defaults: SessionDefaults): string => {
       const sixth = defaultsKeyboard(defaults, catalog).build()[2]?.[1];
       return typeof sixth === "string" ? sixth : sixth?.text ?? "";
     };
-    // 미설정 기본값은 Cline의 실질 기본(act)으로 표기한다.
-    expect(labelOf(defaultsFor(catalog))).toContain("Act");
+    // 미설정 기본값은 프로젝트의 안전 기본값(plan)을 따른다.
+    expect(labelOf(defaultsFor(catalog))).toContain("Plan");
     expect(labelOf({ ...defaultsFor(catalog), defaultPermissionMode: "plan" })).toContain("Plan");
-    expect(labelOf({ ...defaultsFor(catalog), defaultPermissionMode: "auto" })).toContain("Act");
-    // Claude 기본값에서는 이 슬롯이 토큰/예약이라 Plan/Act가 나오면 안 된다(회귀 방지).
+    expect(labelOf({ ...defaultsFor(catalog), defaultPermissionMode: "auto" })).toContain("⚠️ Auto");
+    // Claude 기본값에서는 이 슬롯이 토큰/예약이라 Plan/Auto가 나오면 안 된다(회귀 방지).
     const claudeSixth = defaultsKeyboard({ ...defaultsFor(catalog), provider: "claude" }, catalog).build()[2]?.[1];
     const claudeLabel = typeof claudeSixth === "string" ? claudeSixth : claudeSixth?.text ?? "";
     expect(claudeLabel).not.toContain("Plan");
-    expect(claudeLabel).not.toContain("Act");
+    expect(claudeLabel).not.toContain("Auto");
   });
 
-  it("toggles the Cline default permission mode plan<->auto from the panel button", async () => {
+  it("requires confirmation before changing the Cline default permission mode from plan to auto", async () => {
     const test = setup();
-    // 미설정 → Act 표시. 버튼을 누르면 plan으로 확정.
-    await test.bot.handleUpdate(messageUpdate("▶️ Act", 1));
-    expect(test.updateSessionDefaults).toHaveBeenCalledWith({ defaultPermissionMode: "plan" });
-    expect(test.defaults().defaultPermissionMode).toBe("plan");
+    await test.bot.handleUpdate(messageUpdate("🧭 Plan", 1));
+    expect(test.updateSessionDefaults).not.toHaveBeenCalled();
+    expect(String(test.sent.at(-1)?.text)).toContain("승인 요청을 생략합니다");
+    expect(callbacks(test.sent.at(-1))).toEqual(["modeauto:d:y", "modeauto:d:n"]);
 
-    // 다시 누르면 auto로 되돌아온다.
-    await test.bot.handleUpdate(messageUpdate("🧭 Plan", 2));
-    expect(test.updateSessionDefaults).toHaveBeenLastCalledWith({ defaultPermissionMode: "auto" });
+    await test.bot.handleUpdate(callbackUpdate("modeauto:d:y", 2));
+    expect(test.updateSessionDefaults).toHaveBeenCalledWith({ defaultPermissionMode: "auto" });
     expect(test.defaults().defaultPermissionMode).toBe("auto");
+
+    // Auto→Plan은 위험을 낮추므로 즉시 반영한다.
+    await test.bot.handleUpdate(messageUpdate("⚠️ Auto", 3));
+    expect(test.updateSessionDefaults).toHaveBeenLastCalledWith({ defaultPermissionMode: "plan" });
+    expect(test.defaults().defaultPermissionMode).toBe("plan");
+  });
+
+  it("leaves the Cline default permission mode unchanged when Auto confirmation is cancelled", async () => {
+    const test = setup();
+    await test.bot.handleUpdate(messageUpdate("🧭 Plan", 1));
+    await test.bot.handleUpdate(callbackUpdate("modeauto:d:n", 2));
+
+    expect(test.updateSessionDefaults).not.toHaveBeenCalled();
+    expect(test.defaults().defaultPermissionMode).toBeUndefined();
+  });
+
+  it("rechecks an in-topic session before confirming the Cline default Auto mode", async () => {
+    const test = setup({ withSession: true });
+    await test.bot.handleUpdate(messageUpdate("🧭 Plan", 1));
+    test.isActive.mockReturnValue(true);
+    await test.bot.handleUpdate(callbackUpdate("modeauto:d:y", 2));
+
+    expect(test.updateSessionDefaults).not.toHaveBeenCalled();
+    expect(test.defaults().defaultPermissionMode).toBeUndefined();
+    expect(test.callbackAnswers.at(-1)).toMatchObject({ show_alert: true });
+  });
+
+  it("requires confirmation and a still-idle matching session for /mode auto", async () => {
+    const test = setup({ withSession: true });
+    await test.bot.handleUpdate(messageUpdate("/mode auto", 1));
+    expect(test.updateSession).not.toHaveBeenCalled();
+    expect(callbacks(test.sent.at(-1))).toEqual(["modeauto:s:cline-session:d:y", "modeauto:s:cline-session:d:n"]);
+
+    await test.bot.handleUpdate(callbackUpdate("modeauto:s:cline-session:d:y", 2));
+    expect(test.updateSession).toHaveBeenCalledWith("cline-session", { permissionMode: "auto" });
+    expect(test.session()?.permissionMode).toBe("auto");
+  });
+
+  it("rejects /mode auto confirmation when the session starts running", async () => {
+    const test = setup({ withSession: true });
+    test.isActive.mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+    await test.bot.handleUpdate(messageUpdate("/mode auto", 1));
+    await test.bot.handleUpdate(callbackUpdate("modeauto:s:cline-session:d:y", 2));
+
+    expect(test.updateSession).not.toHaveBeenCalled();
+    expect(test.session()?.permissionMode).toBe("default");
+    expect(test.callbackAnswers.at(-1)).toMatchObject({ show_alert: true });
   });
 
   it("carries the Cline default permission mode into pending starts", () => {

@@ -162,7 +162,26 @@ describe("ClaudeExecutor lifecycle", () => {
 
     expect(captured?.options?.agents).toBeUndefined();
     expect(captured?.options?.allowedTools).toContain(QWEN_SUBAGENT_TOOL_NAME);
+    expect(captured?.options?.allowedTools).not.toContain("Task");
     expect(captured?.options?.mcpServers?.[QWEN_SUBAGENT_SERVER_NAME]).toBeDefined();
+  });
+
+  it("pins native Task delegation to the selected Claude model and effort", async () => {
+    let captured: Parameters<ClaudeExecutorDependencies["createQuery"]>[0] | undefined;
+    const emptyQuery = { close() {}, async *[Symbol.asyncIterator]() {} } as unknown as Query;
+    const createQuery = ((params) => {
+      captured = params;
+      return emptyQuery;
+    }) as ClaudeExecutorDependencies["createQuery"];
+    const { executor, store } = setup(undefined, createQuery, FALLBACK_MODEL_CATALOG, "claude-sonnet-4-5");
+    store.updateSession("claude-executor", { subagentEffort: "high" });
+
+    await executor.execute({ session: store.getSession("claude-executor")!, prompt: "delegate" });
+
+    expect(captured?.options?.agents?.chatkjb_subagent).toMatchObject({
+      model: "claude-sonnet-4-5",
+      effort: "high"
+    });
   });
 
   it("does not register an active run when token selection fails", async () => {

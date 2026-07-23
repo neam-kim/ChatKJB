@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildCodexEnvironment,
   codexSharedResourceConfig,
-  ensureCodexMcpConfigForHome
+  ensureCodexMcpConfigForHome,
+  pinnedCodexChildAgentPath
 } from "../src/session-environment.js";
 
 describe("codexSharedResourceConfig", () => {
@@ -24,8 +25,24 @@ describe("codexSharedResourceConfig", () => {
     expect(codexSharedResourceConfig("gpt-5.4-mini").agents.default_subagent_model).toBe("gpt-5.4-mini");
   });
 
+  it("pins an explicitly selected child reasoning effort independently of the root", () => {
+    expect(codexSharedResourceConfig("gpt-5.6-terra", null, "high").agents)
+      .toMatchObject({
+        default_subagent_model: "gpt-5.6-terra",
+        default_subagent_reasoning_effort: "high"
+      });
+  });
+
+  it("uses an agent file pin so an explicit spawn model cannot bypass the selection", () => {
+    const path = pinnedCodexChildAgentPath("gpt-5.6-terra", "high");
+    expect(readFileSync(path, "utf8")).toContain('model = "gpt-5.6-terra"');
+    expect(readFileSync(path, "utf8")).toContain('model_reasoning_effort = "high"');
+    expect(codexSharedResourceConfig("gpt-5.6-terra", null, "high").agents.default.config_file).toBe(path);
+  });
+
   it("registers Qwen as a dedicated MCP delegate instead of a native child model", () => {
     const config = codexSharedResourceConfig("qwen3.8-max", "qwen3.8-max");
+    expect(config.features.multi_agent).toBe(false);
     expect(config.agents.default_subagent_model).toBeUndefined();
     expect(config.mcp_servers?.chatkjb_qwen_subagent).toMatchObject({
       command: process.execPath,

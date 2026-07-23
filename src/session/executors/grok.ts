@@ -16,6 +16,7 @@ import { StreamRenderer } from "../../stream-renderer.js";
 import { safeErrorMessage } from "../../telegram-transport.js";
 import { addGrokUsage, parseStoredGrokUsage } from "../../usage.js";
 import { promptForCodexRequest, type RunRequest } from "../prompt-builders.js";
+import { isQwenSubagentModel, QWEN_SUBAGENT_SERVER_NAME } from "../../qwen-subagent.js";
 import {
   degradedPlanForProvider,
   steerCapabilityNote
@@ -104,8 +105,13 @@ export async function executeGrok(
   host.store.updateSession(session.id, { status: "running" });
   const model = session.grokModel ?? host.options.grokModel ?? DEFAULT_GROK_MODEL;
   const reasoning = session.grokReasoning ?? DEFAULT_GROK_REASONING;
+  const qwenSubagent = isQwenSubagentModel(host.options.modelCatalog, session.subagentModel);
   const rules = [
     buildProviderBootstrap(session, host.options.claudeMemoryDir),
+    ...(qwenSubagent && session.subagentModel ? [
+      `이 세션의 하위 작업은 반드시 ${QWEN_SUBAGENT_SERVER_NAME}__delegate MCP 도구로 위임하십시오. `
+      + "네이티브 하위 에이전트는 비활성화되어 있으며, MCP 결과를 직접 검증·통합해야 합니다."
+    ] : []),
     buildGrokOutputInstructions()
   ].join("\n\n");
   let grokSessionId = session.grokSessionId ?? dependencies.createSessionId();
@@ -157,6 +163,12 @@ export async function executeGrok(
         cwd: session.cwd,
         model,
         reasoningEffort: reasoning,
+        ...(qwenSubagent && session.subagentModel ? {
+          qwenSubagentModel: session.subagentModel
+        } : session.subagentModel ? {
+          subagentModel: session.subagentModel,
+          ...(session.subagentReasoning ? { subagentReasoningEffort: session.subagentReasoning } : {})
+        } : {}),
         supportedReasoningEfforts: host.options.modelCatalog.grokReasoningEfforts,
         ...(host.options.providerTurnTimeoutMs
           ? { timeoutMs: host.options.providerTurnTimeoutMs }

@@ -426,11 +426,65 @@ Because this automates work on your own machine, these safeguards are built in.
 
 # Part 2. Installing on your Mac
 
-This part is for **people installing it themselves.**
+There are two separate installables. Choose the one you need first.
+
+| Install path | What it contains | Choose it when |
+| --- | --- | --- |
+| **Release DMG** | The `ChatKJB Terminal.app` desktop viewer | You want a Mac app for a room served by an already-running ChatKJB bot |
+| **Source install** | The Telegram bot service, AI CLI integration, and LaunchAgent | You want to run ChatKJB with your own bot and AI accounts, or develop it |
+
+`ChatKJB Terminal` is not the bot service. Installing only the DMG gives you the desktop screen, but ChatKJB replies still require a bot service running separately from the source install below or on another Mac.
+
+## A. Install ChatKJB Terminal from a release DMG
+
+The release DMG provides one verified `ChatKJB Terminal.app` for Apple Silicon on macOS 14 or later. The Mac that runs this app does not need the repository or Node.js.
+
+### Install and first launch
+
+1. Open the received `ChatKJB Terminal.dmg` in Finder.
+2. Drag `ChatKJB Terminal.app` to the `Applications` alias in the DMG.
+3. Eject the DMG and open `/Applications/ChatKJB Terminal.app`. If macOS blocks the first launch, allow it once in **System Settings → Privacy & Security**.
+4. Enter your Telegram API ID, 32-character API Hash, forum chat ID, and allowed user ID. Scan the QR code from Telegram on your phone at **Settings → Devices → Link Desktop Device**. If you use two-step verification, enter the password once after approving the QR.
+
+The app uses a Telegram user account's API ID/API Hash, not a bot token, and creates its own app session. See [the ChatKJB Terminal desktop app](#optional-the-chatkjb-terminal-desktop-app) section for detailed behavior and the difference between quitting and logging out.
+
+### DMG updates, backups, and recovery
+
+Before updating, quit the app completely with `⌘Q`. Open the newer DMG, drag its `ChatKJB Terminal.app` to `/Applications`, choose **Replace**, and reopen it. Settings and the Telegram session live outside the app bundle at `~/Library/Application Support/ChatKJB Terminal`, so replacing the app preserves them.
+
+After first launch, you can back up that folder before an update or configuration change:
+
+```bash
+backup="$HOME/Desktop/ChatKJB-Terminal-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup"
+ditto "$HOME/Library/Application Support/ChatKJB Terminal" "$backup/ChatKJB Terminal"
+```
+
+The backup contains the app's `.env` and `data/telegram-gui.session`. If an update fails, quit the app and replace `/Applications/ChatKJB Terminal.app` with the app from a retained previous DMG to roll back the app version. To roll back settings too, restore the saved `ChatKJB Terminal` folder to `~/Library/Application Support` in Finder, then reopen the app. Do not delete the current folder before you have verified the backup to restore.
+
+### License information for DMG recipients
+
+The project is under the [MIT LICENSE](LICENSE). The licenses, versions, and SHA-256 tracking information for the Node.js runtime and npm dependencies actually bundled in the app are here:
+
+```text
+/Applications/ChatKJB Terminal.app/Contents/Resources/Licenses/manifest.json
+/Applications/ChatKJB Terminal.app/Contents/Resources/Licenses/Node/LICENSE
+/Applications/ChatKJB Terminal.app/Contents/Resources/Licenses/Packages/
+```
+
+To inspect them in Finder:
+
+```bash
+open "/Applications/ChatKJB Terminal.app/Contents/Resources/Licenses"
+```
+
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) provides the minimum recipient notice and records the current DMG packaging follow-up.
+
+## B. Install the bot service from source
 
 ChatKJB is **not** a service you host for many users. It's a personal tool you clone and run **on your own Mac, with your own bot, and your own AI accounts.**
 
-## Very fast install (summary)
+## Very fast source install (summary)
 
 If you're already comfortable with dev tooling, this is all you need.
 
@@ -733,6 +787,30 @@ Healthy output shows:
 - `program` pointing at the Node you intended
 - `arguments` pointing at the repo's `dist/index.js`
 - `working directory` set to the repo path
+
+### Source updates and LaunchAgent health checks
+
+Update a source install from the repository root in this order. If `git pull --ff-only` stops, do not overwrite a conflict; settle the current work first.
+
+```bash
+git pull --ff-only
+nvm use
+npm install
+npm run build
+npm run launchd:restart
+launchctl print gui/$(id -u)/com.chatkjb.bot
+```
+
+In the final output, confirm the `state = running`, `arguments`, and `working directory` values above, then run `/doctor` in Telegram too. If you changed Node or `program` is not the intended path, re-register the LaunchAgent instead of only restarting it:
+
+```bash
+npm install
+npm run build
+npm run launchd:install
+launchctl print gui/$(id -u)/com.chatkjb.bot
+```
+
+Register the optional CloudStorage/NAS mirror for a source install in [personal backups](#optional-personal-backup-mirrors-not-needed-for-normal-installs) below. The mirror preserves the source checkout's `.env`, `projects.json`, and `data/`, but excludes `node_modules` and `dist`; after restoring a checkout, run `npm install` and `npm run build` again, then restore its registration with `npm run launchd:install`. It does not back up the DMG app's Application Support folder.
 
 ### Resuming work after a restart
 
@@ -1187,8 +1265,6 @@ A single test:
 npm test -- tests/orchestration-tier0.test.ts
 ```
 
-> `npm run test:agy-live` needs real credentials and network. Don't run it in a checkout without the live test files.
-
 ## Pre-commit checklist
 
 - [ ] No `.env`, `projects.json`, `data/`, or logs staged for Git
@@ -1374,7 +1450,7 @@ Common Telegram commands:
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE) for details. [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) records auditable notices for bundled dependencies and the DMG packaging follow-up.
 
 ## Contact
 

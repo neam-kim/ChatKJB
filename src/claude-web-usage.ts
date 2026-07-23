@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Writable } from "node:stream";
-import type { GuiClaudeUsageDto } from "./gui/protocol.js";
+import type { GuiClaudeUsageDto } from "./usage-contract.js";
 
 const CLAUDE_USAGE_URL = "https://claude.ai/settings/usage";
 const DEFAULT_TIMEOUT_MS = 30_000;

@@ -1,7 +1,16 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+import {
+  DAEMON_NODE_RUNTIME_FORMAT,
+  buildDaemonApp,
+  classifyNodeDynamicDependencies,
+  isDaemonAppReceiptCurrent,
+  parseOtoolDynamicDependencies
+} from "../scripts/build-daemon-app.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const daemonApp = readFileSync(resolve(root, "scripts/build-daemon-app.mjs"), "utf8");
@@ -33,11 +42,12 @@ describe("ChatKJB 데몬 래퍼 앱 계약", () => {
     expect(daemonApp).not.toContain("<key>LSUIElement</key>");
   });
 
-  it("Node 실행 파일과 필수 libnode 동적 라이브러리를 번들에 복사하고 ad-hoc 서명한다", () => {
+  it("self-contained Node 실행 파일만 복사하고 ad-hoc 서명한다", () => {
     expect(daemonApp).toContain("copyFileSync(nodeSource, executablePath)");
-    expect(daemonApp).toContain("nodeLibraryPath(nodeSource)");
-    expect(daemonApp).toContain("copyFileSync(nodeLibrarySource, bundledNodeLibrary)");
-    expect(daemonApp).toContain('join(appPath, "Contents", "lib", nodeLibraryName)');
+    expect(daemonApp).toContain("classifyNodeDynamicDependencies");
+    expect(daemonApp).toContain("Refusing to replace daemon app");
+    expect(daemonApp).not.toContain("nodeLibraryPath(nodeSource)");
+    expect(daemonApp).not.toContain("copyFileSync(nodeLibrarySource");
     expect(daemonApp).toContain('"/usr/bin/codesign"');
     expect(daemonApp).toContain('"--sign", "-"');
   });
@@ -46,6 +56,16 @@ describe("ChatKJB 데몬 래퍼 앱 계약", () => {
     expect(daemonApp).toContain("isBundleCurrent(");
     expect(daemonApp).toContain("nodeSha256");
     expect(daemonApp).toContain("build-receipt.json");
+    expect(daemonApp).toContain('from "./release-version.mjs"');
+    expect(daemonApp).toContain("receipt.shortVersion === releaseVersion.shortVersion");
+    expect(daemonApp).toContain("receipt.buildNumber === releaseVersion.buildNumber");
+  });
+
+  it("package.json 버전을 daemon wrapper의 두 CFBundle 버전 필드에 주입한다", () => {
+    expect(daemonApp).toContain("const releaseVersion = readReleaseVersion(projectDir)");
+    expect(daemonApp).toContain("infoPlist(releaseVersion)");
+    expect(daemonApp).toContain("${releaseVersion.shortVersion}");
+    expect(daemonApp).toContain("${releaseVersion.buildNumber}");
   });
 
   it("Finder가 인식하는 시스템 응용 프로그램 경로에 설치한다", () => {
@@ -74,5 +94,99 @@ describe("ChatKJB 데몬 래퍼 앱 계약", () => {
     expect(packageJson.scripts["launchd:install"]).toContain("install-launch-agent.mjs");
     expect(packageJson.scripts["agents:install-sync-agent"]).toContain("install-agent-sync-agent.mjs");
     expect(packageJson.scripts["agents:install-cleanup-agent"]).toContain("install-cleanup-agent.mjs");
+  });
+});
+
+describe("ChatKJB 데몬 Node 런타임 패키징 정책", () => {
+  it("시스템 동적 라이브러리만 참조하는 Node를 self-contained static으로 허용한다", () => {
+    const dependencies = parseOtoolDynamicDependencies(`node:
+\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 1.0.0, current version 1.0.0)
+\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.0.0)
+`);
+    const runtime = classifyNodeDynamicDependencies(dependencies);
+
+    expect(runtime).toEqual({
+      kind: "self-contained-static",
+      runtimeFormat: DAEMON_NODE_RUNTIME_FORMAT,
+      dependencies: [
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      nonSystemDependencies: []
+    });
+  });
+
+  it("@rpath libnode 의존 Node를 거절한다", () => {
+    const runtime = classifyNodeDynamicDependencies([
+      "/usr/lib/libSystem.B.dylib",
+      "@rpath/libnode.147.dylib"
+    ]);
+
+    expect(runtime.kind).toBe("unsupported-dynamic");
+    expect(runtime.runtimeFormat).toBeNull();
+    expect(runtime.nonSystemDependencies).toEqual(["@rpath/libnode.147.dylib"]);
+  });
+
+  it("Homebrew 동적 의존 Node를 거절한다", () => {
+    const runtime = classifyNodeDynamicDependencies([
+      "/usr/lib/libSystem.B.dylib",
+      "/opt/homebrew/opt/icu4c/lib/libicui18n.77.dylib"
+    ]);
+
+    expect(runtime.kind).toBe("unsupported-dynamic");
+    expect(runtime.nonSystemDependencies).toEqual([
+      "/opt/homebrew/opt/icu4c/lib/libicui18n.77.dylib"
+    ]);
+  });
+
+  it("동적 Node는 기존 daemon app을 삭제하기 전에 거절한다", () => {
+    const temporaryDirectory = mkdtempSync(join(tmpdir(), "chatkjb-daemon-refusal-"));
+    const appPath = join(temporaryDirectory, "ChatKJB.app");
+    const markerPath = join(appPath, "existing-daemon-app-marker");
+    let removeAttempts = 0;
+    mkdirSync(appPath, { recursive: true });
+    writeFileSync(markerPath, "preserve this app", "utf8");
+
+    try {
+      expect(() => buildDaemonApp({
+        appPath,
+        nodeSource: process.execPath,
+        inspectRuntime: () => classifyNodeDynamicDependencies(["@rpath/libnode.147.dylib"]),
+        removeTree: () => { removeAttempts += 1; }
+      })).toThrow(/Refusing to replace daemon app/);
+      expect(removeAttempts).toBe(0);
+      expect(existsSync(markerPath)).toBe(true);
+    } finally {
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("Node 런타임 배포 형식이 바뀐 영수증은 최신으로 취급하지 않는다", () => {
+    const nodeRuntime = classifyNodeDynamicDependencies(["/usr/lib/libSystem.B.dylib"]);
+    const expected = {
+      nodeSha256: "node-sha",
+      iconSha256: "icon-sha",
+      nodeRuntime,
+      releaseVersion: { shortVersion: "1.2.3", buildNumber: "10203" }
+    };
+    const receipt = {
+      bundleId: "com.chatkjb.bot",
+      nodeSha256: "node-sha",
+      iconSha256: "icon-sha",
+      nodeRuntimeFormat: DAEMON_NODE_RUNTIME_FORMAT,
+      nodeDynamicDependencies: ["/usr/lib/libSystem.B.dylib"],
+      shortVersion: "1.2.3",
+      buildNumber: "10203"
+    };
+
+    expect(isDaemonAppReceiptCurrent(receipt, expected)).toBe(true);
+    expect(isDaemonAppReceiptCurrent({
+      ...receipt,
+      nodeRuntimeFormat: "self-contained-static-v0"
+    }, expected)).toBe(false);
+    expect(isDaemonAppReceiptCurrent({
+      ...receipt,
+      nodeLibrarySha256: "legacy-libnode-sha"
+    }, expected)).toBe(false);
   });
 });

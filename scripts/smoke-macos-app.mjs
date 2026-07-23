@@ -5,6 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readReleaseVersion } from "./release-version.mjs";
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceApp = join(projectDir, ".artifacts", "ChatKJB Terminal.app");
@@ -20,6 +21,7 @@ const configRoot = join(smokeRoot, "Config Root");
 const configurationSelfTestRoot = join(smokeRoot, "Configuration Self Test");
 const homeRoot = join(smokeRoot, "Home");
 const temporaryRoot = join(smokeRoot, "Tmp");
+const releaseVersion = readReleaseVersion(projectDir);
 
 for (const path of [relocatedDirectory, configRoot, homeRoot, temporaryRoot]) {
   mkdirSync(path, { recursive: true, mode: 0o700 });
@@ -124,6 +126,20 @@ function runRuntimeSelfTest() {
   if (result.status !== 0 || !result.stdout.includes("CHATKJB_GUI_RUNTIME_SELF_TEST_OK")) {
     throw new Error("Relocated bundled backend runtime self-test failed");
   }
+}
+
+function assertBundledReleaseVersion() {
+  const result = spawnSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", join(appPath, "Contents", "Info.plist")], {
+    encoding: "utf8",
+    timeout: 20_000,
+    maxBuffer: 64 * 1024
+  });
+  const plist = result.status === 0 ? JSON.parse(result.stdout) : null;
+  if (
+    !plist
+    || plist.CFBundleShortVersionString !== releaseVersion.shortVersion
+    || plist.CFBundleVersion !== releaseVersion.buildNumber
+  ) throw new Error("Relocated app version does not match package.json");
 }
 
 function runConfigurationSelfTest() {
@@ -237,6 +253,7 @@ function terminateRelocatedProcessGroups() {
 
 const botBefore = botPids();
 try {
+  assertBundledReleaseVersion();
   runConfigurationSelfTest();
   runRuntimeSelfTest();
   await runNormalSmoke();

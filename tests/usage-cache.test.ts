@@ -18,7 +18,7 @@ import {
   writeDaemonUsageCache,
   USAGE_CACHE_VERSION
 } from "../src/usage-cache.js";
-import { createUsageProvider } from "../src/gui/usage-source.js";
+import { createUsageProvider } from "../src/usage-source.js";
 import { startDaemonUsageHttpServer } from "../src/daemon-usage-http.js";
 
 const directories: string[] = [];
@@ -218,6 +218,54 @@ describe("daemon usage HTTP", () => {
       await expect(provider.fetchClaudeUsage()).resolves.toMatchObject({
         fiveHour: { utilization: 42 }
       });
+    } finally {
+      await httpServer.stop();
+    }
+  });
+
+  it("defaults to loopback and rejects a tokenless non-loopback binding", async () => {
+    const port = 19_100 + Math.floor(Math.random() * 800);
+    const httpServer = await startDaemonUsageHttpServer({
+      getPayload: () => null,
+      port,
+      log: () => undefined
+    });
+    try {
+      expect(httpServer.host).toBe("127.0.0.1");
+    } finally {
+      await httpServer.stop();
+    }
+
+    await expect(startDaemonUsageHttpServer({
+      getPayload: () => null,
+      port,
+      host: "0.0.0.0",
+      log: () => undefined
+    })).rejects.toThrow("CHATKJB_USAGE_HTTP_TOKEN");
+  });
+
+  it("keeps token-protected non-loopback access available", async () => {
+    const payload = {
+      version: USAGE_CACHE_VERSION,
+      ...samplePayload(1_784_700_000_000)
+    };
+    const port = 19_900 + Math.floor(Math.random() * 800);
+    const httpServer = await startDaemonUsageHttpServer({
+      getPayload: () => payload,
+      port,
+      host: "0.0.0.0",
+      token: "usage-token",
+      log: () => undefined
+    });
+    try {
+      const withoutToken = await fetch(`http://127.0.0.1:${port}/v1/usage`);
+      expect(withoutToken.status).toBe(401);
+
+      const withToken = await fetch(`http://127.0.0.1:${port}/v1/usage`, {
+        headers: { Authorization: "Bearer usage-token" }
+      });
+      expect(withToken.status).toBe(200);
+      await expect(withToken.json()).resolves.toMatchObject({ host: "neamui-Macmini.local" });
     } finally {
       await httpServer.stop();
     }

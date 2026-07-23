@@ -1,11 +1,12 @@
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { terminateChildTree } from "./child-process.js";
 import { buildGrokSubscriptionEnvironment } from "./grok-environment.js";
 import { normalizeGrokReasoningEffort } from "./model-catalog.js";
+import { QWEN_SUBAGENT_SERVER_NAME } from "./qwen-subagent.js";
 import type { GrokTokenUsage } from "./types.js";
 
 /**
@@ -91,6 +92,9 @@ export interface GrokCliOptions {
   cwd: string;
   model: string;
   reasoningEffort?: string;
+  subagentModel?: string;
+  subagentReasoningEffort?: string;
+  qwenSubagentModel?: string;
   supportedReasoningEfforts?: readonly string[] | undefined;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
@@ -201,6 +205,64 @@ export function grokToolFreeArgs(): string[] {
   ];
 }
 
+/**
+ * Grok headless CLI의 `--agents`에는 이름별 정의를 JSON으로 직접 전달할 수 있다.
+ * 내장 세 역할을 모두 같은 선택 모델로 덮어써, 부모 모델과 무관하게 하위 작업이
+ * 패널에서 고른 모델만 쓰도록 한다.
+ */
+export function grokPinnedSubagentDefinitions(model: string, reasoningEffort?: string): string {
+  const definition = (description: string, prompt: string) => ({
+    description,
+    prompt,
+    model,
+    ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+  });
+  return JSON.stringify({
+    "general-purpose": definition(
+      "ChatKJB가 선택한 모델로 실행하는 일반 하위 에이전트",
+      "Complete the delegated bounded task, verify the result, and return concise evidence to the parent."
+    ),
+    explore: definition(
+      "ChatKJB가 선택한 모델로 실행하는 읽기 전용 탐색 하위 에이전트",
+      "Investigate the delegated bounded task read-only, then return concise evidence to the parent."
+    ),
+    plan: definition(
+      "ChatKJB가 선택한 모델로 실행하는 계획 하위 에이전트",
+      "Plan the delegated bounded task read-only, then return concise evidence to the parent."
+    )
+  });
+}
+
+/**
+ * Grok은 MCP를 config.toml에서만 읽으므로, Qwen 선택 시 한 번의 headless 실행에만
+ * 적용되는 GROK_HOME을 만든다. 인증·세션·사용자 에이전트 디렉터리는 원래 홈을 링크해
+ * 계속 재개되지만, Qwen MCP 설정은 전역 설정이나 프로젝트 파일에 남지 않는다.
+ */
+function createQwenGrokHome(baseEnvironment: NodeJS.ProcessEnv, model: string): string {
+  const sourceHome = baseEnvironment.GROK_HOME?.trim() || join(homedir(), ".grok");
+  const home = mkdtempSync(join(tmpdir(), "chatkjb-grok-home-"));
+  for (const name of ["auth.json", "sessions", "agents", "skills", "plugins", "personas", "memory"]) {
+    const source = join(sourceHome, name);
+    if (existsSync(source)) symlinkSync(source, join(home, name));
+  }
+  const sourceConfig = join(sourceHome, "config.toml");
+  const existing = existsSync(sourceConfig) ? readFileSync(sourceConfig, "utf8") : "";
+  const serverScript = new URL("./qwen-subagent-server.js", import.meta.url).pathname;
+  const config = [
+    existing.trimEnd(),
+    "",
+    `# ChatKJB ephemeral Qwen delegate (${model})`,
+    `[mcp_servers.${QWEN_SUBAGENT_SERVER_NAME}]`,
+    `command = ${JSON.stringify(process.execPath)}`,
+    `args = [${JSON.stringify(serverScript)}]`,
+    "env = { DASHSCOPE_API_KEY = \"${DASHSCOPE_API_KEY}\", DASHSCOPE_BASE_URL = \"${DASHSCOPE_BASE_URL}\", CHATKJB_QWEN_SUBAGENT_MODEL = \"${CHATKJB_QWEN_SUBAGENT_MODEL}\" }",
+    "enabled = true",
+    ""
+  ].join("\n");
+  writeFileSync(join(home, "config.toml"), config, "utf8");
+  return home;
+}
+
 export async function runGrokCli(
   prompt: string,
   options: GrokCliOptions,
@@ -211,6 +273,7 @@ export async function runGrokCli(
   const tempDir = mkdtempSync(join(tmpdir(), "chatkjb-grok-"));
   const promptFile = join(tempDir, "prompt.md");
   writeFileSync(promptFile, prompt, "utf8");
+  let qwenHome: string | undefined;
   try {
     const reasoningEffort = normalizeGrokReasoningEffort(
       options.reasoningEffort,
@@ -224,6 +287,11 @@ export async function runGrokCli(
       ...(reasoningEffort ? ["--reasoning-effort", reasoningEffort] : []),
       "--permission-mode",
       grokPermissionMode(options.permissionMode),
+      ...(options.qwenSubagentModel
+        ? ["--no-subagents"]
+        : options.subagentModel
+        ? ["--agents", grokPinnedSubagentDefinitions(options.subagentModel, options.subagentReasoningEffort)]
+        : []),
       // 도구를 쓰는 헤드리스 작업은 계획·진행문만 낸 뒤 끝날 수 있으므로,
       // Grok의 자체 검증 루프를 넣어 요청한 결과가 실제로 완결됐는지 재확인한다.
       ...(options.toolFree ? grokToolFreeArgs() : ["--check"]),
@@ -238,9 +306,23 @@ export async function runGrokCli(
       "--prompt-file",
       promptFile
     ];
-    return await runGrokProcess(options.executable, args, options, signal, onPartial);
+    qwenHome = options.qwenSubagentModel
+      ? createQwenGrokHome(options.env ?? process.env, options.qwenSubagentModel)
+      : undefined;
+    const processOptions = qwenHome
+      ? {
+        ...options,
+        env: {
+          ...(options.env ?? process.env),
+          GROK_HOME: qwenHome,
+          CHATKJB_QWEN_SUBAGENT_MODEL: options.qwenSubagentModel
+        }
+      }
+      : options;
+    return await runGrokProcess(options.executable, args, processOptions, signal, onPartial);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
+    if (qwenHome) rmSync(qwenHome, { recursive: true, force: true });
   }
 }
 

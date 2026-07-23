@@ -37,7 +37,12 @@ import {
   thinkingToggleOptionsForModel
 } from "../../model-catalog.js";
 import { buildMemoryPrompt } from "../../session-manager.js";
-import { claudeSubagentModelOptions, codexSubagentModelOptions } from "../../qwen-subagent.js";
+import {
+  claudeSubagentModelOptions,
+  codexSubagentModelOptions,
+  grokSubagentModelOptions,
+  isQwenSubagentModel
+} from "../../qwen-subagent.js";
 import type { ProviderKind } from "../../types.js";
 import type { BotDeps } from "../deps.js";
 import {
@@ -45,12 +50,16 @@ import {
 } from "../formatting.js";
 import {
   agyModelKeyboard,
+  autoModeConfirmationKeyboard,
+  autoModeConfirmationPrompt,
+  clineDefaultModeLabel,
   codexModelKeyboard,
   clineModelOption,
   clineModelSnapshotKeyboard,
   clineProviderOption,
   clineProviderSnapshotKeyboard,
   clineReasoningLabel,
+  defaultsSubagentTuningKeyboard,
   defaultsProviderKeyboard,
   defaultsSummary,
   grokModelKeyboard,
@@ -62,6 +71,30 @@ import {
 } from "../keyboards.js";
 import { clineCatalogRevision, clineSnapshotStoreFor } from "../cline-snapshots.js";
 import { parseTokenId, pendingStartKey } from "../pending-keys.js";
+
+function permissionModeConfirmationCode(mode: string): string | undefined {
+  switch (mode) {
+    case "default": return "d";
+    case "acceptEdits": return "e";
+    case "plan": return "p";
+    case "dontAsk": return "a";
+    case "auto": return "u";
+    case "bypassPermissions": return "b";
+    default: return undefined;
+  }
+}
+
+function permissionModeFromConfirmationCode(code: string): string | undefined {
+  switch (code) {
+    case "d": return "default";
+    case "e": return "acceptEdits";
+    case "p": return "plan";
+    case "a": return "dontAsk";
+    case "u": return "auto";
+    case "b": return "bypassPermissions";
+    default: return undefined;
+  }
+}
 
 export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
   const {
@@ -76,6 +109,19 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
     providers: config.modelCatalog.clineProviders,
     modelsByProvider: config.modelCatalog.clineModelsByProvider
   });
+
+  const permissionModeChangedMessage = (session: { provider: ProviderKind; agyConversationId: string | null; }, mode: string): string => {
+    if (session.provider !== "agy") {
+      return `다음 실행부터 권한 모드를 ${mode}(으)로 사용합니다.`;
+    }
+    // agy는 런타임 setMode API가 없으므로, 다음 턴에 같은 conversation_id로
+    // 브리지를 재구성하여 새 CapabilitiesConfig+policies를 적용한다.
+    // 대화 문맥(conversation_id)은 그대로 유지된다.
+    const hasConv = !!session.agyConversationId;
+    return `권한 모드를 ${mode}(으)로 변경했습니다.\n`
+      + `Antigravity는 다음 메시지부터 같은 대화${hasConv ? `(${session.agyConversationId!.slice(0, 8)}…)` : ""}를 `
+      + "유지한 채 새 모드로 재구성됩니다.";
+  };
 
   bot.command("firstp", async (ctx) => {
     const current = store.getSessionDefaults();
@@ -158,20 +204,83 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       await ctx.reply("실행 중에는 바꿀 수 없습니다. 작업 완료 또는 중단 후 다시 시도하세요.");
       return;
     }
+    if (mode === "auto") {
+      const expectedMode = permissionModeConfirmationCode(session.permissionMode);
+      if (!expectedMode) {
+        await ctx.reply("현재 권한 모드를 확인할 수 없습니다. /mode로 다시 시도하세요.");
+        return;
+      }
+      await ctx.reply(autoModeConfirmationPrompt("현재 세션을"), {
+        reply_markup: autoModeConfirmationKeyboard(`modeauto:s:${session.id}:${expectedMode}`)
+      });
+      return;
+    }
     store.updateSession(session.id, { permissionMode: mode });
-    if (session.provider === "agy") {
-      // agy는 런타임 setMode API가 없으므로, 다음 턴에 같은 conversation_id로
-      // 브리지를 재구성하여 새 CapabilitiesConfig+policies를 적용한다.
-      // 대화 문맥(conversation_id)은 그대로 유지된다.
-      const hasConv = !!session.agyConversationId;
+    await ctx.reply(permissionModeChangedMessage(session, mode));
+  });
+
+  // Auto는 Codex의 danger-full-access, agy의 dangerously-skip-permissions와 Cline의
+  // unrestricted auto-approve를 뜻한다. 확인 시점에 세션/토픽과 유휴 상태를 다시 확인해
+  // 확인창을 띄운 뒤 상태가 바뀐 경우에는 권한을 올리지 않는다.
+  bot.callbackQuery(/^modeauto:/, async (ctx) => {
+    const parts = ctx.callbackQuery.data.split(":");
+    const action = parts.at(-1);
+    if (action !== "y" && action !== "n") {
+      await ctx.answerCallbackQuery({ text: "알 수 없는 Auto 전환 요청입니다.", show_alert: true });
+      return;
+    }
+    if (action === "n") {
+      await ctx.answerCallbackQuery({ text: "Auto 전환을 취소했습니다." });
+      await ctx.editMessageText("Auto 전환을 취소했습니다.");
+      return;
+    }
+
+    if (parts[1] === "d" && parts.length === 3) {
+      const defaults = store.getSessionDefaults();
+      const topicId = ctx.callbackQuery.message?.message_thread_id;
+      const session = topicId ? store.getSessionByTopic(config.chatId, topicId) : undefined;
+      if (defaults.provider !== "cline" || defaults.defaultPermissionMode === "auto") {
+        await ctx.answerCallbackQuery({ text: "기본값이 이미 바뀌었습니다. 다시 선택하세요.", show_alert: true });
+        return;
+      }
+      if (session && sessions.isActive(session.id)) {
+        await ctx.answerCallbackQuery({ text: "실행 중에는 바꿀 수 없습니다.", show_alert: true });
+        return;
+      }
+      const updated = store.updateSessionDefaults({ defaultPermissionMode: "auto" });
+      await ctx.answerCallbackQuery({ text: "Auto 모드를 적용했습니다." });
+      await ctx.editMessageText("⚠️ Auto 모드를 적용했습니다. 다음 실행부터 권한 승인 요청을 생략합니다.");
       await ctx.reply(
-        `권한 모드를 ${mode}(으)로 변경했습니다.\n`
-        + `Antigravity는 다음 메시지부터 같은 대화${hasConv ? `(${session.agyConversationId!.slice(0, 8)}…)` : ""}를 `
-        + `유지한 채 새 모드로 재구성됩니다.`
+        `새 Cline 세션 기본 모드를 ${clineDefaultModeLabel(updated.defaultPermissionMode)}(auto)(으)로 바꿨습니다.`,
+        { reply_markup: defaultPanelKeyboard(updated) }
       );
       return;
     }
-    await ctx.reply(`다음 실행부터 권한 모드를 ${mode}(으)로 사용합니다.`);
+
+    const [, target, sessionId, expectedModeCode] = parts;
+    const expectedMode = expectedModeCode ? permissionModeFromConfirmationCode(expectedModeCode) : undefined;
+    if (target !== "s" || !sessionId || !expectedMode || parts.length !== 5) {
+      await ctx.answerCallbackQuery({ text: "알 수 없는 Auto 전환 요청입니다.", show_alert: true });
+      return;
+    }
+    const topicId = ctx.callbackQuery.message?.message_thread_id;
+    const session = store.getSession(sessionId);
+    if (!session || session.chatId !== config.chatId || session.topicId !== topicId) {
+      await ctx.answerCallbackQuery({ text: "세션을 찾을 수 없습니다.", show_alert: true });
+      return;
+    }
+    if (sessions.isActive(session.id)) {
+      await ctx.answerCallbackQuery({ text: "실행 중에는 바꿀 수 없습니다.", show_alert: true });
+      return;
+    }
+    if (session.permissionMode !== expectedMode) {
+      await ctx.answerCallbackQuery({ text: "권한 모드가 이미 바뀌었습니다. 다시 선택하세요.", show_alert: true });
+      return;
+    }
+    store.updateSession(session.id, { permissionMode: "auto" });
+    await ctx.answerCallbackQuery({ text: "Auto 모드를 적용했습니다." });
+    await ctx.editMessageText("⚠️ Auto 모드를 적용했습니다. 다음 실행부터 권한 승인 요청을 생략합니다.");
+    await ctx.reply(permissionModeChangedMessage(session, "auto"));
   });
 
   // /provider: 제공자 전환은 버튼(mprov:)으로만 하며, 전환 시 직전 provider가 만든
@@ -1156,18 +1265,20 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
     await ctx.answerCallbackQuery({ text: "변경할 설정이 없습니다." });
   });
 
-  // 새 세션 기본값 패널: 하위 에이전트 모델 선택. setsa:claude|codex:<id|inherit>
+  // 새 세션 기본값 패널: 하위 에이전트 모델 선택. setsa:claude|codex|grok:<id|inherit>
   bot.callbackQuery(/^setsa:/, async (ctx) => {
     const rest = ctx.callbackQuery.data.slice("setsa:".length);
     const sep = rest.indexOf(":");
     const provider = rest.slice(0, sep) as ProviderKind;
     const modelId = rest.slice(sep + 1);
-    if ((provider !== "claude" && provider !== "codex") || modelId.length === 0) {
+    if ((provider !== "claude" && provider !== "codex" && provider !== "grok") || modelId.length === 0) {
       await ctx.answerCallbackQuery({ text: "지원하지 않는 서브에이전트 설정입니다.", show_alert: true });
       return;
     }
     const options = provider === "codex"
       ? codexSubagentModelOptions(config.modelCatalog)
+      : provider === "grok"
+        ? grokSubagentModelOptions(config.modelCatalog)
       : claudeSubagentModelOptions(config.modelCatalog);
     const selected = modelId === "inherit" ? null : options.find((item) => item.id === modelId);
     if (modelId !== "inherit" && !selected) {
@@ -1179,9 +1290,12 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
       await ctx.answerCallbackQuery({ text: "현재 제공자의 설정만 변경할 수 있습니다.", show_alert: true });
       return;
     }
-    const defaults = store.updateSessionDefaults({ subagentModel: selected?.id ?? null });
-    const qwenSelection = selected != null
-      && "kind" in selected && selected.kind === "qwen";
+    const defaults = store.updateSessionDefaults({
+      subagentModel: selected?.id ?? null,
+      subagentReasoning: null,
+      subagentEffort: null
+    });
+    const qwenSelection = selected != null && isQwenSubagentModel(config.modelCatalog, selected.id);
     await ctx.answerCallbackQuery({ text: selected ? `${selected.label} 선택` : "모델 기본값 상속" });
     await ctx.reply(
       selected
@@ -1191,6 +1305,57 @@ export function registerConfigCommandHandlers(bot: Bot, deps: BotDeps): void {
         : `새 ${providerDisplayLabel(provider)} 세션의 서브에이전트 모델은 기본값을 상속합니다.`,
       { reply_markup: defaultPanelKeyboard(defaults) }
     );
+    const tuning = defaultsSubagentTuningKeyboard(defaults, config.modelCatalog);
+    if (selected && tuning) {
+      await ctx.reply(
+        provider === "claude"
+          ? "선택한 서브에이전트 모델의 작업량을 고르세요. 선택하지 않으면 모델 기본값을 사용합니다."
+          : "선택한 서브에이전트 모델의 추론 강도를 고르세요. 선택하지 않으면 모델 기본값을 사용합니다.",
+        { reply_markup: tuning }
+      );
+    }
+  });
+
+  bot.callbackQuery(/^setsar:/, async (ctx) => {
+    const [, provider, value] = ctx.callbackQuery.data.split(":");
+    if ((provider !== "codex" && provider !== "grok") || !value) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 서브 추론 설정입니다.", show_alert: true });
+      return;
+    }
+    const current = store.getSessionDefaults();
+    if (current.provider !== provider || !current.subagentModel || isQwenSubagentModel(config.modelCatalog, current.subagentModel)) {
+      await ctx.answerCallbackQuery({ text: "현재 선택에서는 서브 추론을 설정할 수 없습니다.", show_alert: true });
+      return;
+    }
+    const options = provider === "codex"
+      ? codexReasoningOptionsForModel(config.modelCatalog, current.subagentModel)
+      : grokReasoningOptions(config.modelCatalog);
+    if (value !== "inherit" && !options.some((option) => option.id === value)) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 추론 강도입니다.", show_alert: true });
+      return;
+    }
+    const defaults = store.updateSessionDefaults({ subagentReasoning: value === "inherit" ? null : value ?? null });
+    await ctx.answerCallbackQuery({ text: value === "inherit" ? "모델 기본값 사용" : "서브 추론 강도 저장" });
+    const tuning = defaultsSubagentTuningKeyboard(defaults, config.modelCatalog);
+    if (tuning) await ctx.editMessageReplyMarkup({ reply_markup: tuning });
+  });
+
+  bot.callbackQuery(/^setsae:/, async (ctx) => {
+    const [, provider, value] = ctx.callbackQuery.data.split(":");
+    const current = store.getSessionDefaults();
+    if (provider !== "claude" || current.provider !== "claude" || !current.subagentModel || isQwenSubagentModel(config.modelCatalog, current.subagentModel)) {
+      await ctx.answerCallbackQuery({ text: "현재 선택에서는 서브 작업량을 설정할 수 없습니다.", show_alert: true });
+      return;
+    }
+    const options = claudeEffortOptionsForModel(config.modelCatalog, current.subagentModel);
+    if (value !== "inherit" && !options.some((option) => option.id === value)) {
+      await ctx.answerCallbackQuery({ text: "지원하지 않는 서브 작업량입니다.", show_alert: true });
+      return;
+    }
+    const defaults = store.updateSessionDefaults({ subagentEffort: value === "inherit" ? null : value ?? null });
+    await ctx.answerCallbackQuery({ text: value === "inherit" ? "모델 기본값 사용" : "서브 작업량 저장" });
+    const tuning = defaultsSubagentTuningKeyboard(defaults, config.modelCatalog);
+    if (tuning) await ctx.editMessageReplyMarkup({ reply_markup: tuning });
   });
 
   // 새 세션 기본값 패널: 모델 선택. setm:<provider>:<id>

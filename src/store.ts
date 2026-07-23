@@ -49,6 +49,8 @@ const SESSION_DEFAULT_SEED: SessionDefaults = {
   codexReasoning: DEFAULT_CODEX_REASONING,
   codexHome: null,
   subagentModel: null,
+  subagentReasoning: null,
+  subagentEffort: null,
   agyThinkingLevel: ""
 };
 
@@ -87,6 +89,8 @@ interface SessionRow {
   codex_model: string | null;
   codex_reasoning: string | null;
   subagent_model: string | null;
+  subagent_reasoning: string | null;
+  subagent_effort: string | null;
   codex_home: string | null;
   codex_thread_id: string | null;
   agy_model: string | null;
@@ -184,6 +188,8 @@ export class StateStore {
         claude_token_index INTEGER,
         codex_model TEXT,
         subagent_model TEXT,
+        subagent_reasoning TEXT,
+        subagent_effort TEXT,
         codex_home TEXT,
         codex_thread_id TEXT,
         agy_model TEXT,
@@ -295,6 +301,12 @@ export class StateStore {
     }
     if (!sessionColumns.some((column) => column.name === "subagent_model")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN subagent_model TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "subagent_reasoning")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN subagent_reasoning TEXT");
+    }
+    if (!sessionColumns.some((column) => column.name === "subagent_effort")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN subagent_effort TEXT");
     }
     if (!sessionColumns.some((column) => column.name === "codex_thread_id")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN codex_thread_id TEXT");
@@ -413,12 +425,12 @@ export class StateStore {
       INSERT INTO sessions(
         id, sdk_session_id, chat_id, topic_id, project_name, cwd, title,
         status, permission_mode, provider, model, thinking, claude_effort,
-        claude_token_index, codex_model, codex_reasoning, subagent_model, codex_home, codex_thread_id, agy_model, grok_model, grok_reasoning, grok_session_id, agy_thinking_level,
+        claude_token_index, codex_model, codex_reasoning, subagent_model, subagent_reasoning, subagent_effort, codex_home, codex_thread_id, agy_model, grok_model, grok_reasoning, grok_session_id, agy_thinking_level,
         agy_conversation_id, agy_usage, grok_usage,
         cline_provider_id, cline_model, cline_reasoning, cline_session_id, cline_usage,
         handoff_summary, goal_condition, lean_mode, usage_snapshot,
         always_allowed_tools, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.sdkSessionId,
@@ -437,6 +449,8 @@ export class StateStore {
       session.codexModel ?? null,
       session.codexReasoning ?? null,
       session.subagentModel ?? null,
+      session.subagentReasoning ?? null,
+      session.subagentEffort ?? null,
       session.codexHome ?? null,
       session.codexThreadId ?? null,
       session.agyModel ?? null,
@@ -492,7 +506,7 @@ export class StateStore {
     id: string,
     fields: Partial<Pick<
       SessionRecord,
-      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "claudeTokenIndex" | "codexModel" | "codexReasoning" | "codexHome" | "codexThreadId" | "agyModel" | "grokModel" | "grokReasoning" | "grokSessionId" | "agyThinkingLevel" | "agyConversationId" | "agyUsage" | "grokUsage" | "clineProviderId" | "clineModel" | "clineReasoning" | "clineSessionId" | "clineUsage" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
+      "sdkSessionId" | "title" | "status" | "permissionMode" | "provider" | "model" | "thinking" | "claudeEffort" | "claudeTokenIndex" | "codexModel" | "codexReasoning" | "subagentReasoning" | "subagentEffort" | "codexHome" | "codexThreadId" | "agyModel" | "grokModel" | "grokReasoning" | "grokSessionId" | "agyThinkingLevel" | "agyConversationId" | "agyUsage" | "grokUsage" | "clineProviderId" | "clineModel" | "clineReasoning" | "clineSessionId" | "clineUsage" | "handoffSummary" | "goalCondition" | "leanMode" | "usageSnapshot"
     >>
   ): void {
     const entries: Array<[string, unknown]> = [];
@@ -507,6 +521,8 @@ export class StateStore {
     if ("claudeTokenIndex" in fields) entries.push(["claude_token_index", fields.claudeTokenIndex]);
     if ("codexModel" in fields) entries.push(["codex_model", fields.codexModel]);
     if ("codexReasoning" in fields) entries.push(["codex_reasoning", fields.codexReasoning]);
+    if ("subagentReasoning" in fields) entries.push(["subagent_reasoning", fields.subagentReasoning]);
+    if ("subagentEffort" in fields) entries.push(["subagent_effort", fields.subagentEffort]);
     if ("codexHome" in fields) entries.push(["codex_home", fields.codexHome]);
     if ("codexThreadId" in fields) entries.push(["codex_thread_id", fields.codexThreadId]);
     if ("agyModel" in fields) entries.push(["agy_model", fields.agyModel]);
@@ -569,6 +585,8 @@ export class StateStore {
       codexReasoning: stored.get("codexReasoning") ?? SESSION_DEFAULT_SEED.codexReasoning,
       codexHome: stored.get("codexHome") ?? SESSION_DEFAULT_SEED.codexHome,
       subagentModel: stored.get("subagentModel") || null,
+      subagentReasoning: stored.get("subagentReasoning") || null,
+      subagentEffort: stored.get("subagentEffort") || null,
       agyThinkingLevel: normalizeDefaultAgyThinkingLevel(stored.get("agyThinkingLevel")),
       ...(defaultPermissionMode ? { defaultPermissionMode } : {})
     };
@@ -783,6 +801,8 @@ export class StateStore {
       codexModel: row.codex_model,
       codexReasoning: row.codex_reasoning,
       subagentModel: row.subagent_model,
+      subagentReasoning: row.subagent_reasoning,
+      subagentEffort: row.subagent_effort,
       codexHome: row.codex_home,
       codexThreadId: row.codex_thread_id,
       agyModel: row.agy_model,

@@ -20,7 +20,7 @@ import type {
   GuiCodexUsageDto,
   GuiGrokUsageDto,
   GuiUsageWindowDto
-} from "./gui/protocol.js";
+} from "./usage-contract.js";
 
 export const USAGE_CACHE_VERSION = 2 as const;
 export const USAGE_CACHE_FILENAME = "chatkjb-usage.json";

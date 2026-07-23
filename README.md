@@ -441,11 +441,65 @@ ChatKJB는 대화를 무작정 쌓아두지 않습니다. **LLM-Wiki**라는 별
 
 # 2부. 내 Mac에 설치하기
 
-여기부터는 **직접 설치하는 분**을 위한 내용입니다.
+여기에는 서로 다른 두 설치물이 있습니다. 필요한 것부터 고르세요.
+
+| 설치 경로 | 들어 있는 것 | 언제 고르나 |
+| --- | --- | --- |
+| **릴리스 DMG** | `ChatKJB Terminal.app` 데스크톱 보기 앱 | 이미 실행 중인 ChatKJB 봇의 방을 Mac 앱으로 보고 싶을 때 |
+| **소스 설치** | 텔레그램 봇 서비스·AI CLI 연동·LaunchAgent | 자신의 봇과 AI 계정으로 ChatKJB를 실행하거나 개발할 때 |
+
+`ChatKJB Terminal`은 봇 서비스가 아닙니다. DMG만 설치해도 화면은 쓸 수 있지만, ChatKJB 답변을 받으려면 아래 소스 설치 또는 다른 Mac에서 **별도로 실행 중인 봇 서비스**가 있어야 합니다.
+
+## A. 릴리스 DMG로 ChatKJB Terminal 설치하기
+
+릴리스 DMG는 Apple Silicon과 macOS 14 이상에서 검증된 `ChatKJB Terminal.app` 하나를 제공합니다. 저장소와 Node.js는 이 앱을 실행하는 Mac에 설치할 필요가 없습니다.
+
+### 설치와 첫 실행
+
+1. 받은 `ChatKJB Terminal.dmg`를 Finder에서 엽니다.
+2. `ChatKJB Terminal.app`을 DMG 안의 `Applications` 별칭으로 끌어 놓습니다.
+3. DMG를 꺼낸 뒤 `/Applications/ChatKJB Terminal.app`을 엽니다. 처음 실행이 차단되면 **시스템 설정 → 개인정보 보호 및 보안**에서 열기를 한 번 허용합니다.
+4. 앱에 Telegram API ID, 32자리 API Hash, 방 chat ID, 허용 사용자 ID를 넣고, 휴대폰 Telegram의 **설정 → 기기 → 데스크톱 기기 연결**에서 QR 코드를 스캔합니다. 2단계 인증을 쓴다면 QR 승인 뒤 비밀번호도 한 번 입력합니다.
+
+이 앱은 봇 토큰이 아닌 Telegram 사용자 계정의 API ID/API Hash를 쓰며, 앱 전용 세션을 만듭니다. 자세한 동작과 로그아웃 차이는 [ChatKJB Terminal 데스크톱 앱](#선택-chatkjb-terminal-데스크톱-앱) 절을 보세요.
+
+### DMG 업데이트, 백업, 복구
+
+업데이트 전에는 앱을 `⌘Q`로 완전히 종료하세요. 새 DMG를 열어 새 `ChatKJB Terminal.app`을 `/Applications`로 끌어 놓고 **대치**를 선택한 뒤 다시 엽니다. 설정과 Telegram 세션은 앱 번들 밖의 `~/Library/Application Support/ChatKJB Terminal`에 있으므로, 앱을 대치해도 그대로 남습니다.
+
+처음 실행을 마친 뒤, 업데이트·설정 변경 전에 해당 폴더를 한 번 백업할 수 있습니다.
+
+```bash
+backup="$HOME/Desktop/ChatKJB-Terminal-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup"
+ditto "$HOME/Library/Application Support/ChatKJB Terminal" "$backup/ChatKJB Terminal"
+```
+
+이 백업에는 앱 설정 `.env`와 `data/telegram-gui.session`이 들어 있습니다. 업데이트 뒤 문제가 생기면 앱을 종료하고, 보관해 둔 이전 DMG의 앱으로 `/Applications/ChatKJB Terminal.app`을 대치하면 앱 버전을 되돌릴 수 있습니다. 설정까지 되돌릴 때는 Finder에서 백업한 `ChatKJB Terminal` 폴더를 `~/Library/Application Support`로 복원한 뒤 앱을 다시 여세요. 복원할 백업을 확인하기 전에는 현재 폴더를 지우지 마세요.
+
+### DMG 수령자용 라이선스 안내
+
+프로젝트는 [MIT LICENSE](LICENSE)로 제공됩니다. 번들에 실제 포함된 Node.js와 npm 의존성의 라이선스·버전·SHA-256 추적 정보는 앱 안의 다음 경로에 있습니다.
+
+```text
+/Applications/ChatKJB Terminal.app/Contents/Resources/Licenses/manifest.json
+/Applications/ChatKJB Terminal.app/Contents/Resources/Licenses/Node/LICENSE
+/Applications/ChatKJB Terminal.app/Contents/Resources/Licenses/Packages/
+```
+
+Finder에서 확인하려면 다음 명령을 쓸 수 있습니다.
+
+```bash
+open "/Applications/ChatKJB Terminal.app/Contents/Resources/Licenses"
+```
+
+수령자에게 전달할 최소 고지와 현재 DMG 포함 상태는 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)에 정리되어 있습니다.
+
+## B. 소스로 봇 서비스 설치하기
 
 ChatKJB는 서버에 올려 여러 사람에게 서비스하는 프로그램이 **아닙니다.** 저장소를 내려받아 **내 Mac에서, 내 봇으로, 내 AI 계정으로** 돌리는 개인용 도구입니다.
 
-## 아주 빠른 설치 (요약)
+## 아주 빠른 소스 설치 (요약)
 
 이미 개발 환경이 익숙한 분은 이것만 보셔도 됩니다.
 
@@ -748,6 +802,30 @@ launchctl print gui/$(id -u)/com.chatkjb.bot
 - `program`이 의도한 Node 경로
 - `arguments`가 저장소의 `dist/index.js`를 가리킴
 - `working directory`가 저장소 경로
+
+### 소스 업데이트와 LaunchAgent 건강 확인
+
+소스 설치본은 저장소 루트에서 다음 순서로 업데이트합니다. `git pull --ff-only`가 멈추면 충돌을 임의로 덮어쓰지 말고, 현재 작업을 먼저 정리하세요.
+
+```bash
+git pull --ff-only
+nvm use
+npm install
+npm run build
+npm run launchd:restart
+launchctl print gui/$(id -u)/com.chatkjb.bot
+```
+
+마지막 출력에서 위의 `state = running`, `arguments`, `working directory`를 확인하고 Telegram에서 `/doctor`도 실행하세요. Node를 바꿨거나 `program` 경로가 기대와 다르면 재시작이 아니라 아래처럼 LaunchAgent를 다시 등록해야 합니다.
+
+```bash
+npm install
+npm run build
+npm run launchd:install
+launchctl print gui/$(id -u)/com.chatkjb.bot
+```
+
+소스 설치의 선택적 CloudStorage/NAS 미러는 아래 [개인 백업](#선택-개인-백업-일반-설치에는-불필요) 절에서 등록합니다. 미러는 소스 저장소의 `.env`, `projects.json`, `data/`를 보존하지만 `node_modules`와 `dist`는 제외하므로, 복구한 저장소에서는 `npm install`과 `npm run build`를 다시 실행한 뒤 `npm run launchd:install`으로 등록을 복원하세요. 이 미러는 DMG 앱의 Application Support 폴더는 백업하지 않습니다.
 
 ### 재시작 뒤에 하던 일 이어가기
 
@@ -1202,8 +1280,6 @@ npm run build
 npm test -- tests/orchestration-tier0.test.ts
 ```
 
-> `npm run test:agy-live`는 실제 인증과 네트워크가 필요합니다. live 테스트 파일이 없는 checkout에서는 실행하지 마세요.
-
 ## 커밋 전 확인 목록
 
 - [ ] `.env`, `projects.json`, `data/`, 로그가 Git에 안 들어갔는가
@@ -1389,7 +1465,7 @@ npm run launchd:restart
 
 ## 라이선스
 
-MIT License. 자세한 내용은 [LICENSE](LICENSE)를 보세요.
+MIT License. 자세한 내용은 [LICENSE](LICENSE)를 보세요. 앱 번들 의존성의 추적 가능한 고지와 DMG 배포 후속 지점은 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)에 있습니다.
 
 ## 문의
 

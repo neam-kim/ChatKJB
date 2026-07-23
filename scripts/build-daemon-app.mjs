@@ -31,15 +31,19 @@ import {
   rmSync,
   writeFileSync
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildAppIcon } from "./macos-icon.mjs";
+import { readReleaseVersion } from "./release-version.mjs";
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const DAEMON_APP_NAME = "ChatKJB";
 export const DAEMON_BUNDLE_ID = "com.chatkjb.bot";
+// 이 값은 영수증의 런타임 배포 형식도 식별한다. 형식이 바뀌면 기존 번들을
+// 최신으로 오인하지 않고 다시 생성해야 한다.
+export const DAEMON_NODE_RUNTIME_FORMAT = "self-contained-static-v1";
 
 // 앱 번들은 Finder와 LaunchServices가 일반 응용 프로그램으로 인식하는
 // 시스템 응용 프로그램 폴더에 둔다.
@@ -59,37 +63,96 @@ function receiptPath(appPath) {
   return join(appPath, "Contents", "Resources", "build-receipt.json");
 }
 
-/** Homebrew Node 26은 실행 파일과 libnode를 분리한다. 번들 안에서도 원래의
- * `@loader_path/../lib` 검색 규칙이 성립하도록 libnode를 Contents/lib에 둔다. */
-function nodeLibraryPath(nodeSource) {
-  const library = execFileSync("/usr/bin/otool", ["-L", nodeSource], { encoding: "utf8" })
-    .split("\n")
-    .slice(1)
-    .map((line) => line.trim().split(" ", 1)[0])
-    .find((path) => /^@rpath\/libnode\.[0-9]+\.dylib$/.test(path));
-  if (!library) throw new Error("Node runtime does not declare a libnode dynamic library");
-  const source = resolve(dirname(nodeSource), "..", "lib", basename(library));
-  if (!existsSync(source)) throw new Error(`Node dynamic library is unavailable: ${source}`);
-  return source;
+/** `otool -L` 출력에서 동적 라이브러리 경로만 뽑는다. universal binary의
+ * architecture 헤더는 들여쓰기가 없으므로 의존성으로 오인하지 않는다. */
+export function parseOtoolDynamicDependencies(output) {
+  return String(output)
+    .split(/\r?\n/u)
+    .filter((line) => /^\s/u.test(line))
+    .map((line) => /^\s*(\S+)\s+\(/u.exec(line)?.[1])
+    .filter((path) => typeof path === "string");
 }
 
-// 이미 만들어진 번들이 현재 Node와 아이콘 원본 기준으로 최신인지 확인한다.
-function isBundleCurrent(appPath, nodeSha256, nodeLibraryName, nodeLibrarySha256, iconSha256) {
-  const executable = daemonExecutablePath();
-  const nodeLibrary = join(appPath, "Contents", "lib", nodeLibraryName);
-  if (!existsSync(executable) || !existsSync(nodeLibrary) || !existsSync(receiptPath(appPath))) return false;
+/**
+ * macOS 기본 런타임만 참조하는 Node만 단일 실행 파일로 배포할 수 있다.
+ * 이 함수는 I/O가 없는 순수 함수여서 정책을 독립적으로 회귀 검증한다.
+ */
+export function classifyNodeDynamicDependencies(dependencies) {
+  const normalizedDependencies = dependencies
+    .map((path) => path.trim())
+    .filter(Boolean);
+  const nonSystemDependencies = normalizedDependencies.filter(
+    (path) => !path.startsWith("/System/Library/") && !path.startsWith("/usr/lib/")
+  );
+  const selfContainedStatic = nonSystemDependencies.length === 0;
+
+  return {
+    kind: selfContainedStatic ? "self-contained-static" : "unsupported-dynamic",
+    runtimeFormat: selfContainedStatic ? DAEMON_NODE_RUNTIME_FORMAT : null,
+    dependencies: normalizedDependencies,
+    nonSystemDependencies
+  };
+}
+
+function inspectNodeRuntime(nodeSource) {
+  const output = execFileSync("/usr/bin/otool", ["-L", nodeSource], { encoding: "utf8" });
+  return classifyNodeDynamicDependencies(parseOtoolDynamicDependencies(output));
+}
+
+function assertSelfContainedNodeRuntime(nodeRuntime) {
+  if (nodeRuntime.kind === "self-contained-static") return;
+  const dependencies = nodeRuntime.nonSystemDependencies.join(", ");
+  throw new Error(
+    `Refusing to replace daemon app: Node runtime has non-system dynamic dependencies (${dependencies}). `
+    + "Use a self-contained Node runtime; partial dynamic-library bundling is not supported."
+  );
+}
+
+function daemonExecutablePathFor(appPath) {
+  return join(appPath, "Contents", "MacOS", DAEMON_APP_NAME);
+}
+
+function hasLibnodeReceiptValue(receipt) {
+  return ["nodeLibrarySha256", "nodeLibrarySource", "nodeLibraryName"]
+    .some((field) => receipt[field] != null);
+}
+
+export function isDaemonAppReceiptCurrent(receipt, {
+  nodeSha256,
+  iconSha256,
+  nodeRuntime,
+  releaseVersion
+}) {
+  return Boolean(receipt)
+    && receipt.nodeSha256 === nodeSha256
+    && receipt.iconSha256 === iconSha256
+    && receipt.bundleId === DAEMON_BUNDLE_ID
+    && receipt.nodeRuntimeFormat === nodeRuntime.runtimeFormat
+    && JSON.stringify(receipt.nodeDynamicDependencies) === JSON.stringify(nodeRuntime.dependencies)
+    && receipt.shortVersion === releaseVersion.shortVersion
+    && receipt.buildNumber === releaseVersion.buildNumber
+    && !hasLibnodeReceiptValue(receipt);
+}
+
+// 이미 만들어진 번들이 현재 Node·런타임 형식·아이콘 원본 기준으로 최신인지 확인한다.
+function isBundleCurrent(appPath, nodeSha256, iconSha256, nodeRuntime, releaseVersion) {
+  const executable = daemonExecutablePathFor(appPath);
+  const librariesDir = join(appPath, "Contents", "lib");
+  if (!existsSync(executable) || existsSync(librariesDir) || !existsSync(receiptPath(appPath))) return false;
   try {
     const receipt = JSON.parse(readFileSync(receiptPath(appPath), "utf8"));
-    return receipt.nodeSha256 === nodeSha256
-      && receipt.nodeLibrarySha256 === nodeLibrarySha256
-      && receipt.iconSha256 === iconSha256
-      && receipt.bundleId === DAEMON_BUNDLE_ID;
+    return isDaemonAppReceiptCurrent(receipt, {
+      nodeSha256,
+      iconSha256,
+      nodeRuntime,
+      releaseVersion
+    });
   } catch {
     return false;
   }
 }
 
-function infoPlist() {
+function infoPlist(releaseVersion) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -111,9 +174,9 @@ function infoPlist() {
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>${releaseVersion.shortVersion}</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>${releaseVersion.buildNumber}</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>LSBackgroundOnly</key>
@@ -125,44 +188,45 @@ function infoPlist() {
 `;
 }
 
-export function buildDaemonApp({ force = false, log = () => {} } = {}) {
-  const appPath = daemonAppPath();
-  const nodeSource = realpathSync(process.execPath);
-  const nodeLibrarySource = nodeLibraryPath(nodeSource);
-  const nodeLibraryName = basename(nodeLibrarySource);
+export function buildDaemonApp({
+  force = false,
+  log = () => {},
+  appPath = daemonAppPath(),
+  nodeSource = realpathSync(process.execPath),
+  inspectRuntime = inspectNodeRuntime,
+  removeTree = rmSync
+} = {}) {
+  // 이 검사는 기존 앱이나 staging 경로를 지우기 전에 반드시 끝나야 한다.
+  const nodeRuntime = inspectRuntime(nodeSource);
+  assertSelfContainedNodeRuntime(nodeRuntime);
   const nodeSha256 = sha256File(nodeSource);
-  const nodeLibrarySha256 = sha256File(nodeLibrarySource);
   const iconSource = join(projectDir, "native", "macos", "jb-logo.svg");
   const iconSha256 = sha256File(iconSource);
+  const releaseVersion = readReleaseVersion(projectDir);
 
-  if (!force && isBundleCurrent(appPath, nodeSha256, nodeLibraryName, nodeLibrarySha256, iconSha256)) {
+  if (!force && isBundleCurrent(appPath, nodeSha256, iconSha256, nodeRuntime, releaseVersion)) {
     log(`daemon app is current: ${appPath}`);
-    return { appPath, executablePath: daemonExecutablePath(), rebuilt: false };
+    return { appPath, executablePath: daemonExecutablePathFor(appPath), rebuilt: false };
   }
 
   const contentsDir = join(appPath, "Contents");
   const macosDir = join(contentsDir, "MacOS");
-  const librariesDir = join(contentsDir, "lib");
   const resourcesDir = join(contentsDir, "Resources");
   const buildDir = join("/Applications", ".build-daemon-app");
 
-  rmSync(appPath, { recursive: true, force: true });
-  rmSync(buildDir, { recursive: true, force: true });
+  removeTree(appPath, { recursive: true, force: true });
+  removeTree(buildDir, { recursive: true, force: true });
   mkdirSync(macosDir, { recursive: true });
-  mkdirSync(librariesDir, { recursive: true });
   mkdirSync(resourcesDir, { recursive: true });
 
   try {
-    writeFileSync(join(contentsDir, "Info.plist"), infoPlist(), "utf8");
+    writeFileSync(join(contentsDir, "Info.plist"), infoPlist(releaseVersion), "utf8");
 
     // Node 실행 파일을 번들의 주 실행 파일로 복사한다. 실행되는 코드는 동일하고
     // 표시되는 신원만 ChatKJB가 된다.
-    const executablePath = daemonExecutablePath();
+    const executablePath = daemonExecutablePathFor(appPath);
     copyFileSync(nodeSource, executablePath);
     chmodSync(executablePath, 0o755);
-    const bundledNodeLibrary = join(librariesDir, basename(nodeLibrarySource));
-    copyFileSync(nodeLibrarySource, bundledNodeLibrary);
-    chmodSync(bundledNodeLibrary, 0o755);
 
     buildAppIcon({
       projectDir,
@@ -175,11 +239,13 @@ export function buildDaemonApp({ force = false, log = () => {} } = {}) {
       `${JSON.stringify({
         bundleId: DAEMON_BUNDLE_ID,
         nodeSha256,
-        nodeLibrarySha256,
         nodeVersion: process.versions.node,
         nodeSource,
-        nodeLibrarySource,
-        iconSha256
+        nodeRuntimeFormat: nodeRuntime.runtimeFormat,
+        nodeDynamicDependencies: nodeRuntime.dependencies,
+        iconSha256,
+        shortVersion: releaseVersion.shortVersion,
+        buildNumber: releaseVersion.buildNumber
       }, null, 2)}\n`,
       "utf8"
     );
@@ -195,7 +261,7 @@ export function buildDaemonApp({ force = false, log = () => {} } = {}) {
     log(`daemon app built: ${appPath}`);
     return { appPath, executablePath, rebuilt: true };
   } finally {
-    rmSync(buildDir, { recursive: true, force: true });
+    removeTree(buildDir, { recursive: true, force: true });
   }
 }
 

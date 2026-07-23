@@ -1045,9 +1045,12 @@ describe("memory command", () => {
     expect(buildOrchestratedTurnPrompt(prompt)).toBe(prompt);
     const boundary = buildOrchestrationBoundaryInstructions();
     expect(boundary).toContain("독립 native-app 세션으로 전환하지 않는다");
-    expect(boundary).toContain("[SUBAGENT_DELEGATION_ENCOURAGED]");
-    expect(boundary).toContain("실제 구현·조사·테스트는 provider-native subagent에 우선 위임한다");
-    expect(boundary).toContain("단순 질의·단일 행동과 외부 MCP·커넥터 호출은 주 에이전트가 직접 소유한다");
+    expect(boundary).toContain("[SUBAGENT_DELEGATION_REQUIRED]");
+    expect(boundary).toContain("조사 또는 구현이 포함된 요청은 provider-native subagent에 반드시 위임한다");
+    expect(boundary).toContain("주 에이전트 단독으로 조사·구현을 시작하거나 완료하지 않는다");
+    expect(boundary).toContain("사전 조사, 변경안 검토, 테스트 설계 또는 결과 검증");
+    expect(boundary).toContain("사용자가 위임을 명시적으로 금지한 경우");
+    expect(boundary).toContain("통로가 없으면 주 에이전트 단독 수행으로 바꾸지 말고");
     expect(boundary).toContain("판단·위험 확인·작업 분해·조율·결과 통합·통합 검증·최종 보고");
     expect(boundary).toContain("동시에 최대 4명(주 에이전트 제외)");
     expect(boundary).toContain("깊이 1");

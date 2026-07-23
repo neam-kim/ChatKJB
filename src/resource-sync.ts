@@ -530,7 +530,9 @@ export function buildSharedPolicyText(paths: SharedMemoryTextPaths & { home: str
     "",
     "- Execute ordinary tool calls sequentially and use each result before the next call.",
     "- The root session owns judgment, risk checks, work decomposition, coordination, result integration, integrated verification, and final reporting.",
-    "- When actual implementation, research, or testing has genuinely independent, bounded subtasks, proactively delegate them to subagents. Simple questions and single actions remain with the root session.",
+    "- Any request involving research or implementation must use at least one provider-native subagent. The root must not begin or complete that research or implementation alone.",
+    "- First delegate one or more bounded subtasks. If the work cannot be split independently, delegate focused preflight research, change review, test design, or result verification instead.",
+    "- The only exceptions are an explicit user prohibition on delegation, an unavailable provider-native subagent mechanism, or a single external MCP/connector call. If the mechanism is unavailable, report that limitation through ChatKJB instead of silently proceeding alone.",
     "- External MCP and connector calls remain with the root session; subagents return evidence for the root to integrate.",
     "- Never have more than 4 active subagents. If 4 are active, wait for or close one before spawning another.",
     "- This is a concurrency limit, not a cumulative per-command or per-turn spawn limit. Close completed, failed, or interrupted subagents to release their slots, then continue spawning new subagents in the same command or turn when useful work remains.",
@@ -586,7 +588,7 @@ export function buildSharedPolicyText(paths: SharedMemoryTextPaths & { home: str
     "- Do not make out-of-scope file changes, external transfers, or permission expansions. Ask through the ChatKJB conversation when authority is required.",
     "- Progress and results are reported through the ChatKJB conversation.",
     "- Delegation inside the current turn is normal orchestration, not a new independent task. Use the provider-native mechanism: Claude Task/Agent, Codex collaboration tools, Antigravity background subagents, or Grok subagents.",
-    "- Prefer provider-exposed default agents and user- or project-defined specialist agents for bounded implementation, research, and testing. Keep the same four-active-subagent limit, depth-one/no-recursive-fan-out rule, read-heavy parallel preference, separated write ownership, root-owned external MCP calls, and root integration responsibility defined above.",
+    "- Use provider-exposed default agents and user- or project-defined specialist agents for every research or implementation request. Keep the same four-active-subagent limit, depth-one/no-recursive-fan-out rule, read-heavy parallel preference, separated write ownership, root-owned external MCP calls, and root integration responsibility defined above.",
     ""
   ].join("\n");
 }

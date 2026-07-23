@@ -5,7 +5,7 @@ export interface PendingStartOptions {
   resumeSessionId?: string;
   forkSession?: boolean;
   // 새 세션 시작 권한 모드 override. 없으면 프로젝트 defaultMode를 따른다.
-  // 현재는 Cline 새 세션이 General 패널의 Plan/Act 토글값을 여기로 넘긴다.
+  // 현재는 Cline 새 세션이 General 패널의 Plan/Auto 토글값을 여기로 넘긴다.
   permissionMode?: PermissionMode | undefined;
   provider?: ProviderKind | undefined;
   model?: string | undefined;
@@ -15,6 +15,8 @@ export interface PendingStartOptions {
   codexModel?: string | undefined;
   codexReasoning?: string | undefined;
   subagentModel?: string | null | undefined;
+  subagentReasoning?: string | null | undefined;
+  subagentEffort?: string | null | undefined;
   codexHome?: string | null | undefined;
   agyThinkingLevel?: string | undefined;
   agyModel?: string | undefined;
@@ -69,6 +71,8 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
       codexReasoning: defaults.codexReasoning,
       codexHome: defaults.codexHome,
       subagentModel: defaults.subagentModel ?? null,
+      subagentReasoning: defaults.subagentReasoning ?? null,
+      subagentEffort: defaults.subagentEffort ?? null,
       leanMode: true
     };
   }
@@ -85,6 +89,9 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
       provider: "grok",
       grokModel: defaults.grokModel,
       grokReasoning: defaults.grokReasoning,
+      subagentModel: defaults.subagentModel ?? null,
+      subagentReasoning: defaults.subagentReasoning ?? null,
+      subagentEffort: defaults.subagentEffort ?? null,
       leanMode: true
     };
   }
@@ -94,7 +101,7 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
       clineProviderId: defaults.clineProviderId ?? "",
       clineModel: defaults.clineModel ?? "",
       clineReasoning: defaults.clineReasoning ?? "off",
-      // General 패널의 Plan/Act 토글값. 미설정이면 undefined로 두어 프로젝트 defaultMode를 따른다.
+      // General 패널의 Plan/Auto 토글값. 미설정이면 undefined로 두어 프로젝트 defaultMode를 따른다.
       ...(defaults.defaultPermissionMode ? { permissionMode: defaults.defaultPermissionMode } : {}),
       leanMode: true
     };
@@ -106,6 +113,8 @@ export function pendingFieldsFromDefaults(defaults: SessionDefaults): Partial<Pe
     claudeEffort: defaults.claudeEffort,
     claudeTokenIndex: defaults.claudeTokenIndex,
     subagentModel: defaults.subagentModel ?? null,
+    subagentReasoning: defaults.subagentReasoning ?? null,
+    subagentEffort: defaults.subagentEffort ?? null,
     leanMode: true
   };
 }

@@ -300,6 +300,20 @@ describe("portable host configuration", () => {
 });
 
 describe("project configuration", () => {
+  it("uses auto when a registered project omits its permission default", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "telegram-claude-projects-"));
+    directories.push(directory);
+    const project = join(directory, "project");
+    mkdirSync(project);
+    const projectsPath = join(directory, "projects.json");
+    writeFileSync(projectsPath, JSON.stringify([{ name: "project", cwd: project }]));
+    const { loadProjects } = await import("../src/config.js");
+
+    await expect(loadProjects(projectsPath)).resolves.toMatchObject([
+      { name: "project", defaultMode: "auto" }
+    ]);
+  });
+
   it("resolves project names and aliases case-insensitively", async () => {
     const { resolveProject } = await import("../src/config.js");
     const projects = [{

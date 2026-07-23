@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatGrokCliFailure,
   GrokStreamingJsonCollector,
+  grokPinnedSubagentDefinitions,
   grokPermissionMode,
   grokToolFreeArgs,
   resolveGrokProcessExit,
@@ -41,6 +42,18 @@ describe("grok tool-free classifier", () => {
     expect(args).toContain("--disable-web-search");
     expect(args).toContain("--no-subagents");
     expect(args).toContain("--no-memory");
+  });
+});
+
+describe("Grok pinned subagents", () => {
+  it("pins every built-in child role to the selected model and effort", () => {
+    const definitions = JSON.parse(grokPinnedSubagentDefinitions("grok-4.5", "high")) as Record<string, {
+      model: string;
+      reasoning_effort: string;
+    }>;
+    for (const name of ["general-purpose", "explore", "plan"]) {
+      expect(definitions[name]).toMatchObject({ model: "grok-4.5", reasoning_effort: "high" });
+    }
   });
 });
 

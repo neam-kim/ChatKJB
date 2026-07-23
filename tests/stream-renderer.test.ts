@@ -98,6 +98,87 @@ describe("StreamRenderer text deduplication", () => {
     renderer.dispose();
   });
 
+  it("redacts streamed Markdown text without changing its ordinary content", async () => {
+    const sent: string[] = [];
+    const transport: MessageTransport = {
+      async sendText(_chatId, _topicId, text) { sent.push(text); return sent.length; },
+      async editText() {},
+      async createTopic() { return 1; },
+      async renameTopic() {},
+      async deleteTopic() {},
+      async sendDocument() {},
+      async sendChatAction() {},
+      async sendFile() {}
+    };
+    const renderer = new StreamRenderer(makeSession(), transport, 1);
+    const pem = [
+      "-----BEGIN PRIVATE KEY-----",
+      "streamed-private-key-material",
+      "-----END PRIVATE KEY-----"
+    ].join("\n");
+
+    await renderer.text([
+      "**완료** 일반 설명입니다.",
+      "OPENAI_API_KEY=streamed-api-secret-value-1234567890",
+      pem,
+      '{"private_key":"service-account-private-value","project_id":"safe-project"}'
+    ].join("\n"));
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("**완료** 일반 설명입니다.");
+    expect(sent[0]).toContain('"project_id":"safe-project"');
+    expect(sent[0]).not.toContain("streamed-api-secret-value");
+    expect(sent[0]).not.toContain("streamed-private-key-material");
+    expect(sent[0]).not.toContain("service-account-private-value");
+    renderer.dispose();
+  });
+
+  it("redacts a live partial answer before it is edited into the status message", async () => {
+    vi.useFakeTimers();
+    const edited: string[] = [];
+    const transport: MessageTransport = {
+      async sendText() { return 1; },
+      async editText(_chatId, _messageId, text) { edited.push(text); },
+      async createTopic() { return 1; },
+      async renameTopic() {},
+      async deleteTopic() {},
+      async sendDocument() {},
+      async sendChatAction() {},
+      async sendFile() {}
+    };
+    const renderer = new StreamRenderer(makeSession(), transport, 1);
+
+    await renderer.start();
+    renderer.partial('진행 중 {"client_secret":"live-client-secret"}');
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(edited.at(-1)).toContain("[REDACTED]");
+    expect(edited.at(-1)).not.toContain("live-client-secret");
+    renderer.dispose();
+  });
+
+  it("redacts long final summaries before sending them as documents", async () => {
+    const documents: string[] = [];
+    const transport: MessageTransport = {
+      async sendText() { return 1; },
+      async editText() {},
+      async createTopic() { return 1; },
+      async renameTopic() {},
+      async deleteTopic() {},
+      async sendDocument(_chatId, _topicId, _filename, content) { documents.push(content); },
+      async sendChatAction() {},
+      async sendFile() {}
+    };
+    const renderer = new StreamRenderer(makeSession(), transport, 1);
+
+    await renderer.finish("done", `SECRET=long-document-secret\n${"x".repeat(11_000)}`);
+
+    expect(documents).toHaveLength(1);
+    expect(documents[0]).toContain("SECRET=[REDACTED]");
+    expect(documents[0]).not.toContain("long-document-secret");
+    renderer.dispose();
+  });
+
   it("records successful and failed progress delivery with the session id", async () => {
     const successLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const failureLog = vi.spyOn(console, "error").mockImplementation(() => undefined);

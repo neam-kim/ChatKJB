@@ -39,8 +39,11 @@ export interface SessionDefaults {
   codexHome: string | null;
   // Claude/Codex 하위 에이전트 모델. 비어 있으면 각 CLI의 기본 상속을 사용한다.
   subagentModel?: string | null;
+  // 선택한 하위 모델이 지원할 때만 적용하는 추론 강도/작업량. null이면 모델 기본값.
+  subagentReasoning?: string | null;
+  subagentEffort?: string | null;
   agyThinkingLevel: string;
-  // 새 세션의 시작 권한 모드. 현재는 Cline만 General 패널에서 Plan(=plan)↔Act(=auto)로
+  // 새 세션의 시작 권한 모드. 현재는 Cline만 General 패널에서 Plan(=plan)↔Auto(=auto)로
   // 토글해 사용한다. 비어 있으면 프로젝트 defaultMode를 따른다.
   defaultPermissionMode?: PermissionMode;
 }
@@ -94,6 +97,8 @@ export interface ReservedTaskStartOptions {
   clineModel?: string;
   clineReasoning?: string;
   subagentModel?: string | null;
+  subagentReasoning?: string | null;
+  subagentEffort?: string | null;
   leanMode?: boolean;
 }
 
@@ -201,6 +206,9 @@ export interface SessionRecord {
   codexReasoning: string | null;
   // 새 세션에서만 고정하는 Claude/Codex 하위 에이전트 모델. null이면 기본 상속.
   subagentModel?: string | null;
+  // 하위 에이전트의 모델별 동적 조절값. null이면 해당 모델의 기본값을 쓴다.
+  subagentReasoning?: string | null;
+  subagentEffort?: string | null;
   // 이 Codex 세션이 우선 사용할 CODEX_HOME. null/undefined이면 자동 선택.
   codexHome?: string | null;
   // Codex 스레드 재개 id(`~/.codex/sessions`). Claude의 sdkSessionId에 대응한다.

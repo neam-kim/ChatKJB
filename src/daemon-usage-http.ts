@@ -17,7 +17,7 @@ const execFileAsync = promisify(execFile);
 export interface DaemonUsageHttpServerOptions {
   getPayload: () => DaemonUsageCacheFile | null;
   port?: number;
-  /** 기본 0.0.0.0 — Tailscale IP 로 도달 가능. */
+  /** 기본 127.0.0.1 — 외부 접근은 Tailscale Serve 프록시를 사용한다. */
   host?: string;
   /** 설정 시 Authorization: Bearer <token> 필수. */
   token?: string;
@@ -46,13 +46,26 @@ function notFound(response: import("node:http").ServerResponse): void {
   response.end(JSON.stringify({ error: "not_found" }));
 }
 
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.toLowerCase();
+  return normalized === "localhost"
+    || normalized === "::1"
+    || /^127(?:\.\d{1,3}){3}$/.test(normalized);
+}
+
 export function startDaemonUsageHttpServer(
   options: DaemonUsageHttpServerOptions
 ): Promise<DaemonUsageHttpServerHandle> {
   const port = options.port ?? DEFAULT_USAGE_HTTP_PORT;
-  const host = options.host ?? "0.0.0.0";
+  const host = options.host?.trim() || "127.0.0.1";
   const token = options.token?.trim() || "";
   const log = options.log ?? ((message: string) => console.log(message));
+
+  if (!token && !isLoopbackHost(host)) {
+    return Promise.reject(new Error(
+      `Usage HTTP non-loopback binding requires CHATKJB_USAGE_HTTP_TOKEN: ${host}`
+    ));
+  }
 
   return new Promise((resolve, reject) => {
     const server: Server = createServer((request, response) => {

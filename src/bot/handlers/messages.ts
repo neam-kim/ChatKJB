@@ -18,6 +18,8 @@ import {
   defaultsTokenKeyboard
 } from "../keyboards.js";
 import {
+  autoModeConfirmationKeyboard,
+  autoModeConfirmationPrompt,
   clineDefaultModeLabel,
   clineModelSnapshotKeyboard,
   clineProviderOption,
@@ -158,13 +160,13 @@ export function registerMessageHandlers(bot: Bot, deps: BotDeps): void {
 
   bot.hears(/^🧑‍💻 서브에이전트/, async (ctx) => {
     const defaults = store.getSessionDefaults();
-    if (defaults.provider !== "claude" && defaults.provider !== "codex") {
-      await ctx.reply("서브에이전트 모델은 Claude 또는 Codex 새 세션에서만 설정할 수 있습니다.", {
+    if (defaults.provider !== "claude" && defaults.provider !== "codex" && defaults.provider !== "grok") {
+      await ctx.reply("서브에이전트 모델은 Claude·Codex·Grok 새 세션에서만 설정할 수 있습니다.", {
         reply_markup: defaultPanelKeyboard(defaults)
       });
       return;
     }
-    if ((defaults.provider === "claude" || defaults.provider === "codex") && config.alibabaTokenPlan) {
+    if ((defaults.provider === "claude" || defaults.provider === "codex" || defaults.provider === "grok") && config.alibabaTokenPlan) {
       try {
         config.modelCatalog = await refreshAlibabaTokenPlanModels(
           config.modelCatalog,
@@ -236,18 +238,23 @@ export function registerMessageHandlers(bot: Bot, deps: BotDeps): void {
     });
   });
 
-  // Cline 새 세션 기본값 패널의 Plan↔Act 토글. 이 버튼은 Cline 제공자일 때만 노출되며,
-  // 누를 때마다 새 세션 기본 권한 모드를 plan↔auto로 뒤집는다. Claude/Codex는 이 자리에
-  // 토큰 버튼이 오므로 이 라벨과 겹치지 않는다.
-  bot.hears(/^(🧭 Plan|▶️ Act)/, async (ctx) => {
+  // Cline 새 세션 기본값 패널의 Plan↔Auto 토글. Auto 전환은 승인 생략을 뜻하므로
+  // 확인 콜백까지는 기본값을 저장하지 않는다. Claude/Codex는 이 자리에 토큰 버튼이 온다.
+  bot.hears(/^(🧭 Plan|⚠️ Auto)/, async (ctx) => {
     const defaults = store.getSessionDefaults();
     if (defaults.provider !== "cline") {
-      await ctx.reply("Plan/Act 토글은 Cline 새 세션 기본값 전용입니다.", {
+      await ctx.reply("Plan/Auto 토글은 Cline 새 세션 기본값 전용입니다.", {
         reply_markup: defaultPanelKeyboard(defaults)
       });
       return;
     }
     const next = clineToggledDefaultMode(defaults.defaultPermissionMode);
+    if (next === "auto") {
+      await ctx.reply(autoModeConfirmationPrompt("새 Cline 세션 기본 모드를"), {
+        reply_markup: autoModeConfirmationKeyboard("modeauto:d")
+      });
+      return;
+    }
     const updated = store.updateSessionDefaults({ defaultPermissionMode: next });
     await ctx.reply(
       `새 Cline 세션 기본 모드를 ${clineDefaultModeLabel(next)}(${next})(으)로 바꿨습니다.`,
