@@ -31,6 +31,30 @@ object HomepageRoute {
             parsed.host.equals("kimjb.com", ignoreCase = true) &&
             (parsed.port == -1 || parsed.port == 443)
     }.getOrDefault(false)
+
+    /**
+     * Hosts the Google sign-in leg navigates through.
+     *
+     * These must stay inside this WebView. Handing them to the system browser
+     * completes the OAuth round trip in *that* browser's cookie jar, so the session
+     * cookie never reaches the app and the user appears logged out on every visit.
+     */
+    private val signInHosts = setOf("accounts.google.com", "accounts.youtube.com")
+
+    fun isSignInHost(candidate: Uri): Boolean = isSignInHost(candidate.toString())
+
+    fun isSignInHost(candidate: String): Boolean = runCatching {
+        val parsed = java.net.URI(candidate)
+        parsed.scheme.equals("https", ignoreCase = true) &&
+            parsed.host?.lowercase() in signInHosts &&
+            (parsed.port == -1 || parsed.port == 443)
+    }.getOrDefault(false)
+
+    /** Everything this WebView may load: the site itself plus the sign-in round trip. */
+    fun isInAppNavigation(candidate: Uri): Boolean = isInAppNavigation(candidate.toString())
+
+    fun isInAppNavigation(candidate: String): Boolean =
+        isAllowed(candidate) || isSignInHost(candidate)
 }
 
 /**

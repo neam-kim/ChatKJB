@@ -14,6 +14,25 @@ class AppDestinationTest {
         assertFalse(HomepageRoute.isAllowed("https://kimjb.com.evil.example/"))
     }
 
+    @Test fun signInHostsAreLimitedToGoogleAccountsOverHttps() {
+        assertTrue(HomepageRoute.isSignInHost("https://accounts.google.com/o/oauth2/v2/auth"))
+        assertTrue(HomepageRoute.isSignInHost("https://ACCOUNTS.GOOGLE.COM/signin"))
+        assertTrue(HomepageRoute.isSignInHost("https://accounts.youtube.com/accounts/SetSID"))
+        assertFalse(HomepageRoute.isSignInHost("http://accounts.google.com/"))
+        assertFalse(HomepageRoute.isSignInHost("https://accounts.google.com.evil.example/"))
+        assertFalse(HomepageRoute.isSignInHost("https://evil.example/accounts.google.com"))
+        assertFalse(HomepageRoute.isSignInHost("https://mail.google.com/"))
+        assertFalse(HomepageRoute.isSignInHost("https://kimjb.com/"))
+    }
+
+    @Test fun inAppNavigationCoversSiteAndSignInOnly() {
+        assertTrue(HomepageRoute.isInAppNavigation("https://kimjb.com/members"))
+        assertTrue(HomepageRoute.isInAppNavigation("https://accounts.google.com/o/oauth2/v2/auth"))
+        assertFalse(HomepageRoute.isInAppNavigation("https://evil.example/"))
+        assertFalse(HomepageRoute.isInAppNavigation("mailto:contact@kimjb.com"))
+        assertFalse(HomepageRoute.isInAppNavigation("kimjb://open/email"))
+    }
+
     @Test fun parsesOnlyKnownDestinationLinks() {
         assertEquals(AppDestination.HOME, parseDestinationUri("kimjb://open/home"))
         assertEquals(AppDestination.EMAIL, parseDestinationUri("kimjb://open/email"))

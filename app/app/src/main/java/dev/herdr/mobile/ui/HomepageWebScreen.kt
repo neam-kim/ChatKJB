@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -78,6 +79,14 @@ fun HomepageWebScreen(
                     settings.domStorageEnabled = true
                     settings.useWideViewPort = true
                     settings.loadWithOverviewMode = true
+
+                    // Google's sign-in leg sets cookies on accounts.google.com while the
+                    // page being logged into is kimjb.com, so the round trip needs
+                    // third-party cookies. Without this the redirect lands back on
+                    // kimjb.com with no session.
+                    CookieManager.getInstance().setAcceptCookie(true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
                     webViewClient = HomepageWebViewClient(ctx, onDestination)
                     loadUrl(HomepageRoute.canonicalUrl)
                     webView = this
@@ -85,6 +94,9 @@ fun HomepageWebScreen(
             },
             onRelease = { view ->
                 webView = null
+                // Cookies live in memory until flushed; without this the session is
+                // gone the next time the process dies.
+                CookieManager.getInstance().flush()
                 view.destroy()
             },
         )
@@ -95,9 +107,18 @@ private class HomepageWebViewClient(
     private val context: Context,
     private val onDestination: (AppDestination) -> Unit,
 ) : WebViewClient() {
+    override fun onPageFinished(view: WebView, url: String) {
+        // Persist whatever the navigation just set, so a sign-in that completes here
+        // survives the process being killed.
+        CookieManager.getInstance().flush()
+    }
+
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val uri = request.url
-        if (HomepageRoute.isAllowed(uri)) return false
+        // The site itself and the Google sign-in round trip both stay in this WebView;
+        // sending the sign-in leg out to the system browser strands the session cookie
+        // in that browser and the user is logged out again on return.
+        if (HomepageRoute.isInAppNavigation(uri)) return false
 
         val destination = parseDestinationUri(uri.toString())
         if (destination != null) {
