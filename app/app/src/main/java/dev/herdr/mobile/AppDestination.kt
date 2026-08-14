@@ -38,15 +38,27 @@ object HomepageRoute {
      * These must stay inside this WebView. Handing them to the system browser
      * completes the OAuth round trip in *that* browser's cookie jar, so the session
      * cookie never reaches the app and the user appears logged out on every visit.
+     * Worse, a leg that starts here and finishes there arrives without the matching
+     * cookies and Google answers 400.
+     *
+     * Google redirects the sign-in leg to a country-local domain part way through
+     * (observed: accounts.google.co.jp), so the accounts host is matched by pattern
+     * rather than by a fixed list. The TLD shape is deliberately narrow — a bare
+     * two-letter ccTLD, or co./com. plus one — because those are registry-controlled
+     * and cannot be bought out from under Google the way a vanity gTLD could.
      */
-    private val signInHosts = setOf("accounts.google.com", "accounts.youtube.com")
+    private val accountsHost =
+        Regex("""^accounts\.google\.(com|[a-z]{2}|(co|com)\.[a-z]{2})$""")
+
+    private val signInHosts = setOf("accounts.youtube.com")
 
     fun isSignInHost(candidate: Uri): Boolean = isSignInHost(candidate.toString())
 
     fun isSignInHost(candidate: String): Boolean = runCatching {
         val parsed = java.net.URI(candidate)
+        val host = parsed.host?.lowercase() ?: return@runCatching false
         parsed.scheme.equals("https", ignoreCase = true) &&
-            parsed.host?.lowercase() in signInHosts &&
+            (host in signInHosts || accountsHost.matches(host)) &&
             (parsed.port == -1 || parsed.port == 443)
     }.getOrDefault(false)
 

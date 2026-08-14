@@ -25,6 +25,20 @@ class AppDestinationTest {
         assertFalse(HomepageRoute.isSignInHost("https://kimjb.com/"))
     }
 
+    /** Regression: bouncing this leg to the system browser ends the flow on Google 400. */
+    @Test fun signInFollowsGoogleCountryDomains() {
+        assertTrue(HomepageRoute.isSignInHost("https://accounts.google.co.jp/signin/v2/x"))
+        assertTrue(HomepageRoute.isSignInHost("https://accounts.google.co.kr/"))
+        assertTrue(HomepageRoute.isSignInHost("https://accounts.google.de/"))
+        assertTrue(HomepageRoute.isSignInHost("https://accounts.google.com.au/"))
+        // Only the accounts host, and only registry-shaped TLDs.
+        assertFalse(HomepageRoute.isSignInHost("https://accounts.google.evil/"))
+        assertFalse(HomepageRoute.isSignInHost("https://accounts.google.co.jp.evil.example/"))
+        assertFalse(HomepageRoute.isSignInHost("https://mail.google.co.jp/"))
+        assertFalse(HomepageRoute.isSignInHost("https://google.co.jp/"))
+        assertFalse(HomepageRoute.isSignInHost("https://evil.accounts.google.co.jp.example/"))
+    }
+
     @Test fun inAppNavigationCoversSiteAndSignInOnly() {
         assertTrue(HomepageRoute.isInAppNavigation("https://kimjb.com/members"))
         assertTrue(HomepageRoute.isInAppNavigation("https://accounts.google.com/o/oauth2/v2/auth"))
