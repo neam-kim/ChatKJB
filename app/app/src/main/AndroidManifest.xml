@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        tools:node="merge"
+        android:name="net.thunderbird.android.ThunderbirdApp"
+        android:label="Kim JongBeom"
+        android:icon="@drawable/kimjb_logo"
+        android:roundIcon="@drawable/kimjb_logo"
+        android:theme="@style/Theme.HerdrMobile"
+        android:usesCleartextTraffic="true"
+        android:allowBackup="true"
+        tools:replace="android:allowBackup,android:theme,android:usesCleartextTraffic">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- kimjb:// is this app's own contract; kjbmail:// is the legacy entry point
+                 kimjb.com still emits and used to resolve to the standalone KJBMail app. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="kimjb" android:host="open" />
+                <data android:scheme="kjbmail" android:host="open" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name="net.thunderbird.app.common.MainActivity"
+            tools:node="remove" />
+
+        <receiver
+            android:name=".push.UnifiedPushReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.MESSAGE" />
+                <action android:name="org.unifiedpush.android.connector.NEW_ENDPOINT" />
+                <action android:name="org.unifiedpush.android.connector.REGISTRATION_FAILED" />
+                <action android:name="org.unifiedpush.android.connector.UNREGISTERED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -1,0 +1,23 @@
+# Go
+/companion/herdr-mobiled
+/herdr-mobiled
+*.test
+*.out
+# Android
+/app/.gradle/
+/app/build/
+/app/app/build/
+/app/terminal-emulator/build/
+/app/terminal-view/build/
+/app/local.properties
+/app/.idea/
+*.apk
+# Release build artifacts
+/companion/herdr-mobiled-*
+RELEASE_NOTES.md
+# Agent/session scratch (never publish)
+/.remember/
+/.superpowers/
+/runlogs/
+# misc
+.DS_Store
