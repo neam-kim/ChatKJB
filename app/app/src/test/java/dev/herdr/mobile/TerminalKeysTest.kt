@@ -1,9 +1,9 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.ui.ModState
-import dev.herdr.mobile.ui.ModifierKeys
-import dev.herdr.mobile.ui.TermKey
-import dev.herdr.mobile.ui.bytesFor
+import dev.herdr.mobile.features.chat.ui.ModState
+import dev.herdr.mobile.features.chat.ui.ModifierKeys
+import dev.herdr.mobile.features.chat.ui.TermKey
+import dev.herdr.mobile.features.chat.ui.bytesFor
 import org.junit.Assert.*
 import org.junit.Test
 

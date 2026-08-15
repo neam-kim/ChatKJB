@@ -1,6 +1,6 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.push.parsePush
+import dev.herdr.mobile.core.push.parsePush
 import org.junit.Assert.*
 import org.junit.Test
 

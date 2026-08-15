@@ -1,13 +1,13 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.net.Pane
-import dev.herdr.mobile.net.Tab
-import dev.herdr.mobile.net.Workspace
-import dev.herdr.mobile.ui.TabNode
-import dev.herdr.mobile.ui.WorkspaceNode
-import dev.herdr.mobile.ui.WsChild
-import dev.herdr.mobile.ui.tabElided
-import dev.herdr.mobile.ui.workspaceChildren
+import dev.herdr.mobile.features.chat.net.Pane
+import dev.herdr.mobile.features.chat.net.Tab
+import dev.herdr.mobile.features.chat.net.Workspace
+import dev.herdr.mobile.features.chat.ui.TabNode
+import dev.herdr.mobile.features.chat.ui.WorkspaceNode
+import dev.herdr.mobile.features.chat.ui.WsChild
+import dev.herdr.mobile.features.chat.ui.tabElided
+import dev.herdr.mobile.features.chat.ui.workspaceChildren
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -77,13 +77,13 @@ class TreeCollapseTest {
 
     @Test fun paneActionSuppressesPivotForBlankIdTab() {
         val blankTab = tabNode("", "", listOf(pane("o1", "", "")))
-        val action = dev.herdr.mobile.ui.paneAction(pane("o1", "", ""), blankTab)
+        val action = dev.herdr.mobile.features.chat.ui.paneAction(pane("o1", "", ""), blankTab)
         assertNull(action.mergedTab)
     }
 
     @Test fun paneActionAttachesPivotForRealTab() {
         val realTab = tabNode("t1", "w1", listOf(pane("p1", "w1", "t1")))
-        val action = dev.herdr.mobile.ui.paneAction(pane("p1", "w1", "t1"), realTab)
+        val action = dev.herdr.mobile.features.chat.ui.paneAction(pane("p1", "w1", "t1"), realTab)
         assertNotNull(action.mergedTab)
     }
 }

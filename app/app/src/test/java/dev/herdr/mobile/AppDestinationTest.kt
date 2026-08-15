@@ -1,5 +1,8 @@
 package dev.herdr.mobile
 
+import dev.herdr.mobile.core.navigation.AppDestination
+import dev.herdr.mobile.core.navigation.HomepageRoute
+import dev.herdr.mobile.core.navigation.parseDestinationUri
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -54,8 +57,6 @@ class AppDestinationTest {
         assertEquals(null, parseDestinationUri("kimjb://open/other"))
         assertEquals(null, parseDestinationUri("https://kimjb.com/"))
         assertEquals(null, parseDestinationUri(null))
-
-
     }
 
     @Test fun homepageWebSurfaceIsNotReachableByDeepLink() {

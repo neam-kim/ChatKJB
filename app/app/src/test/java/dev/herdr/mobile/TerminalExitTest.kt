@@ -1,7 +1,7 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.ui.keysLive
-import dev.herdr.mobile.ui.terminalExitCopy
+import dev.herdr.mobile.features.chat.ui.keysLive
+import dev.herdr.mobile.features.chat.ui.terminalExitCopy
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

@@ -1,9 +1,9 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.net.Pane
-import dev.herdr.mobile.ui.panePrimaryLabel
-import dev.herdr.mobile.ui.paneSecondaryLabel
-import dev.herdr.mobile.ui.paneStatusLabel
+import dev.herdr.mobile.features.chat.net.Pane
+import dev.herdr.mobile.features.chat.ui.panePrimaryLabel
+import dev.herdr.mobile.features.chat.ui.paneSecondaryLabel
+import dev.herdr.mobile.features.chat.ui.paneStatusLabel
 import org.junit.Assert.*
 import org.junit.Test
 

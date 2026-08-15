@@ -1,16 +1,16 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.net.Pane
-import dev.herdr.mobile.net.Tab
-import dev.herdr.mobile.net.Workspace
-import dev.herdr.mobile.ui.RepoNode
-import dev.herdr.mobile.ui.TabNode
-import dev.herdr.mobile.ui.TreeRow
-import dev.herdr.mobile.ui.WorkspaceNode
-import dev.herdr.mobile.ui.buildRepoTree
-import dev.herdr.mobile.ui.buildTree
-import dev.herdr.mobile.ui.flattenTree
-import dev.herdr.mobile.ui.treeRowKey
+import dev.herdr.mobile.features.chat.net.Pane
+import dev.herdr.mobile.features.chat.net.Tab
+import dev.herdr.mobile.features.chat.net.Workspace
+import dev.herdr.mobile.features.chat.ui.RepoNode
+import dev.herdr.mobile.features.chat.ui.TabNode
+import dev.herdr.mobile.features.chat.ui.TreeRow
+import dev.herdr.mobile.features.chat.ui.WorkspaceNode
+import dev.herdr.mobile.features.chat.ui.buildRepoTree
+import dev.herdr.mobile.features.chat.ui.buildTree
+import dev.herdr.mobile.features.chat.ui.flattenTree
+import dev.herdr.mobile.features.chat.ui.treeRowKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

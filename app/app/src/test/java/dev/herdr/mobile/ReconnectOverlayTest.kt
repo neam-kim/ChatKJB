@@ -1,6 +1,6 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.ui.showReconnectOverlay
+import dev.herdr.mobile.features.chat.ui.showReconnectOverlay
 import org.junit.Assert.*
 import org.junit.Test
 

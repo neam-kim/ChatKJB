@@ -1,7 +1,7 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.net.CompanionClient
-import dev.herdr.mobile.net.ServerFrame
+import dev.herdr.mobile.features.chat.net.CompanionClient
+import dev.herdr.mobile.features.chat.net.ServerFrame
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking

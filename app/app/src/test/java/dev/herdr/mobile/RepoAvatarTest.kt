@@ -1,7 +1,7 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.ui.monogram
-import dev.herdr.mobile.ui.theme.colorIndexFor
+import dev.herdr.mobile.features.chat.ui.monogram
+import dev.herdr.mobile.features.chat.ui.theme.colorIndexFor
 import org.junit.Assert.*
 import org.junit.Test
 

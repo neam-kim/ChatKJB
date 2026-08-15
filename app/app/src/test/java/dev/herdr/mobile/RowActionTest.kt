@@ -1,10 +1,10 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.ui.NodeKind
-import dev.herdr.mobile.ui.RowAction
-import dev.herdr.mobile.ui.closeConfirmMessage
-import dev.herdr.mobile.ui.closeConfirmMessageWith
-import dev.herdr.mobile.ui.needsCloseConfirm
+import dev.herdr.mobile.features.chat.ui.NodeKind
+import dev.herdr.mobile.features.chat.ui.RowAction
+import dev.herdr.mobile.features.chat.ui.closeConfirmMessage
+import dev.herdr.mobile.features.chat.ui.closeConfirmMessageWith
+import dev.herdr.mobile.features.chat.ui.needsCloseConfirm
 import org.junit.Assert.*
 import org.junit.Test
 

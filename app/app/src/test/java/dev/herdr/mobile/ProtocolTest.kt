@@ -1,6 +1,6 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.net.*
+import dev.herdr.mobile.features.chat.net.*
 import org.junit.Assert.*
 import org.junit.Test
 

@@ -1,15 +1,15 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.net.Pane
-import dev.herdr.mobile.net.Tab
-import dev.herdr.mobile.net.Workspace
-import dev.herdr.mobile.net.Worktree
-import dev.herdr.mobile.ui.TabNode
-import dev.herdr.mobile.ui.WorkspaceNode
-import dev.herdr.mobile.ui.attentionTier
-import dev.herdr.mobile.ui.buildRepoTree
-import dev.herdr.mobile.ui.repoKeyFor
-import dev.herdr.mobile.ui.workspaceTier
+import dev.herdr.mobile.features.chat.net.Pane
+import dev.herdr.mobile.features.chat.net.Tab
+import dev.herdr.mobile.features.chat.net.Workspace
+import dev.herdr.mobile.features.chat.net.Worktree
+import dev.herdr.mobile.features.chat.ui.TabNode
+import dev.herdr.mobile.features.chat.ui.WorkspaceNode
+import dev.herdr.mobile.features.chat.ui.attentionTier
+import dev.herdr.mobile.features.chat.ui.buildRepoTree
+import dev.herdr.mobile.features.chat.ui.repoKeyFor
+import dev.herdr.mobile.features.chat.ui.workspaceTier
 import org.junit.Assert.*
 import org.junit.Test
 

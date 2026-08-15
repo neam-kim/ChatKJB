@@ -1,6 +1,6 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.ui.parseAgentCommand
+import dev.herdr.mobile.features.chat.ui.parseAgentCommand
 import org.junit.Assert.*
 import org.junit.Test
 

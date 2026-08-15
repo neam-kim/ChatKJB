@@ -1,9 +1,9 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.data.PaneRepository
-import dev.herdr.mobile.net.CompanionClient
-import dev.herdr.mobile.net.Pane
-import dev.herdr.mobile.ui.DashboardViewModel
+import dev.herdr.mobile.features.chat.data.PaneRepository
+import dev.herdr.mobile.features.chat.net.CompanionClient
+import dev.herdr.mobile.features.chat.net.Pane
+import dev.herdr.mobile.features.chat.ui.DashboardViewModel
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.resetMain

@@ -1,8 +1,8 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.ui.FontBounds
-import dev.herdr.mobile.ui.fontBounds
-import dev.herdr.mobile.ui.steppedFontSize
+import dev.herdr.mobile.features.chat.ui.FontBounds
+import dev.herdr.mobile.features.chat.ui.fontBounds
+import dev.herdr.mobile.features.chat.ui.steppedFontSize
 import org.junit.Assert.*
 import org.junit.Test
 

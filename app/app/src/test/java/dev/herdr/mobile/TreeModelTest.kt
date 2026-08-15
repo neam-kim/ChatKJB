@@ -1,9 +1,9 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.net.Pane
-import dev.herdr.mobile.net.Tab
-import dev.herdr.mobile.net.Workspace
-import dev.herdr.mobile.ui.buildTree
+import dev.herdr.mobile.features.chat.net.Pane
+import dev.herdr.mobile.features.chat.net.Tab
+import dev.herdr.mobile.features.chat.net.Workspace
+import dev.herdr.mobile.features.chat.ui.buildTree
 import org.junit.Assert.*
 import org.junit.Test
 

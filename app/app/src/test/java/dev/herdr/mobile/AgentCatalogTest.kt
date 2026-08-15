@@ -1,8 +1,8 @@
 package dev.herdr.mobile
 
-import dev.herdr.mobile.data.updatedMru
-import dev.herdr.mobile.ui.describeAgent
-import dev.herdr.mobile.ui.filterAgents
+import dev.herdr.mobile.core.data.updatedMru
+import dev.herdr.mobile.features.chat.ui.describeAgent
+import dev.herdr.mobile.features.chat.ui.filterAgents
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
