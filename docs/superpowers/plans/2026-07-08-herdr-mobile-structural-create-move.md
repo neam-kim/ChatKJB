@@ -1,4 +1,4 @@
-# herdr-mobile — structural create + move Implementation Plan
+# ChatKJB — structural create + move Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -1274,9 +1274,9 @@ git commit -m "feat(app): agent picker (+ Other) and move-destination sheet"
 - [ ] **Step 1: Rebuild + restart the companion on 0.0.0.0**
 
 ```bash
-cd companion && go build -o ~/.local/bin/herdr-mobiled ./cmd/herdr-mobiled
-pgrep -x herdr-mobiled | xargs -r kill
-nohup ~/.local/bin/herdr-mobiled --listen 0.0.0.0:8787 > /tmp/herdr-mobiled.log 2>&1 &
+cd companion && go build -o ~/.local/bin/ChatKJBd ./cmd/ChatKJBd
+pgrep -x ChatKJBd | xargs -r kill
+nohup ~/.local/bin/ChatKJBd --listen 0.0.0.0:8787 > /tmp/ChatKJBd.log 2>&1 &
 ```
 
 - [ ] **Step 2: Install on emulator + phone**
@@ -1297,7 +1297,7 @@ $HOME/Android/Sdk/platform-tools/adb -s adb-R5CY32261JN-KB349E._adb-tls-connect.
 
 - [ ] **Step 7: Update memory**
 
-Append a "V2 PHASE 5" entry to `herdr-mobile-v1-design.md`: structural create (workspace/tab/shell/agent via `workspace.create`/`tab.create`/`pane.split`/`agent.start`) + move (`pane.move`, internally-tagged destination) from the sidebar; companionProtocol 4→5 (`create`/`created`, `move`, `list_agents`/`agents`); create responses carry the new pane (`root_pane`/`pane`/`agent`) so auto-open matches the returned `terminalId` against the next snapshot; agent picker from `server.agent_manifests` + free-typed "Other…" (`parseAgentCommand`). Move swap/zoom to the permanently-excluded list (poor mobile fit).
+Append a "V2 PHASE 5" entry to `ChatKJB-v1-design.md`: structural create (workspace/tab/shell/agent via `workspace.create`/`tab.create`/`pane.split`/`agent.start`) + move (`pane.move`, internally-tagged destination) from the sidebar; companionProtocol 4→5 (`create`/`created`, `move`, `list_agents`/`agents`); create responses carry the new pane (`root_pane`/`pane`/`agent`) so auto-open matches the returned `terminalId` against the next snapshot; agent picker from `server.agent_manifests` + free-typed "Other…" (`parseAgentCommand`). Move swap/zoom to the permanently-excluded list (poor mobile fit).
 
 - [ ] **Step 8: Commit any in-repo doc changes**
 

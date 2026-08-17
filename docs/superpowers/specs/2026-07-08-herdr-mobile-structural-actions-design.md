@@ -1,9 +1,9 @@
-# herdr-mobile — raw-terminal attach + structural actions (rename/close)
+# ChatKJB — raw-terminal attach + structural actions (rename/close)
 
 **Status:** design approved 2026-07-08
 **Predecessors:**
-- `docs/superpowers/specs/2026-07-08-herdr-mobile-sidebar-design.md` (workspace/tab/pane tree, shipped)
-- `docs/superpowers/specs/2026-07-08-herdr-mobile-terminal-polish-design.md` (interactive terminal polish, shipped)
+- `docs/superpowers/specs/2026-07-08-ChatKJB-sidebar-design.md` (workspace/tab/pane tree, shipped)
+- `docs/superpowers/specs/2026-07-08-ChatKJB-terminal-polish-design.md` (interactive terminal polish, shipped)
 
 ## Summary
 

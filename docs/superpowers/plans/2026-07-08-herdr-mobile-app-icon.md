@@ -1,4 +1,4 @@
-# herdr-mobile App Icon Implementation Plan
+# ChatKJB App Icon Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -6,7 +6,7 @@
 
 **Architecture:** An Android adaptive icon (`minSdk 26`, so no raster fallback): a VectorDrawable foreground carrying the ram silhouette converted from `herdr/assets/logo.svg`, a solid `#d9dad8` background color, and a monochrome layer reusing the foreground for Android 13+ themed icons. The manifest `<application>` is wired to it.
 
-**Tech Stack:** Android resources (VectorDrawable, `<adaptive-icon>` XML), Gradle. Build: `cd ~/herdr-mobile/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug`.
+**Tech Stack:** Android resources (VectorDrawable, `<adaptive-icon>` XML), Gradle. Build: `cd ~/ChatKJB/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug`.
 
 ## Global Constraints
 
@@ -103,13 +103,13 @@ In `app/app/src/main/AndroidManifest.xml`, add `android:icon` and `android:round
 
 - [ ] **Step 6: Build**
 
-Run: `cd ~/herdr-mobile/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug`
+Run: `cd ~/ChatKJB/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug`
 Expected: `BUILD SUCCESSFUL`. (A malformed `pathData` or bad resource reference fails resource linking/parsing, so success proves the vector and adaptive XML are valid.)
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add app/app/src/main/res/drawable/ic_launcher_foreground.xml \
         app/app/src/main/res/values/colors.xml \
         app/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml \

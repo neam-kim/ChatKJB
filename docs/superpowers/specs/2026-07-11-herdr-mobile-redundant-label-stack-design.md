@@ -1,4 +1,4 @@
-# herdr-mobile — Collapse the Redundant Label Stack — Design Spec
+# ChatKJB — Collapse the Redundant Label Stack — Design Spec
 
 **Date:** 2026-07-11
 **Component:** Android app only (`app/`).

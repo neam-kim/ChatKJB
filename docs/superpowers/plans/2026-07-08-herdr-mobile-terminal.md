@@ -1,8 +1,8 @@
-# herdr-mobile Interactive Terminal Implementation Plan
+# ChatKJB Interactive Terminal Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Tap an agent pane in herdr-mobile to open a live, interactive terminal for that pane.
+**Goal:** Tap an agent pane in ChatKJB to open a live, interactive terminal for that pane.
 
 **Architecture:** The companion spawns `herdr agent attach <pane_id>` on a PTY and streams raw bytes over the existing WebSocket (new `term_*` frames, base64). The Android app renders with the vendored Termux VT engine (`TerminalEmulator` + `TerminalView`) via a `RemoteTerminalSession` that pipes bytes to/from the socket instead of a local subprocess. Quick-reply is retired.
 
@@ -16,7 +16,7 @@
 - **Agent panes only.** `herdr agent attach <pane_id>` resolves for agent panes; shell panes are out of scope.
 - Vendoring Termux makes the app **GPLv3** — add a top-level `LICENSE` (GPL-3.0-or-later) + attribution.
 - Toolchain (unchanged from v1): Go 1.23; Android compileSdk/targetSdk 36, minSdk 26, AGP 8.13.2, Gradle 8.14.5, Kotlin 2.3.0, JDK 17, Compose BOM 2026.06.01.
-- Module Go path prefix: `github.com/mohamed-essam/herdr-mobile/companion`.
+- Module Go path prefix: `github.com/mohamed-essam/ChatKJB/companion`.
 - Termux Java package is `com.termux.terminal` (emulator) / `com.termux.view` (view); AGP namespaces `com.termux.emulator` / `com.termux.view`.
 - creack/pty API: `pty.StartWithSize(cmd *exec.Cmd, ws *pty.Winsize) (*os.File, error)`, `pty.Setsize(f, ws)`, `pty.Winsize{Rows, Cols, X, Y uint16}`.
 
@@ -470,7 +470,7 @@ Expected: FAIL — `s.attachArgv undefined` / compile error.
 
 In `companion/internal/wsserver/server.go`:
 
-Add imports: `"encoding/base64"`, `"strconv"`, `"sync/atomic"`, and `"github.com/mohamed-essam/herdr-mobile/companion/internal/pty"`.
+Add imports: `"encoding/base64"`, `"strconv"`, `"sync/atomic"`, and `"github.com/mohamed-essam/ChatKJB/companion/internal/pty"`.
 
 Add fields to `Server` (after `herdrProt int`):
 ```go
@@ -637,7 +637,7 @@ git commit -m "feat(companion): PTY bridge over the websocket (term_open/input/r
 Run (uses a shallow clone; network required):
 ```bash
 cd /tmp && rm -rf tx && git clone --depth 1 https://github.com/termux/termux-app.git tx
-cd ~/herdr-mobile/app
+cd ~/ChatKJB/app
 mkdir -p terminal-emulator terminal-view
 cp -r /tmp/tx/terminal-emulator/src terminal-emulator/src
 cp -r /tmp/tx/terminal-view/src terminal-view/src
@@ -710,7 +710,7 @@ In `app/app/build.gradle.kts`, add to `dependencies { ... }`:
 
 Run:
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 curl -sL https://www.gnu.org/licenses/gpl-3.0.txt -o LICENSE
 ```
 Expected: `LICENSE` contains "GNU GENERAL PUBLIC LICENSE Version 3".
@@ -719,7 +719,7 @@ Expected: `LICENSE` contains "GNU GENERAL PUBLIC LICENSE Version 3".
 
 Run:
 ```bash
-cd ~/herdr-mobile/app
+cd ~/ChatKJB/app
 ANDROID_HOME=$HOME/Android/Sdk ./gradlew :terminal-emulator:assembleDebug :terminal-view:assembleDebug
 ```
 Expected: `BUILD SUCCESSFUL`. If a Termux source file references a stripped resource or `BuildConfig`, remove that reference (e.g. delete an unused androidTest leftover) until it compiles — do not add features.
@@ -727,7 +727,7 @@ Expected: `BUILD SUCCESSFUL`. If a Termux source file references a stripped reso
 - [ ] **Step 8: Commit**
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add LICENSE app/settings.gradle.kts app/app/build.gradle.kts app/terminal-emulator app/terminal-view
 git commit -m "build(app): vendor Termux terminal-emulator + terminal-view (GPLv3); app is now GPLv3"
 ```
@@ -820,7 +820,7 @@ public class RemoteTerminalSession extends TerminalSession {
 
 Run:
 ```bash
-cd ~/herdr-mobile/app
+cd ~/ChatKJB/app
 ANDROID_HOME=$HOME/Android/Sdk ./gradlew :terminal-emulator:assembleDebug
 ```
 Expected: `BUILD SUCCESSFUL`. (If `mEmulator`, `mTranscriptRows`, `mClient`, or `notifyScreenUpdate` are not visible, re-check Task 4 Step 4 and that this file is in package `com.termux.terminal`.)
@@ -828,7 +828,7 @@ Expected: `BUILD SUCCESSFUL`. (If `mEmulator`, `mTranscriptRows`, `mClient`, or 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add app/terminal-emulator/src/main/java/com/termux/terminal/RemoteTerminalSession.java
 git commit -m "feat(app): RemoteTerminalSession bridging Termux to the websocket"
 ```
@@ -885,7 +885,7 @@ class ProtocolTest {
 
 Run:
 ```bash
-cd ~/herdr-mobile/app
+cd ~/ChatKJB/app
 ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest --tests dev.herdr.mobile.ProtocolTest
 ```
 Expected: FAIL — unresolved `ServerFrame.TermOpened` / `ClientMsg.termOpen`.
@@ -960,7 +960,7 @@ Add methods to the class (near `sendKeys`):
 
 Run:
 ```bash
-cd ~/herdr-mobile/app
+cd ~/ChatKJB/app
 ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest --tests dev.herdr.mobile.ProtocolTest --tests dev.herdr.mobile.CompanionClientTest
 ```
 Expected: PASS.
@@ -968,7 +968,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add app/app/src/main/java/dev/herdr/mobile/net/ app/app/src/test/java/dev/herdr/mobile/ProtocolTest.kt
 git commit -m "feat(app): term_* protocol frames + CompanionClient terminal methods"
 ```
@@ -1208,7 +1208,7 @@ private fun Modifier.clickableNoRipple(onClick: () -> Unit): Modifier =
 
 Run:
 ```bash
-cd ~/herdr-mobile/app
+cd ~/ChatKJB/app
 ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:compileDebugKotlin
 ```
 Expected: `BUILD SUCCESSFUL`. If `TerminalSessionClient` has a different method set than listed, adjust the anonymous object to match the vendored interface exactly (check `terminal-emulator/.../TerminalSessionClient.java`).
@@ -1216,7 +1216,7 @@ Expected: `BUILD SUCCESSFUL`. If `TerminalSessionClient` has a different method 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add app/app/src/main/java/dev/herdr/mobile/ui/TerminalScreen.kt app/app/src/main/java/dev/herdr/mobile/ui/TerminalViewClientImpl.kt app/app/src/main/java/dev/herdr/mobile/ui/DashboardViewModel.kt
 git commit -m "feat(app): interactive TerminalScreen (Termux view) + key toolbar"
 ```
@@ -1291,7 +1291,7 @@ Replace the body of `DashboardScreen` so a selected agent pane shows `TerminalSc
 
 Run:
 ```bash
-cd ~/herdr-mobile/app
+cd ~/ChatKJB/app
 ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug :app:testDebugUnitTest
 ```
 Expected: `BUILD SUCCESSFUL`; tests green. (If a leftover reference to `QuickReplySheet` remains, remove it.)
@@ -1299,7 +1299,7 @@ Expected: `BUILD SUCCESSFUL`; tests green. (If a leftover reference to `QuickRep
 - [ ] **Step 5: Commit**
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add -A app/app/src/main/java/dev/herdr/mobile/ui/
 git commit -m "feat(app): tap agent pane opens the terminal; retire quick-reply"
 ```
@@ -1316,8 +1316,8 @@ git commit -m "feat(app): tap agent pane opens the terminal; retire quick-reply"
 
 Run:
 ```bash
-cd ~/herdr-mobile
-go -C companion build -o ~/.local/bin/herdr-mobiled ./cmd/herdr-mobiled
+cd ~/ChatKJB
+go -C companion build -o ~/.local/bin/ChatKJBd ./cmd/ChatKJBd
 scripts/dev-emulator.sh --build
 ```
 Expected: companion rebuilt, emulator booted, APK installed, app on the dashboard.
@@ -1358,7 +1358,7 @@ Expected: `w7:p1 present: True`.
 
 Record: the terminal feature shipped, the companion PTY bridge, the Termux vendoring (GPLv3), the two vendored edits, and any live-testing gotchas discovered. Then:
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add .superpowers/sdd/progress.md
 git commit -m "docs: record interactive terminal (v2 phase 1) shipped + validated"
 ```

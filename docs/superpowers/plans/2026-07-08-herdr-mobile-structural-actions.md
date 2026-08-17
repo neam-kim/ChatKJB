@@ -1,4 +1,4 @@
-# herdr-mobile — raw-terminal attach + structural actions (rename/close) Implementation Plan
+# ChatKJB — raw-terminal attach + structural actions (rename/close) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -98,7 +98,7 @@ func TestToPaneCarriesTerminalID(t *testing.T) {
 }
 ```
 
-(`herdr` is already imported in `store_test.go` via the package under test; if the test file lacks the import, add `"github.com/mohamed-essam/herdr-mobile/companion/internal/herdr"`.)
+(`herdr` is already imported in `store_test.go` via the package under test; if the test file lacks the import, add `"github.com/mohamed-essam/ChatKJB/companion/internal/herdr"`.)
 
 - [ ] **Step 6: Run it to confirm it fails**
 
@@ -1364,12 +1364,12 @@ git commit -m "feat(app): row action sheet, rename/close dialogs, snackbar"
 - [ ] **Step 1: Rebuild the companion and restart it on 0.0.0.0**
 
 ```bash
-cd companion && go build -o ~/.local/bin/herdr-mobiled ./cmd/herdr-mobiled
-pgrep -x herdr-mobiled | xargs -r kill
-~/.local/bin/herdr-mobiled --listen 0.0.0.0:8787 > /tmp/herdr-mobiled.log 2>&1 &
+cd companion && go build -o ~/.local/bin/ChatKJBd ./cmd/ChatKJBd
+pgrep -x ChatKJBd | xargs -r kill
+~/.local/bin/ChatKJBd --listen 0.0.0.0:8787 > /tmp/ChatKJBd.log 2>&1 &
 ```
 
-(If the binary path/flags differ, check `companion/cmd/` and the prior run in `/tmp/herdr-mobiled.log`.)
+(If the binary path/flags differ, check `companion/cmd/` and the prior run in `/tmp/ChatKJBd.log`.)
 
 - [ ] **Step 2: Install the app on the emulator and the phone**
 

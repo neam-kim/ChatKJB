@@ -20,13 +20,21 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "herdr-mobile"
+rootProject.name = "ChatKJB"
 
-includeBuild("/Volumes/NEAM_SSD/Opencodex/KJBMail/repo") {
+val kjbmailDir = sequenceOf(
+    providers.gradleProperty("kjbmail.dir").orNull,
+    System.getenv("KJBMAIL_DIR"),
+    file("../KJBMail/repo").takeIf { it.isDirectory }?.absolutePath,
+).filterNotNull().map(::File).firstOrNull { it.isDirectory }
+    ?: error("KJBMail source is required. Set -Pkjbmail.dir=/path/to/KJBMail/repo or KJBMAIL_DIR.")
+
+includeBuild(kjbmailDir) {
     dependencySubstitution {
         substitute(module("dev.herdr.kjbmail:mail-host")).using(project(":mail-host"))
     }
 }
+
 
 include(":app")
 include(":terminal-emulator")

@@ -1,7 +1,7 @@
-# herdr-mobile — terminal polish (font size, keyboard resize, graceful takeover)
+# ChatKJB — terminal polish (font size, keyboard resize, graceful takeover)
 
 **Status:** design approved 2026-07-08
-**Predecessor:** `docs/superpowers/specs/2026-07-08-herdr-mobile-terminal-design.md` (interactive terminal, shipped)
+**Predecessor:** `docs/superpowers/specs/2026-07-08-ChatKJB-terminal-design.md` (interactive terminal, shipped)
 
 ## Summary
 

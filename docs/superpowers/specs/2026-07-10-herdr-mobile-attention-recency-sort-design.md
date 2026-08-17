@@ -1,7 +1,7 @@
 # Dashboard Sort: Needs-Attention, then Recent Activity — Design Spec
 
 **Date:** 2026-07-10
-**Component:** herdr-mobile — Go companion (`internal/state`) + Android app (`ui/`)
+**Component:** ChatKJB — Go companion (`internal/state`) + Android app (`ui/`)
 
 ## Goal
 
@@ -117,6 +117,6 @@ the input to `buildRepoTree`, which then re-sorts for the dashboard).
 
 ## Build / Test Commands
 
-- Companion: `go -C ~/herdr-mobile/companion test ./...`
+- Companion: `go -C ~/ChatKJB/companion test ./...`
 - App build: `cd app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug`
 - App tests: `cd app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest`

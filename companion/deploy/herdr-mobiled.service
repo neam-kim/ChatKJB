@@ -1,5 +1,5 @@
 [Unit]
-Description=herdr-mobile companion daemon
+Description=ChatKJB Go companion daemon
 After=network-online.target
 
 [Service]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dev-emulator.sh — run the full herdr-mobile stack against a headless Android
+# dev-emulator.sh — run the full ChatKJB stack against a headless Android
 # emulator, with NO physical device and NO Tailscale.
 #
 # How the bridge works: from inside an Android emulator, the magic IP 10.0.2.2

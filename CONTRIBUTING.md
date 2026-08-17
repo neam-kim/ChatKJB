@@ -1,6 +1,6 @@
-# Contributing to herdr-mobile
+# Contributing to ChatKJB
 
-Thanks for your interest. herdr-mobile is a small, opinionated companion for
+Thanks for your interest. ChatKJB is a small, opinionated companion for
 [herdr](https://herdr.dev), and contributions that keep it focused and well-built are
 welcome.
 

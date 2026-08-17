@@ -1,6 +1,6 @@
 # Third-party notices
 
-herdr-mobile is licensed under **AGPL-3.0-or-later** (see [`LICENSE`](LICENSE)).
+ChatKJB is based on herdr-mobile and is licensed under **AGPL-3.0-or-later** (see [`LICENSE`](LICENSE)).
 It bundles the following third-party components, each under its own license.
 
 ## Termux terminal emulator and view

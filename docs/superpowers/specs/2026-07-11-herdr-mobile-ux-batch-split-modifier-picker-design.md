@@ -1,4 +1,4 @@
-# herdr-mobile — UX Batch: Split label, Armed modifier, Agent picker — Design Spec
+# ChatKJB — UX Batch: Split label, Armed modifier, Agent picker — Design Spec
 
 **Date:** 2026-07-11
 **Component:** Android app only (`app/`).

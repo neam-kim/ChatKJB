@@ -1,4 +1,4 @@
-# herdr-mobile — Unify Sidebar & Dashboard Tree Order — Design Spec
+# ChatKJB — Unify Sidebar & Dashboard Tree Order — Design Spec
 
 **Date:** 2026-07-11
 **Component:** Android app only (`app/`).

@@ -1,4 +1,4 @@
-# herdr-mobile v1 Implementation Plan
+# ChatKJB v1 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -47,7 +47,7 @@ Both subsystems depend on this. It is intentionally purpose-built (not a raw pas
 **App → Companion frames:**
 
 ```jsonc
-{"t":"hello","client":"herdr-mobile","clientVersion":"1.0.0"}
+{"t":"hello","client":"ChatKJB","clientVersion":"1.0.0"}
 {"t":"register_push","endpoint":"https://ntfy.example.net/UP.../..."}  // UnifiedPush endpoint URL
 {"t":"read_pane","reqId":"r1","paneId":"w6:p1","source":"detection","lines":40}
 {"t":"send_text","reqId":"r2","paneId":"w6:p1","text":"y"}
@@ -85,7 +85,7 @@ Ships and is fully testable on its own (drive it with `websocat`/`wscat` against
 ## File Structure (Part A)
 
 - `companion/go.mod`, `companion/go.sum`
-- `companion/cmd/herdr-mobiled/main.go` — flag parsing, config, wiring, graceful shutdown.
+- `companion/cmd/ChatKJBd/main.go` — flag parsing, config, wiring, graceful shutdown.
 - `companion/internal/herdr/client.go` — NDJSON client: one-shot `Call`, streaming `Subscribe`.
 - `companion/internal/herdr/types.go` — wire structs for herdr responses/events.
 - `companion/internal/state/store.go` — pane map, `Apply` snapshot + diff, transition detection.
@@ -112,16 +112,16 @@ Ships and is fully testable on its own (drive it with `websocat`/`wscat` against
 The repo is currently not a git repo. Run:
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git init
-mkdir -p companion/cmd/herdr-mobiled companion/internal/{herdr,state,notify,proto,wsserver,engine}
+mkdir -p companion/cmd/ChatKJBd companion/internal/{herdr,state,notify,proto,wsserver,engine}
 ```
 
 - [ ] **Step 2: Write `.gitignore`**
 
 ```gitignore
 # Go
-/companion/herdr-mobiled
+/companion/ChatKJBd
 *.test
 *.out
 # Android
@@ -138,7 +138,7 @@ mkdir -p companion/cmd/herdr-mobiled companion/internal/{herdr,state,notify,prot
 - [ ] **Step 3: Write `README.md`**
 
 ```markdown
-# herdr-mobile
+# ChatKJB
 
 Monitor and unblock your [herdr](https://herdr.dev) agents from an Android phone.
 
@@ -156,15 +156,15 @@ License: (match herdr's license — TODO confirm)
 - [ ] **Step 4: Init the Go module**
 
 ```bash
-cd ~/herdr-mobile/companion
-go mod init github.com/mohamed-essam/herdr-mobile/companion
+cd ~/ChatKJB/companion
+go mod init github.com/mohamed-essam/ChatKJB/companion
 go mod edit -go=1.22
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add .gitignore README.md companion/go.mod
 git commit -m "chore: init repo and go module"
 ```
@@ -742,7 +742,7 @@ package state
 import (
 	"testing"
 
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/herdr"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/herdr"
 )
 
 func infos(p ...herdr.PaneInfo) []herdr.PaneInfo { return p }
@@ -791,7 +791,7 @@ Expected: FAIL — undefined `NewStore`.
 ```go
 package state
 
-import "github.com/mohamed-essam/herdr-mobile/companion/internal/herdr"
+import "github.com/mohamed-essam/ChatKJB/companion/internal/herdr"
 
 type Pane struct {
 	PaneID      string `json:"paneId"`
@@ -902,7 +902,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/state"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/state"
 )
 
 func TestShouldNotifyBlocked(t *testing.T) {
@@ -964,7 +964,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/state"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/state"
 )
 
 type Push struct {
@@ -1061,7 +1061,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/state"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/state"
 )
 
 func TestParseClientMsg(t *testing.T) {
@@ -1110,7 +1110,7 @@ package proto
 import (
 	"encoding/json"
 
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/state"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/state"
 )
 
 type ClientMsg struct {
@@ -1208,7 +1208,7 @@ Finished-debounce: when a `working`→`idle`/`done` transition occurs, wait `Deb
 - [ ] **Step 1: Add the websocket dependency**
 
 ```bash
-cd ~/herdr-mobile/companion
+cd ~/ChatKJB/companion
 go get github.com/coder/websocket@latest
 ```
 
@@ -1226,9 +1226,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/herdr"
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/state"
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/wsserver"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/herdr"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/state"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/wsserver"
 )
 
 // wsHarness spins up the server handler on an httptest server and returns a
@@ -1309,8 +1309,8 @@ import (
 	"sync"
 
 	"github.com/coder/websocket"
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/proto"
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/state"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/proto"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/state"
 )
 
 type HerdrRPC interface {
@@ -1467,11 +1467,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/herdr"
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/notify"
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/proto"
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/state"
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/wsserver"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/herdr"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/notify"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/proto"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/state"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/wsserver"
 )
 
 type Config struct {
@@ -1679,7 +1679,7 @@ git commit -m "feat(companion): WS server + engine (poll, subscribe, debounced p
 ### Task A9: main entrypoint, config, systemd unit
 
 **Files:**
-- Create: `companion/cmd/herdr-mobiled/main.go`, `companion/deploy/herdr-mobiled.service`, `companion/deploy/README.md`
+- Create: `companion/cmd/ChatKJBd/main.go`, `companion/deploy/ChatKJBd.service`, `companion/deploy/README.md`
 
 **Interfaces:**
 - Consumes: `engine.New`, `engine.Config`.
@@ -1699,7 +1699,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mohamed-essam/herdr-mobile/companion/internal/engine"
+	"github.com/mohamed-essam/ChatKJB/companion/internal/engine"
 )
 
 func defaultSocket() string {
@@ -1721,24 +1721,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("herdr-mobiled: socket=%s listen=%s", *socket, *listen)
+	log.Printf("ChatKJBd: socket=%s listen=%s", *socket, *listen)
 	if err := e.Run(ctx); err != nil {
 		log.Fatal(err)
 	}
 }
 ```
 
-- [ ] **Step 2: Write the systemd user unit `deploy/herdr-mobiled.service`**
+- [ ] **Step 2: Write the systemd user unit `deploy/ChatKJBd.service`**
 
 ```ini
 [Unit]
-Description=herdr-mobile companion daemon
+Description=ChatKJB companion daemon
 After=network-online.target
 
 [Service]
 # Bind to your Tailscale IP so the API is reachable only on your tailnet.
 # Find it with: tailscale ip -4
-ExecStart=%h/.local/bin/herdr-mobiled --listen %i:8787
+ExecStart=%h/.local/bin/ChatKJBd --listen %i:8787
 Restart=on-failure
 RestartSec=2
 
@@ -1753,17 +1753,17 @@ WantedBy=default.target
 
 ```bash
 cd companion
-go build -o ~/.local/bin/herdr-mobiled ./cmd/herdr-mobiled
+go build -o ~/.local/bin/ChatKJBd ./cmd/ChatKJBd
 
 # Find your tailnet IP:
 TS_IP=$(tailscale ip -4)
 
 # Install the user service, templated with your tailnet IP:
 mkdir -p ~/.config/systemd/user
-sed "s/%i/$TS_IP/" deploy/herdr-mobiled.service > ~/.config/systemd/user/herdr-mobiled.service
+sed "s/%i/$TS_IP/" deploy/ChatKJBd.service > ~/.config/systemd/user/ChatKJBd.service
 systemctl --user daemon-reload
-systemctl --user enable --now herdr-mobiled
-systemctl --user status herdr-mobiled
+systemctl --user enable --now ChatKJBd
+systemctl --user status ChatKJBd
 ```
 
 Verify from a laptop on the tailnet:
@@ -1778,8 +1778,8 @@ websocat ws://$TS_IP:8787/
 
 ```bash
 cd companion
-go build -o /tmp/herdr-mobiled ./cmd/herdr-mobiled
-/tmp/herdr-mobiled --listen 127.0.0.1:8787 &
+go build -o /tmp/ChatKJBd ./cmd/ChatKJBd
+/tmp/ChatKJBd --listen 127.0.0.1:8787 &
 sleep 1
 # if websocat is available:
 command -v websocat >/dev/null && (echo '{"t":"hello"}'; sleep 2) | websocat -n1 ws://127.0.0.1:8787/ || echo "install websocat to smoke-test manually"
@@ -2074,7 +2074,7 @@ object ClientMsg {
     private fun obj(vararg pairs: Pair<String, JsonElement>) =
         JsonObject(pairs.toMap()).toString()
 
-    fun hello() = obj("t" to JsonPrimitive("hello"), "client" to JsonPrimitive("herdr-mobile"), "clientVersion" to JsonPrimitive("1.0.0"))
+    fun hello() = obj("t" to JsonPrimitive("hello"), "client" to JsonPrimitive("ChatKJB"), "clientVersion" to JsonPrimitive("1.0.0"))
     fun registerPush(endpoint: String) = obj("t" to JsonPrimitive("register_push"), "endpoint" to JsonPrimitive(endpoint))
     fun readPane(reqId: String, paneId: String, source: String, lines: Int) =
         obj("t" to JsonPrimitive("read_pane"), "reqId" to JsonPrimitive(reqId), "paneId" to JsonPrimitive(paneId), "source" to JsonPrimitive(source), "lines" to JsonPrimitive(lines))

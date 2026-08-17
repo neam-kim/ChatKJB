@@ -1,7 +1,7 @@
 # Terminal Key Bar — Match the Mockup (Rounded, Tactile, JetBrains Mono) — Design Spec
 
 **Date:** 2026-07-11
-**Component:** herdr-mobile — Android app only (`ui/TerminalScreen.kt`).
+**Component:** ChatKJB — Android app only (`ui/TerminalScreen.kt`).
 
 ## Goal
 

@@ -1,7 +1,7 @@
 # Paseo-Inspired Dashboard Refresh — Design Spec
 
 **Date:** 2026-07-10
-**Component:** herdr-mobile Android app (`ui/` — theme + dashboard)
+**Component:** ChatKJB Android app (`ui/` — theme + dashboard)
 **Inspiration:** Paseo (paseo.sh) — see memory `paseo-design-reference`.
 
 Two independent, approved changes, delivered together because both touch the app's

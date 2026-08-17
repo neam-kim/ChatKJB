@@ -1,7 +1,7 @@
-# herdr-mobile — sidebar / tree navigation (v2, phase 2)
+# ChatKJB — sidebar / tree navigation (v2, phase 2)
 
 **Status:** design approved 2026-07-08
-**Predecessor:** `docs/superpowers/specs/2026-07-08-herdr-mobile-terminal-design.md` (interactive terminal, shipped)
+**Predecessor:** `docs/superpowers/specs/2026-07-08-ChatKJB-terminal-design.md` (interactive terminal, shipped)
 
 ## Summary
 
@@ -42,7 +42,7 @@ info) so the tree can show friendly names instead of raw ids.
 ## Verified assumptions (probed against herdr 0.7.1)
 
 `herdr workspace list` returns, per workspace:
-`workspace_id`, `label` (e.g. "omega3", "apollo", "herdr-mobile",
+`workspace_id`, `label` (e.g. "omega3", "apollo", "ChatKJB",
 "wt-cost-dashboards"), `number`, `active_tab_id`, `agent_status` (rolled-up),
 `focused`, `pane_count`, `tab_count`, and — for linked worktrees — a `worktree`
 object with `repo_name`, `repo_root`, `checkout_path`, `is_linked_worktree`.
@@ -208,7 +208,7 @@ sealed interface TreeNode {
     number/paneId; orphan pane → "(unknown)" group; collapse/expand toggles the
     visible row set.
 - **Live (emulator harness + physical phone):** open the drawer, verify the real
-  tree (e.g. omega3 with 2 tabs, apollo, herdr-mobile with a worktree badge where
+  tree (e.g. omega3 with 2 tabs, apollo, ChatKJB with a worktree badge where
   applicable), confirm rolled-up + per-pane status and the focused marker track
   herdr, tap an agent pane → terminal opens, shell panes are inert.
 

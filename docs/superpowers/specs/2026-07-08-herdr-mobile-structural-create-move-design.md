@@ -1,7 +1,7 @@
-# herdr-mobile — structural create + move
+# ChatKJB — structural create + move
 
 **Status:** design approved 2026-07-08
-**Predecessor:** `docs/superpowers/specs/2026-07-08-herdr-mobile-structural-actions-design.md` (raw attach + rename/close, shipped)
+**Predecessor:** `docs/superpowers/specs/2026-07-08-ChatKJB-structural-actions-design.md` (raw attach + rename/close, shipped)
 
 ## Summary
 

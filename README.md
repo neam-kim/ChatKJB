@@ -1,121 +1,75 @@
-# herdr-mobile
+# ChatKJB
+
+<p align="center">Kim JongBeom의 Homepage, Email/KJBMail, ChatKJB agent dashboard를 한 Android launcher에서 여는 개인 생산성 앱</p>
 
 <p align="center">
-  Monitor and unblock your <a href="https://herdr.dev">herdr</a> agents from an Android phone.
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-666666?labelColor=333333" alt="AGPL-3.0-or-later" /></a>
+  <a href="https://github.com/neam-kim/ChatKJB/actions"><img src="https://img.shields.io/github/actions/workflow/status/neam-kim/ChatKJB/ci.yml?label=CI" alt="CI status" /></a>
 </p>
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-666666?labelColor=333333" alt="AGPL-3.0 license" /></a>
-  <a href="https://github.com/mohamed-essam/herdr-mobile/actions/workflows/ci.yml"><img src="https://github.com/mohamed-essam/herdr-mobile/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
-  <a href="https://github.com/mohamed-essam/herdr-mobile/releases/latest"><img src="https://img.shields.io/github/v/release/mohamed-essam/herdr-mobile?label=release&labelColor=333333&color=666666" alt="latest release" /></a>
-  <a href="https://github.com/mohamed-essam/herdr-mobile/stargazers"><img src="https://img.shields.io/github/stars/mohamed-essam/herdr-mobile?labelColor=333333&color=666666&logo=github" alt="GitHub stars" /></a>
-</p>
+ChatKJB는 `Kim JongBeom` launcher를 시작점으로 Homepage 화면, KJBMail 호스트로 여는 Email, 그리고 터미널에서 실행 중인 herdr agent를 휴대폰에서 확인·응답하는 ChatKJB dashboard를 제공합니다. Android 앱은 Kotlin/Jetpack Compose로 작성되며, 선택적으로 호스트의 Go companion과 WebSocket으로 연결됩니다.
 
----
+## 제공 기능
 
-[herdr](https://herdr.dev) is an agent multiplexer that lives in your terminal.
-**herdr-mobile** is an unofficial companion that puts the herd in your pocket: see
-which agents are blocked, working, or done — and unblock them — without walking back
-to your desk.
-
-- **every agent at a glance** — a live, repo-grouped dashboard of blocked / working /
-  done, mirrored from herdr's socket API.
-- **get pinged when it matters** — a push notification the moment an agent is blocked
-  or finishes, delivered over [UnifiedPush](https://unifiedpush.org) (no Google
-  dependency required).
-- **quick-reply** — answer a blocked agent's prompt straight from the notification or
-  the dashboard.
-- **a real terminal when you need it** — attach to any pane over a remote PTY bridge
-  (Termux VT), with a Catppuccin true-black theme built for a phone screen.
-
-> **Unofficial project.** herdr-mobile is not affiliated with or endorsed by the herdr
-> project. It talks to herdr only through its public socket API.
+- **Kim JongBeom launcher**: Homepage, Email, Chat 진입점과 `kimjb://open/...` / 레거시 `kjbmail://open` deep link.
+- **Homepage**: 앱 내부 화면에서 Homepage를 열고 launcher로 돌아옵니다.
+- **Email / KJBMail**: `dev.herdr.kjbmail:mail-host`의 Thunderbird Mail host를 통합해 `MailEntryActivity`를 실행합니다. KJBMail 소스는 이 저장소에 포함되지 않습니다.
+- **ChatKJB dashboard**: herdr의 workspace/tab/pane 상태, blocked/working/done 상태, quick reply와 구조적 작업, embedded terminal을 제공합니다.
+- **Go companion**: `companion/`의 `herdr-mobiled`가 herdr Unix socket을 읽고 Android에 WebSocket으로 상태와 PTY/RPC를 전달하며 UnifiedPush 알림을 중계합니다.
 
 ## Architecture
 
-Two pieces talk over your private network:
-
-```
-  ┌─────────────┐   NDJSON / Unix socket   ┌──────────────────┐   JSON / WebSocket   ┌───────────────┐
-  │    herdr    │ ───────────────────────► │  herdr-mobiled   │ ───────────────────► │  Android app  │
-  │  (your host)│                          │  (Go companion)  │ ◄─────────────────── │ (Kotlin/Compose)
-  └─────────────┘                          └──────────────────┘    input / RPC       └───────────────┘
-                                                    │
-                                                    └──► UnifiedPush ──► phone notifications
+```text
+herdr (호스트) -- NDJSON/Unix socket --> herdr-mobiled (Go)
+                                              -- JSON/WebSocket --> ChatKJB (Android)
+                                              -- UnifiedPush ------> phone notifications
+KJBMail composite build --------------------> Android mail host
 ```
 
-- **`companion/`** — a small Go daemon (`herdr-mobiled`) that runs on your herdr host,
-  subscribes to herdr's socket API, exposes a WebSocket API over your Tailscale network,
-  and pushes notifications when an agent needs you.
-- **`app/`** — the Android app (Kotlin + Jetpack Compose): the dashboard, quick-reply,
-  and the embedded terminal.
+앱의 Android package/applicationId는 현재 `dev.herdr.mobile`로 유지됩니다. Go companion의 기존 upstream 패키지 경로와 내부 이름은 호환성을 위해 유지되며, 제품 UI와 저장소는 ChatKJB 기준입니다.
 
-## Security
+호환성 참고: `dev.herdr.mobile`, `github.com/mohamed-essam/herdr-mobile/companion`, `herdr-mobiled`, systemd unit 이름, herdr wire protocol 식별자는 기존 호스트와의 연동을 위해 변경하지 않았습니다. ChatKJB는 herdr 프로젝트를 기반으로 하며, 원 프로젝트 attribution은 유지합니다.
 
-**Read this before you expose the companion.** The v1 companion API has **no
-authentication** and can **send input to your terminals**. Treat it like an open door to
-your shell.
+## 보안 모델과 현재 제약
 
-- Bind `herdr-mobiled` only to a **private address** — your [Tailscale](https://tailscale.com)
-  tailnet IP is the intended setup. **Never** bind it to a public interface or `0.0.0.0`.
-- The daemon prints a warning if you bind to a non-loopback address, as a reminder to
-  keep it on a trusted network.
+companion v1 WebSocket API는 **인증이 없고 터미널 입력을 전송할 수 있습니다**. 인터넷에 노출하는 서버가 아닙니다. loopback 또는 신뢰하는 사설망(예: Tailscale) 주소에만 bind하고 `0.0.0.0`/공개 인터페이스를 사용하지 마십시오. daemon은 non-loopback bind 시 경고를 출력합니다. 자세한 위협 모델은 [`SECURITY.md`](SECURITY.md)를 읽으십시오.
 
-See [`SECURITY.md`](SECURITY.md) for the full threat model and how to report a
-vulnerability.
+현재 제약: KJBMail composite build가 없으면 Android 빌드는 의도적으로 명확한 설정 오류로 중단됩니다(아래 설정 참조). KJBMail 소스가 공개 저장소에 없으므로 GitHub Actions의 Android CI job은 거짓 성공을 피하기 위해 명시적으로 skip되며, release workflow는 Go companion만 배포합니다. ChatKJB는 아직 mail host 소스를 배포하지 않으며, companion 인증도 제공하지 않습니다.
 
-## Install
+## 설치
 
-### Companion (`herdr-mobiled`)
-
-Grab a prebuilt binary from the [latest release](https://github.com/mohamed-essam/herdr-mobile/releases/latest),
-or build from source:
+### Go companion
 
 ```bash
 cd companion
 go build -o ~/.local/bin/herdr-mobiled ./cmd/herdr-mobiled
-
-# Bind to your tailnet IP so the API is reachable only on your tailnet:
 herdr-mobiled --listen "$(tailscale ip -4):8787"
 ```
 
-To run it as a user service, see [`companion/deploy/`](companion/deploy/).
+systemd user service는 [`companion/deploy/README.md`](companion/deploy/README.md)를 참조하십시오.
 
-### App
+### Android
 
-Download `app-debug.apk` from the [latest release](https://github.com/mohamed-essam/herdr-mobile/releases/latest)
-and install it (you'll need to allow installs from unknown sources), or build it
-yourself:
+요구사항: JDK 17, Android SDK (compileSdk 36), Go 1.23+ (companion). KJBMail 저장소를 별도로 준비하고 `KJBMAIL_DIR` 또는 Gradle property를 지정합니다.
 
 ```bash
+# KJBMail/repo 또는 원하는 checkout 경로
 cd app
-ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug
-# → app/app/build/outputs/apk/debug/app-debug.apk
+KJBMAIL_DIR=/path/to/KJBMail/repo ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug
+# app/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Point the app at `ws://<your-tailnet-ip>:8787/` and, optionally, a UnifiedPush
-distributor (e.g. [ntfy](https://ntfy.sh)) for notifications.
+KJBMail 자동 탐색 후보는 `KJBMAIL_DIR`, `-Pkjbmail.dir=...`, 그리고 이 저장소의 형제 디렉터리 `../KJBMail/repo`입니다. 후보가 없으면 설정 단계에서 필요한 경로를 안내하는 오류가 납니다. 앱에서 companion 주소는 `ws://<private-address>:8787/`로 설정합니다.
 
-## Development
+## 개발 및 검증
 
 ```bash
-# Companion
-cd companion && go test ./...
-
-# App (unit tests + debug build)
-cd app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug
+cd companion && go test ./... && gofmt -l .
+cd ../app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 
-Requirements: Go 1.23+, JDK 17, Android SDK (compileSdk 36). Design notes and specs for
-every feature live under [`docs/`](docs/).
-
-## Contributing
-
-Issues and pull requests are welcome — please read [`CONTRIBUTING.md`](CONTRIBUTING.md)
-first.
+`docs/`에는 기능 설계 자료가 있습니다. 이 저장소의 upstream 기반 코드와 bundled Termux/JetBrains Mono 고지는 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)에 기록되어 있습니다. 원저작자 attribution과 upstream AGPLv3 조건을 변경하지 않습니다.
 
 ## License
 
-herdr-mobile is licensed under **AGPL-3.0-or-later** — the same license family as herdr
-itself. See [`LICENSE`](LICENSE). Bundled third-party components (the Termux terminal
-emulator, JetBrains Mono) are documented in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+ChatKJB는 **AGPL-3.0-or-later**로 배포됩니다. [`LICENSE`](LICENSE), [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)를 참조하십시오.

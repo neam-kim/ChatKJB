@@ -1,4 +1,4 @@
-# herdr-mobile — Destructive-Action Safety — Design Spec
+# ChatKJB — Destructive-Action Safety — Design Spec
 
 **Date:** 2026-07-11
 **Components:** Go companion (`companion/`) + Android app (`app/`).

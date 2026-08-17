@@ -1,7 +1,7 @@
 # Terminal Reconnecting Overlay — Design Spec
 
 **Date:** 2026-07-10
-**Component:** herdr-mobile Android app (`ui/TerminalScreen.kt`)
+**Component:** ChatKJB Android app (`ui/TerminalScreen.kt`)
 
 ## Goal
 

@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [1.0.0] - 2026-07-12
 
-Initial public release.
+Initial public release of the ChatKJB Android launcher and agent companion.
 
 ### Added
 - **Live agent dashboard** — a repo-grouped tree of workspaces, tabs, and panes mirrored
@@ -29,4 +29,4 @@ Initial public release.
   intended to run only on a trusted private network (e.g. Tailscale). See
   [`SECURITY.md`](SECURITY.md).
 
-[1.0.0]: https://github.com/mohamed-essam/herdr-mobile/releases/tag/v1.0.0
+[1.0.0]: https://github.com/neam-kim/ChatKJB/releases/tag/v1.0.0

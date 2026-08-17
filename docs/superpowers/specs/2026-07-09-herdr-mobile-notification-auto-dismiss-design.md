@@ -1,7 +1,7 @@
 # Notification Auto-Dismiss on Resume — Design Spec
 
 **Date:** 2026-07-09
-**Component:** herdr-mobile (Go companion + Kotlin/Compose Android app)
+**Component:** ChatKJB (Go companion + Kotlin/Compose Android app)
 
 ## Goal
 

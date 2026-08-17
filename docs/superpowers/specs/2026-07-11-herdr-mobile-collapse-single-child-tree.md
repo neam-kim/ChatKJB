@@ -1,7 +1,7 @@
 # Collapse Single-Child Tree Levels — Design Spec
 
 **Date:** 2026-07-11
-**Component:** herdr-mobile — Android app only (`ui/`); no companion change.
+**Component:** ChatKJB — Android app only (`ui/`); no companion change.
 
 ## Goal
 

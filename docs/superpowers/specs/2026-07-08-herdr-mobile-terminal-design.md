@@ -1,11 +1,11 @@
-# herdr-mobile — interactive terminal (v2, phase 1)
+# ChatKJB — interactive terminal (v2, phase 1)
 
 **Status:** design approved 2026-07-08
-**Predecessor:** `docs/superpowers/plans/2026-07-07-herdr-mobile-v1.md` (monitor + quick-reply, shipped)
+**Predecessor:** `docs/superpowers/plans/2026-07-07-ChatKJB-v1.md` (monitor + quick-reply, shipped)
 
 ## Summary
 
-Add a real, interactive terminal to herdr-mobile. Tapping an **agent** pane on
+Add a real, interactive terminal to ChatKJB. Tapping an **agent** pane on
 the dashboard opens a live VT terminal attached to that pane. The companion
 brokers the terminal by spawning `herdr agent attach <target>` on a PTY and
 streaming raw bytes over the existing WebSocket; the app renders with the

@@ -1,4 +1,4 @@
-# Deploying the companion
+# Deploying the ChatKJB companion
 
 ```bash
 cd companion

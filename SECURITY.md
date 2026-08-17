@@ -32,7 +32,7 @@ branch and in the next tagged release; there are no long-term support branches.
 
 Please report security issues **privately** rather than opening a public issue.
 
-- Use GitHub's [private vulnerability reporting](https://github.com/mohamed-essam/herdr-mobile/security/advisories/new)
+- Use GitHub's [private vulnerability reporting](https://github.com/neam-kim/ChatKJB/security/advisories/new)
   ("Report a vulnerability" under the Security tab), or
 - open a minimal issue asking for a private contact channel without disclosing details.
 

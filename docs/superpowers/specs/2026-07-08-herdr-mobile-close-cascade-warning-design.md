@@ -1,4 +1,4 @@
-# herdr-mobile — Worktree-Cascade Close Warning (Design)
+# ChatKJB — Worktree-Cascade Close Warning (Design)
 
 **Date:** 2026-07-08
 **Status:** Approved (brainstorming)

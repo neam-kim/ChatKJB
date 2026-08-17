@@ -1,4 +1,4 @@
-# herdr-mobile Sidebar / Tree Navigation Implementation Plan
+# ChatKJB Sidebar / Tree Navigation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -488,7 +488,7 @@ func TestInitialSnapshotIncludesWorkspacesAndTabs(t *testing.T) {
 }
 ```
 
-Add `"github.com/mohamed-essam/herdr-mobile/companion/internal/state"` to the test file's imports.
+Add `"github.com/mohamed-essam/ChatKJB/companion/internal/state"` to the test file's imports.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1330,10 +1330,10 @@ The companion is already rebuilt (Tasks 1–4) and must be restarted so it serve
 
 ```bash
 # rebuild + redeploy the companion on 0.0.0.0 (serves emulator + phone)
-cd companion && go build -o ~/.local/bin/herdr-mobiled.new ./cmd/herdr-mobiled
-OLD=$(pgrep -x herdr-mobiled); kill "$OLD"; sleep 1
-mv ~/.local/bin/herdr-mobiled.new ~/.local/bin/herdr-mobiled
-nohup ~/.local/bin/herdr-mobiled --listen 0.0.0.0:8787 > /tmp/herdr-companion.log 2>&1 &
+cd companion && go build -o ~/.local/bin/ChatKJBd.new ./cmd/ChatKJBd
+OLD=$(pgrep -x ChatKJBd); kill "$OLD"; sleep 1
+mv ~/.local/bin/ChatKJBd.new ~/.local/bin/ChatKJBd
+nohup ~/.local/bin/ChatKJBd --listen 0.0.0.0:8787 > /tmp/herdr-companion.log 2>&1 &
 ```
 
 Install + verify on the emulator via the harness, and on the phone:
@@ -1345,7 +1345,7 @@ adb -s emulator-5554 install -r "$APK"
 adb -s adb-R5CY32261JN-KB349E._adb-tls-connect._tcp install -r "$APK"
 ```
 
-Confirm by hand: open the drawer (hamburger or left edge-swipe) → the real tree renders (e.g. `omega3` with two tabs, `apollo`, `herdr-mobile`, a `⑂ ops` badge on any linked-worktree workspace); collapse/expand works; per-pane + rolled-up status track herdr (spinner on a working agent); the focused pane shows the accent marker; tapping an agent pane closes the drawer and opens its terminal; shell panes are dimmed and do nothing.
+Confirm by hand: open the drawer (hamburger or left edge-swipe) → the real tree renders (e.g. `omega3` with two tabs, `apollo`, `ChatKJB`, a `⑂ ops` badge on any linked-worktree workspace); collapse/expand works; per-pane + rolled-up status track herdr (spinner on a working agent); the focused pane shows the accent marker; tapping an agent pane closes the drawer and opens its terminal; shell panes are dimmed and do nothing.
 
 - [ ] **Step 6: Commit**
 
@@ -1358,5 +1358,5 @@ git commit -m "feat(app): Paseo-style sidebar drawer with workspace/tab/pane tre
 
 ## Post-implementation
 
-- Update `docs/superpowers/specs/2026-07-08-herdr-mobile-sidebar-design.md` status note if anything diverged.
+- Update `docs/superpowers/specs/2026-07-08-ChatKJB-sidebar-design.md` status note if anything diverged.
 - Update the memory file `the project design-notes memory` with: the sidebar drawer shipped, `workspace.list`/`tab.list` fields (labels + worktree), companionProtocol 3, and the collapse-set-holds-collapsed-ids convention.

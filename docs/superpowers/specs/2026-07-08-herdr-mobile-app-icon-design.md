@@ -1,4 +1,4 @@
-# herdr-mobile App Icon (Design)
+# ChatKJB App Icon (Design)
 
 **Date:** 2026-07-08
 **Status:** Approved (brainstorming)

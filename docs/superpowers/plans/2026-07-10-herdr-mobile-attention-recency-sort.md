@@ -17,9 +17,9 @@
 - Companion bumps `lastActivity[workspaceId] = now()` only on: pane **created**, pane **removed**, or an **agentStatus transition** — NOT focus/cwd-only changes.
 - `lastActivity` is an additive field on the workspaces frame — **no `companionProtocol` bump** (app has `Json { ignoreUnknownKeys = true }` + a default).
 - `buildTree` and the sidebar drawer stay number-ordered.
-- Companion tests: `go -C ~/herdr-mobile/companion test ./...`
+- Companion tests: `go -C ~/ChatKJB/companion test ./...`
 - App build: `cd app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug`; app tests: `:app:testDebugUnitTest`.
-- Paths are relative to repo root `~/herdr-mobile`.
+- Paths are relative to repo root `~/ChatKJB`.
 
 ---
 
@@ -44,7 +44,7 @@ func TestLastActivityTracking(t *testing.T) {
 
 	// created → bump
 	s.Apply(infos(herdr.PaneInfo{PaneID: "w6:p1", WorkspaceID: "w6", Agent: "claude", AgentStatus: "working"}))
-	s.ApplyWorkspaces([]herdr.WorkspaceInfo{{WorkspaceID: "w6", Label: "herdr-mobile", Number: 2}})
+	s.ApplyWorkspaces([]herdr.WorkspaceInfo{{WorkspaceID: "w6", Label: "ChatKJB", Number: 2}})
 	if got := s.Workspaces()[0].LastActivity; got != 1000 {
 		t.Fatalf("created should stamp lastActivity=1000, got %d", got)
 	}
@@ -52,7 +52,7 @@ func TestLastActivityTracking(t *testing.T) {
 	// focus-only change → NO bump
 	clock = 2000
 	s.Apply(infos(herdr.PaneInfo{PaneID: "w6:p1", WorkspaceID: "w6", Agent: "claude", AgentStatus: "working", Focused: true}))
-	s.ApplyWorkspaces([]herdr.WorkspaceInfo{{WorkspaceID: "w6", Label: "herdr-mobile", Number: 2}})
+	s.ApplyWorkspaces([]herdr.WorkspaceInfo{{WorkspaceID: "w6", Label: "ChatKJB", Number: 2}})
 	if got := s.Workspaces()[0].LastActivity; got != 1000 {
 		t.Fatalf("focus-only change must not bump, want 1000 got %d", got)
 	}
@@ -60,7 +60,7 @@ func TestLastActivityTracking(t *testing.T) {
 	// agentStatus transition → bump
 	clock = 3000
 	s.Apply(infos(herdr.PaneInfo{PaneID: "w6:p1", WorkspaceID: "w6", Agent: "claude", AgentStatus: "blocked", Focused: true}))
-	s.ApplyWorkspaces([]herdr.WorkspaceInfo{{WorkspaceID: "w6", Label: "herdr-mobile", Number: 2}})
+	s.ApplyWorkspaces([]herdr.WorkspaceInfo{{WorkspaceID: "w6", Label: "ChatKJB", Number: 2}})
 	if got := s.Workspaces()[0].LastActivity; got != 3000 {
 		t.Fatalf("transition should bump to 3000, got %d", got)
 	}
@@ -77,7 +77,7 @@ func TestApplyWorkspacesChangesWhenOnlyLastActivityChanges(t *testing.T) {
 	s := NewStore()
 	clock := int64(1000)
 	s.now = func() int64 { return clock }
-	ws := []herdr.WorkspaceInfo{{WorkspaceID: "w6", Label: "herdr-mobile", Number: 2}}
+	ws := []herdr.WorkspaceInfo{{WorkspaceID: "w6", Label: "ChatKJB", Number: 2}}
 
 	s.Apply(infos(herdr.PaneInfo{PaneID: "w6:p1", WorkspaceID: "w6", AgentStatus: "working"}))
 	if !s.ApplyWorkspaces(ws) {
@@ -94,7 +94,7 @@ func TestApplyWorkspacesChangesWhenOnlyLastActivityChanges(t *testing.T) {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go -C ~/herdr-mobile/companion test ./internal/state/ -run 'TestLastActivity|TestApplyWorkspacesChangesWhenOnlyLastActivity' -v`
+Run: `go -C ~/ChatKJB/companion test ./internal/state/ -run 'TestLastActivity|TestApplyWorkspacesChangesWhenOnlyLastActivity' -v`
 Expected: FAIL — `s.now` and `s.lastActivity` fields and `Workspace.LastActivity` don't exist (compile error).
 
 - [ ] **Step 3: Add the field, clock, and map**
@@ -204,18 +204,18 @@ func (s *Store) ApplyWorkspaces(infos []herdr.WorkspaceInfo) bool {
 
 - [ ] **Step 6: Run the state tests**
 
-Run: `go -C ~/herdr-mobile/companion test ./internal/state/ -v`
+Run: `go -C ~/ChatKJB/companion test ./internal/state/ -v`
 Expected: PASS — new tests plus the pre-existing store tests (the added struct field doesn't break `TestApplyWorkspacesAndTabsChangeDetection`, whose workspaces have `LastActivity` 0 on both sides).
 
 - [ ] **Step 7: Run the full companion suite**
 
-Run: `go -C ~/herdr-mobile/companion test ./...`
+Run: `go -C ~/ChatKJB/companion test ./...`
 Expected: PASS.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add companion/internal/state/store.go companion/internal/state/store_test.go
 git commit -m "feat(companion): track per-workspace lastActivity"
 ```
@@ -265,7 +265,7 @@ Add the needed import at the top of the file if missing: `import dev.herdr.mobil
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cd ~/herdr-mobile/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest --tests "dev.herdr.mobile.RepoTreeTest"`
+Run: `cd ~/ChatKJB/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest --tests "dev.herdr.mobile.RepoTreeTest"`
 Expected: FAIL — unresolved `attentionTier` / `workspaceTier` (and `Workspace(... )` has no `lastActivity` yet is fine; these tests don't set it).
 
 - [ ] **Step 3: Add the `lastActivity` field**
@@ -295,13 +295,13 @@ fun workspaceTier(node: WorkspaceNode): Int =
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cd ~/herdr-mobile/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest --tests "dev.herdr.mobile.RepoTreeTest"`
+Run: `cd ~/ChatKJB/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest --tests "dev.herdr.mobile.RepoTreeTest"`
 Expected: PASS for the two new tests. (The pre-existing `groupsSameRepoAndOrders` still passes here because `buildRepoTree` isn't changed yet — it's updated in Task 3.)
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add app/app/src/main/java/dev/herdr/mobile/net/Protocol.kt app/app/src/main/java/dev/herdr/mobile/ui/TreeModel.kt app/app/src/test/java/dev/herdr/mobile/RepoTreeTest.kt
 git commit -m "feat(app): Workspace.lastActivity + attention tier helpers"
 ```
@@ -361,7 +361,7 @@ Then add ordering tests (inside the class):
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cd ~/herdr-mobile/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest --tests "dev.herdr.mobile.RepoTreeTest"`
+Run: `cd ~/ChatKJB/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest --tests "dev.herdr.mobile.RepoTreeTest"`
 Expected: FAIL — `workspacesSortByTierThenActivity` and `reposSortByBestWorkspace` fail (current `buildRepoTree` sorts by number only), and the updated `groupsSameRepoAndOrders` assertion fails against the old input-order behavior.
 
 - [ ] **Step 3: Rewrite `buildRepoTree` to sort by attention/recency**
@@ -396,18 +396,18 @@ fun buildRepoTree(nodes: List<WorkspaceNode>): List<RepoNode> {
 
 - [ ] **Step 4: Run the RepoTree tests**
 
-Run: `cd ~/herdr-mobile/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest --tests "dev.herdr.mobile.RepoTreeTest"`
+Run: `cd ~/ChatKJB/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest --tests "dev.herdr.mobile.RepoTreeTest"`
 Expected: PASS — all RepoTreeTest cases including the updated `groupsSameRepoAndOrders` and the two new ordering tests.
 
 - [ ] **Step 5: Build + full unit suite**
 
-Run: `cd ~/herdr-mobile/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest`
+Run: `cd ~/ChatKJB/app && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug && ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:testDebugUnitTest`
 Expected: `BUILD SUCCESSFUL` for both. Note: if `CompanionClientTest`/`DashboardViewModelTest` fails with a MockWebServer/`withTimeout` teardown flake, re-run once (known load-only flake).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd ~/herdr-mobile
+cd ~/ChatKJB
 git add app/app/src/main/java/dev/herdr/mobile/ui/TreeModel.kt app/app/src/test/java/dev/herdr/mobile/RepoTreeTest.kt
 git commit -m "feat(app): sort dashboard by attention then recent activity"
 ```
