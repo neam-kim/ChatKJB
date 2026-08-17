@@ -50,7 +50,7 @@ systemd user service는 [`companion/deploy/README.md`](companion/deploy/README.m
 
 ### Android
 
-요구사항: JDK 17, Android SDK (compileSdk 36), Go 1.23+ (companion).
+요구사항: JDK 21, Android SDK (compileSdk 36), Go 1.23+ (companion).
 
 ```bash
 git clone --recurse-submodules https://github.com/neam-kim/ChatKJB.git
