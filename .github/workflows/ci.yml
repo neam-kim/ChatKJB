@@ -46,14 +46,13 @@ jobs:
         working-directory: companion
         run: go build ./...
 
-  # Disabled until the external KJBMail composite build is available to CI.
-  # Do not re-enable without supplying KJBMAIL_DIR or -Pkjbmail.dir.
   app:
-    if: ${{ false }}
-    name: App (Android, skipped: external KJBMail source unavailable)
+    name: App (Android)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - uses: actions/setup-java@v4
         with:

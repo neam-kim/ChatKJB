@@ -50,16 +50,16 @@ systemd user service는 [`companion/deploy/README.md`](companion/deploy/README.m
 
 ### Android
 
-요구사항: JDK 17, Android SDK (compileSdk 36), Go 1.23+ (companion). KJBMail 저장소를 별도로 준비하고 `KJBMAIL_DIR` 또는 Gradle property를 지정합니다.
+요구사항: JDK 17, Android SDK (compileSdk 36), Go 1.23+ (companion).
 
 ```bash
-# KJBMail/repo 또는 원하는 checkout 경로
-cd app
-KJBMAIL_DIR=/path/to/KJBMail/repo ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug
+git clone --recurse-submodules https://github.com/neam-kim/ChatKJB.git
+cd ChatKJB/app
+ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug
 # app/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-KJBMail 자동 탐색 후보는 `KJBMAIL_DIR`, `-Pkjbmail.dir=...`, 그리고 이 저장소의 형제 디렉터리 `../KJBMail/repo`입니다. 후보가 없으면 설정 단계에서 필요한 경로를 안내하는 오류가 납니다. 앱에서 companion 주소는 `ws://<private-address>:8787/`로 설정합니다.
+기존 clone은 `git submodule update --init --recursive`로 KJBMail을 가져오십시오. KJBMail은 [`neam-kim/KJBMail`](https://github.com/neam-kim/KJBMail)의 공개 source-only 저장소를 고정 커밋 `5082a97c66aa76d447ed8c5d4e5111db37cdb3ad`로 연결한 submodule이며, 기본 Gradle composite dependency로 사용됩니다. 다른 checkout을 사용하려면 `-Pkjbmail.dir=...` 또는 `KJBMAIL_DIR`로 명시할 수 있습니다. 앱에서 companion 주소는 `ws://<private-address>:8787/`로 설정합니다.
 
 ## 개발 및 검증
 

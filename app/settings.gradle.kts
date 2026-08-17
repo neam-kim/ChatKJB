@@ -25,9 +25,10 @@ rootProject.name = "ChatKJB"
 val kjbmailDir = sequenceOf(
     providers.gradleProperty("kjbmail.dir").orNull,
     System.getenv("KJBMAIL_DIR"),
-    file("../KJBMail/repo").takeIf { it.isDirectory }?.absolutePath,
-).filterNotNull().map(::File).firstOrNull { it.isDirectory }
-    ?: error("KJBMail source is required. Set -Pkjbmail.dir=/path/to/KJBMail/repo or KJBMAIL_DIR.")
+    file("../KJBMail").takeIf { it.isDirectory }?.absolutePath,
+    file("../../KJBMail/repo").takeIf { it.isDirectory }?.absolutePath,
+).filterNotNull().map(::File).firstOrNull { it.resolve("settings.gradle.kts").isFile }
+    ?: error("KJBMail source is required. Set -Pkjbmail.dir=/path/to/KJBMail, KJBMAIL_DIR, or initialize the KJBMail submodule.")
 
 includeBuild(kjbmailDir) {
     dependencySubstitution {
