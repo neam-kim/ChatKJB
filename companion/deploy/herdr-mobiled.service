@@ -5,6 +5,11 @@ After=network-online.target
 [Service]
 # Bind to your Tailscale IP so the API is reachable only on your tailnet.
 # Find it with: tailscale ip -4
+# systemd user units start with a minimal PATH that omits ~/.local/bin, so the
+# companion could not exec `herdr` for terminal attach. The daemon now resolves
+# an absolute path on its own; these keep the environment explicit anyway.
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+Environment=HERDR_BIN=%h/.local/bin/herdr
 ExecStart=%h/.local/bin/herdr-mobiled --listen %i:8787
 Restart=on-failure
 RestartSec=2

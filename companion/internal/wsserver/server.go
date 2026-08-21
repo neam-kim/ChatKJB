@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,9 +84,54 @@ func NewServer(auth Authorizer, rpc HerdrRPC) *Server {
 	// `terminal attach` streams ANY pane's PTY by terminal_id (agent or shell),
 	// unlike `agent attach` which only resolves agent panes.
 	srv.attachArgv = func(target string) []string {
-		return []string{"herdr", "terminal", "attach", target, "--takeover"}
+		return []string{HerdrBinary(), "terminal", "attach", target, "--takeover"}
 	}
 	return srv
+}
+
+// HerdrBinary resolves the herdr executable to run for `terminal attach`.
+//
+// The companion often runs from a launchd/systemd unit whose PATH is the bare
+// system default (`/usr/bin:/bin:/usr/sbin:/sbin`), which does not contain the
+// user-local install locations herdr normally lives in. Relying on a plain
+// "herdr" argv there fails with
+// `exec: "herdr": executable file not found in $PATH`, so resolve an absolute
+// path here and fall back to the bare name only when nothing is found.
+func HerdrBinary() string {
+	if v := strings.TrimSpace(os.Getenv("HERDR_BIN")); v != "" {
+		return v
+	}
+	if p, err := exec.LookPath("herdr"); err == nil {
+		return p
+	}
+	for _, dir := range herdrSearchDirs() {
+		cand := filepath.Join(dir, "herdr")
+		if isExecutableFile(cand) {
+			return cand
+		}
+	}
+	return "herdr"
+}
+
+// herdrSearchDirs lists the usual install locations, most specific first.
+func herdrSearchDirs() []string {
+	var dirs []string
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs,
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, ".cargo", "bin"),
+			filepath.Join(home, "bin"),
+		)
+	}
+	return append(dirs, "/opt/homebrew/bin", "/usr/local/bin")
+}
+
+func isExecutableFile(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	return fi.Mode()&0o111 != 0
 }
 
 func (s *Server) SetInitialSnapshot(fn func() []state.Pane)        { s.snapshot = fn }

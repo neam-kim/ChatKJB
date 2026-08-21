@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -292,7 +294,7 @@ func TestTermOpenMaxTermsCap(t *testing.T) {
 func TestDefaultAttachArgvUsesTerminalAttach(t *testing.T) {
 	s := NewServer(AllowAll{}, &stubRPC{})
 	got := s.attachArgv("term_abc")
-	want := []string{"herdr", "terminal", "attach", "term_abc", "--takeover"}
+	want := []string{HerdrBinary(), "terminal", "attach", "term_abc", "--takeover"}
 	if len(got) != len(want) {
 		t.Fatalf("argv len: got %v want %v", got, want)
 	}
@@ -300,6 +302,44 @@ func TestDefaultAttachArgvUsesTerminalAttach(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("argv[%d]: got %q want %q (full %v)", i, got[i], want[i], got)
 		}
+	}
+}
+
+// The companion runs under launchd/systemd with a bare system PATH that does
+// not include ~/.local/bin, so a plain "herdr" argv fails to exec. Guard the
+// absolute-path fallback that keeps terminal attach working there.
+func TestHerdrBinaryResolvesWithoutPath(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(bin, "herdr")
+	if err := os.WriteFile(want, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_BIN", "")
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	if got := HerdrBinary(); got != want {
+		t.Fatalf("HerdrBinary() = %q, want %q", got, want)
+	}
+}
+
+func TestHerdrBinaryPrefersEnvOverride(t *testing.T) {
+	t.Setenv("HERDR_BIN", "/custom/path/herdr")
+	if got := HerdrBinary(); got != "/custom/path/herdr" {
+		t.Fatalf("HerdrBinary() = %q, want the HERDR_BIN override", got)
+	}
+}
+
+func TestHerdrBinaryFallsBackToBareName(t *testing.T) {
+	t.Setenv("HERDR_BIN", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", "")
+	if got := HerdrBinary(); got != "herdr" && !filepath.IsAbs(got) {
+		t.Fatalf("HerdrBinary() = %q, want %q or an absolute path", got, "herdr")
 	}
 }
 

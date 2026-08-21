@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>net.neam.herdr-mobiled</string>
+
+  <!-- Bind to localhost and expose it over the tailnet with:
+       tailscale serve --bg --tcp 8787 tcp://127.0.0.1:8788 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/herdr-mobiled</string>
+    <string>--listen</string>
+    <string>127.0.0.1:8788</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>__HOME__</string>
+
+  <!-- launchd starts agents with a bare PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+       that omits ~/.local/bin, which broke `herdr terminal attach` with
+       exec: "herdr": executable file not found in $PATH.
+       herdr-mobiled now resolves an absolute path itself; these entries make
+       the environment explicit and let you point at a non-standard install. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__HOME__/.local/bin:__HOME__/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HERDR_BIN</key><string>__HOME__/.local/bin/herdr</string>
+  </dict>
+
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>/tmp/herdr-mobiled.log</string>
+  <key>StandardErrorPath</key><string>/tmp/herdr-mobiled.err</string>
+</dict>
+</plist>
+
